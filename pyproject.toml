@@ -1,0 +1,45 @@
+[project]
+name = "lethe"
+version = "0.1.0"
+description = "Autonomous executive assistant with Letta memory layer"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.24.0",
+    "letta-client>=1.1.0",
+    "aiosqlite>=0.22.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.12.0",
+    "httpx>=0.28.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+]
+browser = [
+    "playwright>=1.49.0",
+]
+
+[project.scripts]
+lethe = "lethe.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lethe"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
