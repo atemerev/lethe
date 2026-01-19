@@ -167,13 +167,20 @@ class HeartbeatWorker:
                 if not self._running:
                     break
 
-                logger.info("Sending heartbeat...")
+                # Get current local time
+                from datetime import datetime
+                now = datetime.now()
+                date_str = now.strftime("%A, %B %d, %Y")
+                time_str = now.strftime("%H:%M")
+                
+                logger.info(f"Sending heartbeat ({time_str})...")
 
                 messages_sent = []
                 
                 async def on_message(content: str):
-                    # Only forward meaningful content, not just acknowledgments
-                    if content and not content.lower().startswith("acknowledged"):
+                    # Only forward if agent has something meaningful to say
+                    # Agent should respond with [NO_NOTIFY] if nothing to report
+                    if content and "[NO_NOTIFY]" not in content:
                         messages_sent.append(content)
                         await self.telegram_bot.send_message(
                             chat_id=self.chat_id,
@@ -181,21 +188,27 @@ class HeartbeatWorker:
                         )
 
                 response = await self.agent_manager.send_message(
-                    message="""[HEARTBEAT]
+                    message=f"""[HEARTBEAT]
 
-This is a periodic check-in. Review your state:
-1. Check your memory for any pending tasks or reminders
-2. Consider if there's anything proactive you should do
-3. Update your task list if needed
+Current time: {time_str}
+Current date: {date_str}
 
-If you have something to report or a reminder for the principal, respond with it.
-If not, you can simply acknowledge with a brief status.""",
+This is a periodic check-in. You have access to conversation history and your memory.
+
+Review and decide if you should notify the user about anything:
+- Upcoming calendar events or deadlines
+- Pending reminders or tasks that are due
+- Important follow-ups from previous conversations
+- Anything time-sensitive the user should know
+
+IMPORTANT: Only send a message if you have something genuinely useful to tell the user.
+If there's nothing to report, respond with just "[NO_NOTIFY]" and nothing else.""",
                     on_message=on_message,
                 )
 
                 # Log if nothing meaningful was sent
                 if not messages_sent:
-                    logger.info("Heartbeat: agent acknowledged, nothing to report")
+                    logger.info("Heartbeat: nothing to notify")
 
             except asyncio.CancelledError:
                 break
