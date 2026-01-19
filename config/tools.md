@@ -117,6 +117,43 @@ Browser tools for web automation. Uses Steel Browser + Playwright with persisten
 | `browser_wait_for(selector or text)` | Wait for element to appear |
 | `browser_close()` | Release browser session |
 
+## Telegram Tools
+
+Tools for sending files and media directly to the current Telegram chat.
+
+### telegram_send_file
+
+Send images, documents, or other files to the user.
+
+```
+telegram_send_file(file_path_or_url, caption="", as_document=False)
+```
+
+**Arguments:**
+- `file_path_or_url`: Local file path or URL
+  - Local: `/tmp/chart.png`, `~/documents/report.pdf`
+  - URL: `https://example.com/image.jpg`
+- `caption`: Optional text caption
+- `as_document`: If True, send as document (preserves original quality for images)
+
+**Auto-detection by extension:**
+- Images (jpg, png, gif, webp) → sent as photos
+- Videos (mp4, mov, mkv) → sent as videos
+- Audio (mp3, ogg, wav) → sent as audio
+- Other → sent as documents
+
+**Examples:**
+```python
+# Send a local image
+telegram_send_file("/tmp/screenshot.png", caption="Here's the screenshot")
+
+# Send from URL
+telegram_send_file("https://example.com/chart.png")
+
+# Force document mode (higher quality, shows filename)
+telegram_send_file("/tmp/photo.jpg", as_document=True)
+```
+
 ---
 
 *Add more tools here as they're installed or discovered.*

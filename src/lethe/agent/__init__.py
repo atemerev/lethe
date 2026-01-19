@@ -137,8 +137,8 @@ class AgentManager:
             logger.info(f"Found existing agent: {self._agent_id}")
             # Clear any stale pending approvals from previous sessions
             await self.clear_pending_approvals(self._agent_id)
-            # Still need to set up tool handlers
-            self._setup_tool_handlers()
+            # Sync tools - attach any missing tools
+            await self._sync_agent_tools(self._agent_id)
             return self._agent_id
 
         # Create new agent
@@ -280,6 +280,13 @@ I'll update this as I learn about my principal's current projects and priorities
             logger.info("Async browser tools registered")
         except ImportError as e:
             logger.warning(f"Browser tools not available: {e}")
+        
+        # Add Telegram tools
+        from lethe.tools import telegram_tools
+        self._tool_handlers.update({
+            "telegram_send_file": telegram_tools.telegram_send_file_async,
+        })
+        logger.info("Telegram tools registered")
 
     async def _register_tools(self) -> list[str]:
         """Register client-side tools with Letta. Returns list of tool names."""
@@ -423,20 +430,7 @@ I'll update this as I learn about my principal's current projects and priorities
             """
             raise Exception("Client-side execution required")
 
-        # Browser tools for web automation
-        def browser_start(profile: str = "", use_proxy: bool = False, solve_captcha: bool = False) -> str:
-            """Start a browser session with optional profile for persistent auth.
-            
-            Args:
-                profile: Profile name to use/create (e.g., "linkedin"). Persists cookies and auth.
-                use_proxy: Whether to use Steel's proxy (helps avoid detection)
-                solve_captcha: Whether to enable automatic CAPTCHA solving
-            
-            Returns:
-                JSON with session info including session_id and profile status
-            """
-            raise Exception("Client-side execution required")
-        
+        # Browser tools for web automation (sessions auto-create on first use)
         def browser_navigate(url: str, wait_until: str = "domcontentloaded") -> str:
             """Navigate the browser to a URL.
             
@@ -558,6 +552,26 @@ I'll update this as I learn about my principal's current projects and priorities
             """
             raise Exception("Client-side execution required")
         
+        # Telegram tools
+        def telegram_send_file(file_path_or_url: str, caption: str = "", as_document: bool = False) -> str:
+            """Send a file or image to the current Telegram chat.
+            
+            Supports local files and URLs. Auto-detects type by extension:
+            - Images (jpg, png, gif, webp): sent as photos
+            - Videos (mp4, mov): sent as videos
+            - Audio (mp3, ogg): sent as audio
+            - Other: sent as documents
+            
+            Args:
+                file_path_or_url: Local file path or URL to send
+                caption: Optional caption for the file
+                as_document: If True, send as document even if it's an image
+            
+            Returns:
+                JSON with success status and message details
+            """
+            raise Exception("Client-side execution required")
+        
         stub_functions = [
             bash,
             bash_output,
@@ -571,7 +585,6 @@ I'll update this as I learn about my principal's current projects and priorities
             glob_search,
             grep_search,
             # Browser tools
-            browser_start,
             browser_navigate,
             browser_get_context,
             browser_get_text,
@@ -582,6 +595,8 @@ I'll update this as I learn about my principal's current projects and priorities
             browser_extract_text,
             browser_scroll,
             browser_close,
+            # Telegram tools
+            telegram_send_file,
         ]
 
         for func in stub_functions:
@@ -596,6 +611,63 @@ I'll update this as I learn about my principal's current projects and priorities
                 logger.warning(f"Could not register tool {func.__name__}: {e}")
 
         return tool_names
+
+    async def _sync_agent_tools(self, agent_id: str) -> None:
+        """Sync tools with an existing agent - attach missing, optionally detach removed.
+        
+        Called on startup to ensure agent has all current tools.
+        """
+        # First, register all tools with Letta (upsert ensures they exist)
+        expected_tool_names = await self._register_tools()
+        
+        # Add built-in Letta tools
+        builtin_tools = [
+            "web_search",
+            "fetch_webpage", 
+            "archival_memory_insert",
+            "archival_memory_search",
+        ]
+        expected_tool_names.extend(builtin_tools)
+        
+        # Get agent's current tools
+        agent = await self.client.agents.retrieve(agent_id)
+        current_tool_names = [t.name for t in agent.tools]
+        
+        # Find missing tools
+        missing_tools = set(expected_tool_names) - set(current_tool_names)
+        
+        if not missing_tools:
+            logger.info("All tools already attached to agent")
+            return
+        
+        logger.info(f"Syncing {len(missing_tools)} missing tools: {missing_tools}")
+        
+        # Get tool IDs for missing tools
+        # List all tools and filter by name
+        all_tools = []
+        tools_response = await self.client.tools.list()
+        if hasattr(tools_response, '__aiter__'):
+            async for tool in tools_response:
+                all_tools.append(tool)
+        else:
+            all_tools = list(tools_response)
+        
+        tool_id_map = {t.name: t.id for t in all_tools}
+        
+        # Attach missing tools
+        for tool_name in missing_tools:
+            tool_id = tool_id_map.get(tool_name)
+            if tool_id:
+                try:
+                    await self.client.agents.tools.attach(
+                        agent_id=agent_id,
+                        tool_id=tool_id,
+                    )
+                    logger.info(f"  Attached: {tool_name}")
+                except Exception as e:
+                    logger.warning(f"  Failed to attach {tool_name}: {e}")
+            else:
+                logger.warning(f"  Tool not found in registry: {tool_name}")
 
     async def _recover_from_pending_approval(self, agent_id: str, original_messages: list, error_str: str = ""):
         """Recover from a stuck pending approval state by denying it and retrying."""

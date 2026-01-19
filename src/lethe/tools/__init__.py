@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 # Import all tool modules
-from lethe.tools import filesystem, cli
+from lethe.tools import filesystem, cli, telegram_tools
 
 # Conditionally import browser tools if dependencies are available
 _browser_available = False
@@ -35,7 +35,7 @@ def get_all_tools(include_browser: bool = True) -> list[dict[str, Any]]:
     tools = []
     
     # Core tool modules
-    modules = [filesystem, cli]
+    modules = [filesystem, cli, telegram_tools]
     
     # Add browser module if available and requested
     if include_browser and _browser_available and browser is not None:
