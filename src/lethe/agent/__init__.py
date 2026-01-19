@@ -302,6 +302,16 @@ I'll update this as I learn about my principal's current projects and priorities
             "telegram_send_file": telegram_tools.telegram_send_file_async,
         })
         logger.info("Telegram tools registered")
+        
+        # Add Task management tools
+        from lethe.tasks import tools as task_tools
+        self._tool_handlers.update({
+            "spawn_task": task_tools.spawn_task_async,
+            "get_tasks": task_tools.get_tasks_async,
+            "get_task_status": task_tools.get_task_status_async,
+            "cancel_task": task_tools.cancel_task_async,
+        })
+        logger.info("Task management tools registered")
 
     async def _register_tools(self) -> list[str]:
         """Register client-side tools with Letta. Returns list of tool names."""
@@ -602,6 +612,67 @@ I'll update this as I learn about my principal's current projects and priorities
             """
             raise Exception("Client-side execution required")
         
+        # Task management tools
+        def spawn_task(description: str, mode: str = "worker", priority: str = "normal") -> str:
+            """Spawn a background task to work on something while you continue chatting.
+            
+            Use this when asked to do something that takes time (research, analysis, etc.).
+            The task runs in the background while you remain responsive to the user.
+            
+            Execution modes:
+            - "worker": Simple local execution with tools (fast, lightweight)
+            - "subagent": Spawn a full Letta subagent (has memory, more capable)
+            - "background": Run on your own context in background mode
+            
+            Args:
+                description: Detailed description of what the task should accomplish
+                mode: Execution mode - "worker", "subagent", or "background"
+                priority: Task priority - "low", "normal", "high", or "urgent"
+            
+            Returns:
+                JSON with task_id to track progress
+            """
+            raise Exception("Client-side execution required")
+        
+        def get_tasks(status: str = "", limit: int = 10) -> str:
+            """Get a list of background tasks.
+            
+            Use this to check what tasks are pending, running, or completed.
+            
+            Args:
+                status: Filter by status - "pending", "running", "completed", "failed", "cancelled", or "" for all
+                limit: Maximum number of tasks to return (default 10)
+            
+            Returns:
+                JSON with list of tasks and statistics
+            """
+            raise Exception("Client-side execution required")
+        
+        def get_task_status(task_id: str) -> str:
+            """Get detailed status of a specific task.
+            
+            Args:
+                task_id: The task ID to check
+            
+            Returns:
+                JSON with detailed task info including progress and events
+            """
+            raise Exception("Client-side execution required")
+        
+        def cancel_task(task_id: str) -> str:
+            """Cancel a pending or running task.
+            
+            Pending tasks are cancelled immediately.
+            Running tasks will stop at the next checkpoint.
+            
+            Args:
+                task_id: The task ID to cancel
+            
+            Returns:
+                JSON with cancellation result
+            """
+            raise Exception("Client-side execution required")
+        
         stub_functions = [
             bash,
             bash_output,
@@ -628,6 +699,11 @@ I'll update this as I learn about my principal's current projects and priorities
             # Telegram tools
             telegram_send_message,
             telegram_send_file,
+            # Task management tools
+            spawn_task,
+            get_tasks,
+            get_task_status,
+            cancel_task,
         ]
 
         for func in stub_functions:

@@ -11,6 +11,11 @@ from lethe.config import Settings, get_settings
 from lethe.queue import TaskQueue
 from lethe.telegram import TelegramBot
 from lethe.tools.telegram_tools import set_telegram_context, clear_telegram_context
+from lethe.tasks.tools import set_task_context, clear_task_context
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lethe.tasks import TaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +28,13 @@ class Worker:
         task_queue: TaskQueue,
         agent_manager: AgentManager,
         telegram_bot: TelegramBot,
+        task_manager: Optional["TaskManager"] = None,
         settings: Optional[Settings] = None,
     ):
         self.task_queue = task_queue
         self.agent_manager = agent_manager
         self.telegram_bot = telegram_bot
+        self.task_manager = task_manager  # For background task tools
         self.settings = settings or get_settings()
         self._running = False
 
@@ -52,6 +59,10 @@ class Worker:
                 try:
                     # Set Telegram context for tools that need to send files
                     set_telegram_context(self.telegram_bot.bot, task.chat_id)
+                    
+                    # Set task manager context for background task tools
+                    if self.task_manager:
+                        set_task_context(self.task_manager)
                     
                     # Track messages sent for this task
                     messages_sent = []
@@ -100,8 +111,9 @@ class Worker:
                         text=f"❌ Task failed: {e}",
                     )
                 finally:
-                    # Clear Telegram context
+                    # Clear contexts
                     clear_telegram_context()
+                    clear_task_context()
 
             except asyncio.CancelledError:
                 logger.info("Worker cancelled")
