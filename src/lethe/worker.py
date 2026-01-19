@@ -193,12 +193,18 @@ class HeartbeatWorker:
 Current time: {time_str}
 Current date: {date_str}
 
-This is a periodic check-in. You have access to conversation history and your memory.
+This is a periodic check-in. Review your state:
 
-Review and decide if you should notify the user about anything:
+1. Check your MEMORY BLOCKS for any pending tasks, reminders, or notes
+2. Check your TASK LIST for items that may be due or need follow-up
+3. Use CALENDAR TOOLS if available to check upcoming events
+4. Review recent CONVERSATION HISTORY for anything you promised to follow up on
+5. Consider if there's anything PROACTIVE you should do or remind the user about
+
+Based on your review, decide if you should notify the user:
 - Upcoming calendar events or deadlines
-- Pending reminders or tasks that are due
-- Important follow-ups from previous conversations
+- Reminders or tasks that are due now
+- Important follow-ups from previous conversations  
 - Anything time-sensitive the user should know
 
 IMPORTANT: Only send a message if you have something genuinely useful to tell the user.
