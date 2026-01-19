@@ -33,90 +33,102 @@ class AgentManager:
                 self._client = AsyncLetta(base_url=self.settings.letta_base_url)
         return self._client
 
-    async def clear_pending_approvals(self, agent_id: str) -> bool:
+    async def clear_pending_approvals(self, agent_id: str, max_iterations: int = 5) -> bool:
         """Clear any pending approval requests from previous sessions.
         
         Should be called on startup to avoid 409 PENDING_APPROVAL errors.
         Uses agent.message_ids to find the last in-context message (source of truth).
+        
+        Loops until no more pending approvals exist (agent may create new tool calls
+        in response to denied approvals).
+        
         Returns True if any pending approvals were cleared.
         """
-        try:
-            # Get agent state to access message_ids (source of truth for pending approvals)
-            agent = await self.client.agents.retrieve(agent_id)
-            message_ids = getattr(agent, "message_ids", None) or []
-            
-            if not message_ids:
-                return False
-            
-            # The LAST message in message_ids is the current state
-            last_message_id = message_ids[-1]
-            
-            # Retrieve that message to check if it's an approval request
-            retrieved_messages = await self.client.messages.retrieve(last_message_id)
-            
-            # Find approval_request_message if it exists
-            approval_msg = None
-            if isinstance(retrieved_messages, list):
-                for msg in retrieved_messages:
-                    if getattr(msg, "message_type", None) == "approval_request_message":
-                        approval_msg = msg
-                        break
-            elif getattr(retrieved_messages, "message_type", None) == "approval_request_message":
-                approval_msg = retrieved_messages
-            
-            if not approval_msg:
-                return False
-            
-            # Extract tool_call_ids from the approval request
-            tool_call_ids = []
-            
-            # Try tool_calls array first (newer API)
-            tool_calls = getattr(approval_msg, "tool_calls", None) or []
-            for tc in tool_calls:
-                tc_id = getattr(tc, "tool_call_id", None)
-                if tc_id:
-                    tool_call_ids.append(tc_id)
-            
-            # Fall back to single tool_call (older API)
-            if not tool_call_ids:
-                tool_call = getattr(approval_msg, "tool_call", None)
-                if tool_call:
-                    tc_id = getattr(tool_call, "tool_call_id", None)
+        cleared_any = False
+        
+        for iteration in range(max_iterations):
+            try:
+                # Get agent state to access message_ids (source of truth for pending approvals)
+                agent = await self.client.agents.retrieve(agent_id)
+                message_ids = getattr(agent, "message_ids", None) or []
+                
+                if not message_ids:
+                    break
+                
+                # The LAST message in message_ids is the current state
+                last_message_id = message_ids[-1]
+                
+                # Retrieve that message to check if it's an approval request
+                retrieved_messages = await self.client.messages.retrieve(last_message_id)
+                
+                # Find approval_request_message if it exists
+                approval_msg = None
+                if isinstance(retrieved_messages, list):
+                    for msg in retrieved_messages:
+                        if getattr(msg, "message_type", None) == "approval_request_message":
+                            approval_msg = msg
+                            break
+                elif getattr(retrieved_messages, "message_type", None) == "approval_request_message":
+                    approval_msg = retrieved_messages
+                
+                if not approval_msg:
+                    # No more pending approvals
+                    break
+                
+                # Extract tool_call_ids from the approval request
+                tool_call_ids = []
+                
+                # Try tool_calls array first (newer API)
+                tool_calls = getattr(approval_msg, "tool_calls", None) or []
+                for tc in tool_calls:
+                    tc_id = getattr(tc, "tool_call_id", None)
                     if tc_id:
                         tool_call_ids.append(tc_id)
-            
-            if not tool_call_ids:
-                return False
-            
-            logger.info(f"Found {len(tool_call_ids)} pending approval(s), clearing...")
-            
-            # Deny all pending approvals
-            approvals = [
-                {
-                    "type": "approval",
-                    "tool_call_id": tc_id,
-                    "approve": False,
-                    "reason": "Stale request from previous session - auto-cleared on startup",
-                }
-                for tc_id in tool_call_ids
-            ]
-            
-            await self.client.agents.messages.create(
-                agent_id=agent_id,
-                messages=[{
-                    "type": "approval",
-                    "approvals": approvals,
-                }],
-            )
-            
-            for tc_id in tool_call_ids:
-                logger.info(f"  Cleared: {tc_id}")
-            
-            return True
-            
-        except Exception as e:
-            logger.warning(f"Error clearing pending approvals: {e}")
-            return False
+                
+                # Fall back to single tool_call (older API)
+                if not tool_call_ids:
+                    tool_call = getattr(approval_msg, "tool_call", None)
+                    if tool_call:
+                        tc_id = getattr(tool_call, "tool_call_id", None)
+                        if tc_id:
+                            tool_call_ids.append(tc_id)
+                
+                if not tool_call_ids:
+                    break
+                
+                logger.info(f"Found {len(tool_call_ids)} pending approval(s), clearing... (iteration {iteration + 1})")
+                
+                # Deny all pending approvals
+                approvals = [
+                    {
+                        "type": "approval",
+                        "tool_call_id": tc_id,
+                        "approve": False,
+                        "reason": "Stale request from previous session - auto-cleared on startup",
+                    }
+                    for tc_id in tool_call_ids
+                ]
+                
+                await self.client.agents.messages.create(
+                    agent_id=agent_id,
+                    messages=[{
+                        "type": "approval",
+                        "approvals": approvals,
+                    }],
+                )
+                
+                for tc_id in tool_call_ids:
+                    logger.info(f"  Cleared: {tc_id}")
+                
+                cleared_any = True
+                
+                # Continue loop to check if agent created new pending approvals
+                
+            except Exception as e:
+                logger.warning(f"Error clearing pending approvals (iteration {iteration + 1}): {e}")
+                break
+        
+        return cleared_any
 
     async def get_or_create_agent(self) -> str:
         """Get existing agent or create a new one. Returns agent ID."""
