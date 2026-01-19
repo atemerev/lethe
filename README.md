@@ -117,16 +117,24 @@ The agent has access to:
 - `bash` - Execute shell commands with timeout support
 - `bash_output` - Get output from background processes
 - `kill_bash` - Terminate background processes
+- `get_environment_info` - Get system/environment info
+- `check_command_exists` - Check if a command is available
 
 ### Browser (requires Steel)
 - `browser_navigate` - Navigate to a URL
 - `browser_get_context` - Get page context (accessibility tree, token-efficient)
+- `browser_get_text` - Get all visible text from page
 - `browser_click` - Click elements by selector or text
 - `browser_fill` - Fill input fields
-- `browser_extract_text` - Extract text from page or element
+- `browser_extract_text` - Extract text from specific element
 - `browser_screenshot` - Take screenshots
+- `browser_scroll` - Scroll the page
 - `browser_wait_for` - Wait for elements to appear
 - `browser_close` - Close browser session
+
+### Telegram
+- `telegram_send_message` - Send additional message to user
+- `telegram_send_file` - Send file to user
 
 ## Browser Setup (Steel)
 
