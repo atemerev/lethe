@@ -122,7 +122,7 @@ class HippocampusManager:
                         part.get("text", "") for part in content 
                         if isinstance(part, dict) and part.get("type") == "text"
                     )
-                context_lines.append(f"{role}: {content[:200]}")  # Truncate long messages
+                context_lines.append(f"{role}: {content}")
             
             context = "\n".join(context_lines) if context_lines else "(no previous messages)"
             
