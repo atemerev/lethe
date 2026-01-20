@@ -197,35 +197,49 @@ Respond with JSON only."""
         results = []
         
         try:
-            # Search archival memory
+            # Search archival memory (passages)
             archival_results = await self.client.agents.passages.search(
                 agent_id=main_agent_id,
                 query=query,
                 top_k=max_results,
             )
             
-            if archival_results:
-                for passage in archival_results[:max_results]:
-                    content = passage.content[:300] if len(passage.content) > 300 else passage.content
-                    results.append(f"[Archival] {content}")
+            # Handle async iterator or list
+            passages = []
+            if hasattr(archival_results, '__aiter__'):
+                async for p in archival_results:
+                    passages.append(p)
+            elif archival_results:
+                passages = list(archival_results)
+            
+            for passage in passages[:max_results]:
+                content = passage.content[:300] if len(passage.content) > 300 else passage.content
+                results.append(f"[Archival] {content}")
                     
         except Exception as e:
             logger.warning(f"Archival search failed: {e}")
 
         try:
-            # Search conversation history
-            conv_results = await self.client.agents.messages.search(
-                agent_id=main_agent_id,
+            # Search conversation history using organization-wide search with agent filter
+            conv_results = await self.client.messages.search(
                 query=query,
+                agent_id=main_agent_id,
                 limit=max_results,
             )
             
-            if conv_results:
-                for msg in conv_results[:max_results]:
-                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    content = content[:300] if len(content) > 300 else content
-                    role = getattr(msg, 'message_type', 'message').replace('_message', '')
-                    results.append(f"[{role}] {content}")
+            # Handle async iterator or list  
+            messages = []
+            if hasattr(conv_results, '__aiter__'):
+                async for m in conv_results:
+                    messages.append(m)
+            elif conv_results:
+                messages = list(conv_results)
+            
+            for msg in messages[:max_results]:
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                content = content[:300] if len(content) > 300 else content
+                role = getattr(msg, 'message_type', 'message').replace('_message', '')
+                results.append(f"[{role}] {content}")
                     
         except Exception as e:
             logger.warning(f"Conversation search failed: {e}")
