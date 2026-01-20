@@ -185,7 +185,7 @@ JSON only:"""
         self,
         main_agent_id: str,
         query: str,
-        max_results: int = 3,
+        max_results: int = 5,
     ) -> str:
         """Search the main agent's archival and conversation memory.
         
@@ -216,8 +216,7 @@ JSON only:"""
                 passages = list(archival_results)
             
             for passage in passages[:max_results]:
-                content = passage.content[:300] if len(passage.content) > 300 else passage.content
-                results.append(f"[Archival] {content}")
+                results.append(f"[Archival] {passage.content}")
                     
         except Exception as e:
             logger.warning(f"Archival search failed: {e}")
@@ -240,7 +239,6 @@ JSON only:"""
             
             for msg in messages[:max_results]:
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                content = content[:300] if len(content) > 300 else content
                 role = getattr(msg, 'message_type', 'message').replace('_message', '')
                 results.append(f"[{role}] {content}")
                     
@@ -249,8 +247,60 @@ JSON only:"""
 
         if not results:
             return ""
+        
+        combined = "\n\n".join(results)
+        
+        # If results are too long, compress via hippocampus
+        if len(combined) > 3000:
+            combined = await self._compress_memories(combined, query)
             
-        return "\n".join(results)
+        return combined
+
+    async def _compress_memories(self, memories: str, query: str) -> str:
+        """Compress long memory results using hippocampus agent.
+        
+        Args:
+            memories: The full memory text to compress
+            query: The original search query for context
+            
+        Returns:
+            Compressed summary of the memories
+        """
+        try:
+            agent_id = await self.get_or_create_agent()
+            
+            prompt = f"""The following memories were retrieved for the query "{query}".
+They are too long to include in full. Summarize the key relevant information concisely.
+Preserve important facts, names, dates, and context. Do not add information that isn't present.
+
+MEMORIES:
+{memories}
+
+SUMMARY (be concise but preserve key details):"""
+
+            response = await self.client.agents.messages.create(
+                agent_id=agent_id,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            # Extract response text
+            for msg in response.messages:
+                if hasattr(msg, 'message_type') and msg.message_type == 'assistant_message':
+                    content = msg.content
+                    if isinstance(content, str):
+                        return f"[Compressed summary] {content}"
+                    elif isinstance(content, list):
+                        for part in content:
+                            if hasattr(part, 'text'):
+                                return f"[Compressed summary] {part.text}"
+            
+            # Fallback - return original if compression failed
+            logger.warning("Memory compression returned no response, using original")
+            return memories
+            
+        except Exception as e:
+            logger.warning(f"Memory compression failed: {e}")
+            return memories
 
     async def augment_message(
         self,
