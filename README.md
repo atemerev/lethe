@@ -292,7 +292,7 @@ User Message → Hippocampus (haiku) → Memory Search → Augmented Message →
 **Configuration:**
 ```bash
 HIPPOCAMPUS_ENABLED=true                              # Enable/disable
-HIPPOCAMPUS_MODEL=anthropic/claude-3-haiku-20240307   # Cheap/fast model
+HIPPOCAMPUS_MODEL=anthropic/claude-haiku-4-5-20251015 # Cheap/fast model
 HIPPOCAMPUS_AGENT_NAME=lethe-hippocampus              # Agent name in Letta
 ```
 

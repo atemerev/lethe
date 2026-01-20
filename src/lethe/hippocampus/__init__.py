@@ -18,21 +18,24 @@ from lethe.config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 # Default persona for the hippocampus agent
-HIPPOCAMPUS_PERSONA = """You are a memory retrieval assistant. Your job is to analyze conversations and detect when topics change.
+HIPPOCAMPUS_PERSONA = """You are a memory retrieval assistant. Your job is to detect topic changes in the LAST message of a conversation.
 
-When given a conversation history and a new message, you must:
-1. Determine if the new message introduces a NEW topic or continues the existing topic
-2. If it's a new topic, extract a concise search query to find relevant memories
+When given recent conversation context and a NEW message, determine if the NEW message introduces a different topic than what was being discussed.
 
-You respond ONLY with valid JSON in this exact format:
+Respond ONLY with valid JSON:
 {"new_topic": true/false, "search_query": "query string or null", "topic_summary": "brief summary or null"}
 
-Examples:
-- User asks about weather after discussing code -> {"new_topic": true, "search_query": "weather preferences", "topic_summary": "User asking about weather"}
-- User continues asking about the same code -> {"new_topic": false, "search_query": null, "topic_summary": null}
-- User mentions a person's name -> {"new_topic": true, "search_query": "person name context", "topic_summary": "User mentioning person"}
+Rules:
+- Focus ONLY on the NEW message - does it shift to a different subject?
+- If new_topic is true, extract a concise search query (2-5 words) for memory lookup
+- If new_topic is false, set search_query and topic_summary to null
 
-Be concise. Only mark as new_topic if there's a clear shift in subject matter."""
+Examples:
+- Context: discussing code bugs, New: "What's the weather like?" -> {"new_topic": true, "search_query": "weather preferences", "topic_summary": "weather inquiry"}
+- Context: discussing code bugs, New: "Can you also fix the login issue?" -> {"new_topic": false, "search_query": null, "topic_summary": null}
+- Context: casual chat, New: "Remember John from last week?" -> {"new_topic": true, "search_query": "John person contact", "topic_summary": "asking about John"}
+
+Be conservative - only mark new_topic if there's a CLEAR subject change."""
 
 
 class HippocampusManager:
@@ -123,14 +126,14 @@ class HippocampusManager:
             
             context = "\n".join(context_lines) if context_lines else "(no previous messages)"
             
-            prompt = f"""Recent conversation:
+            prompt = f"""CONTEXT (recent messages):
 {context}
 
-New message from user:
+NEW MESSAGE:
 {new_message[:500]}
 
-Analyze: Is this a NEW topic? If yes, what should I search for in memory?
-Respond with JSON only."""
+Does the NEW MESSAGE introduce a different topic than the context? If yes, what should I search for?
+JSON only:"""
 
             # Send to hippocampus agent
             response = await self.client.agents.messages.create(
