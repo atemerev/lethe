@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     lethe_agent_name: str = Field(default="lethe", description="Agent name")
     lethe_agent_model: str = Field(default="letta/letta-free", description="Model handle (e.g., letta/letta-free, anthropic/claude-sonnet-4-20250514)")
     lethe_config_dir: Path = Field(default=Path("./config"), description="Config directory")
+    workspace_dir: Path = Field(default=Path("./workspace"), description="Agent workspace directory for organized file work")
 
     # Hippocampus (memory retrieval subagent)
     hippocampus_enabled: bool = Field(default=True, description="Enable hippocampus memory retrieval")
