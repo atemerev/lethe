@@ -1096,9 +1096,26 @@ I'll update this as I learn about my principal's current projects and priorities
                     content = getattr(msg, "content", None)
                     if content:
                         logger.info(f"  Assistant content ({len(content)} chars)")
-                        result_parts.append(content)
-                        current_iteration_response = content  # Track current iteration's response
+                        current_iteration_response = content
                         current_iteration_has_response = True
+                        
+                        # Filter out "nothing to do" responses from continuation prompts
+                        content_lower = content.lower()
+                        is_empty_continuation = (
+                            continuation_count > 0 and 
+                            len(content) < 200 and
+                            any(phrase in content_lower for phrase in [
+                                "no further action", "no action available", "nothing to do",
+                                "nothing further", "no additional", "task is complete",
+                                "already complete", "nothing more", "no more action",
+                            ])
+                        )
+                        
+                        if is_empty_continuation:
+                            logger.info("  Filtered empty continuation response")
+                            continue  # Don't send or accumulate this response
+                        
+                        result_parts.append(content)
                         # Send message immediately via callback if provided
                         if on_message:
                             try:
