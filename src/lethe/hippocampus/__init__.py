@@ -397,14 +397,11 @@ IS_CONTINUATION_RESPONSE: {is_continuation}
 Judge this response:
 
 1. SEND_TO_USER: Should this response be shown to the user?
-   - YES if: contains substantive information the user asked for (results, findings, answers)
-   - NO if: 
-     * Just confirming an action was taken ("I've done X", "I've set Y", "reminder created")
-     * Internal reflection or thinking out loud
-     * Meta-commentary about the task ("I'll do this", "working on it")
-     * Acknowledgments without new information
-   
-   Be STRICT - only send responses with actual content the user needs to see.
+   - YES if: agent is talking TO the user (direct address, "you", "your", answers, confirmations)
+   - NO if: agent is talking ABOUT the user in third person (using their name instead of "you") - this is internal reflection that leaked
+   - NO if: meta-commentary about the task itself, thinking out loud
+
+   Key test: Is the agent addressing the user directly, or thinking to itself?
 
 2. CONTINUE_TASK: Should the agent continue working?
    - YES if: agent expressed clear intent to do more, task obviously incomplete
