@@ -238,16 +238,16 @@ def grep_search(pattern: str, path: str = ".", file_pattern: str = "*") -> str:
                             results.append(f"{rel_path}:{line_num}: {line.rstrip()}")
                             matches_found += 1
 
-                            if matches_found >= 100:
+                            if matches_found >= 200:
                                 break
             except Exception:
                 continue
 
-            if matches_found >= 100:
+            if matches_found >= 200:
                 break
 
         header = f"Found {matches_found} matches in {files_searched} files"
-        if matches_found >= 100:
+        if matches_found >= 200:
             header += " (limit reached)"
 
         return header + "\n" + "\n".join(results) if results else f"No matches for '{pattern}' in {base_path}"
