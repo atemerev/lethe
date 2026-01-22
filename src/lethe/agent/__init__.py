@@ -1073,6 +1073,12 @@ I'll update this as I learn about my principal's current projects and priorities
                     # Send a continuation prompt instead of breaking
                     messages = [{"role": "user", "content": "[SYSTEM] Continue with the task."}]
                     continue
+                elif "Invalid tool call IDs" in error_str:
+                    # Race condition: tool call ID changed while we were executing locally
+                    # Agent created a new tool call before we could submit results
+                    logger.warning("Tool call ID mismatch (race condition), prompting continuation...")
+                    messages = [{"role": "user", "content": "[SYSTEM] Continue with the task."}]
+                    continue
                 else:
                     raise
             
