@@ -21,20 +21,21 @@ Build a **fully autonomous, personified AI assistant** that:
 - ⚡ **Operates 24/7** - Always available, processes tasks asynchronously in the background
 - 😈 **A little scary to operate** - Full system access, relentless self-improvement, YOLO
 
-## Comparison: Lethe vs clawd.bot
+## Comparison: Lethe vs Clawd
 
-Both Lethe and [clawd.bot](https://clawd.bot) are autonomous AI assistants, but differ in how they handle memory and context.
+Both Lethe and [Clawd](https://clawd.bot) are autonomous AI assistants, but differ in how they handle memory and context.
 
 ### Key Differences
 
-| Feature | Lethe | clawd.bot |
-|---------|-------|-----------|
+| Feature | Lethe | Clawd |
+|---------|-------|-------|
 | **Context Management** | **Letta integration** - automatic context engineering with 3-tier memory (working/episodic/archival) | Manual file-based memory (MEMORY.md, daily logs) with vector search |
 | **Compaction** | **Automatic** - Letta handles memory consolidation seamlessly, no context overflow | Reactive - triggers on context limit, requires manual memory flush |
 | **Memory Retrieval** | Hippocampus subagent pre-loads relevant context (1-3k tokens) | Hybrid BM25 + vector search in session |
 | **Identity** | Persistent self-modifying memory blocks | Bootstrap files loaded at session start |
 | **Primary Use** | Single autonomous assistant, 24/7 operation | Multi-platform messaging gateway |
 | **Browser** | Accessibility tree (90% token reduction) | Standard browser automation |
+| **Token Economy** | **3-5x cheaper** - selective memory loading, accessibility-tree browsing, proactive compaction | Higher token consumption - full file injection, reactive compaction |
 
 ### Why Letta Integration Matters
 
@@ -44,16 +45,18 @@ Lethe uses [Letta](https://www.letta.com) for memory management, which means:
 - **No compaction emergencies** - Memory consolidation happens proactively, not reactively when context fills
 - **Semantic memory persistence** - 3-tier hierarchy (working/episodic/archival) inspired by human cognition
 - **Self-modification** - Agent edits its own persona, knowledge, and identity in real-time
+- **3-5x token savings** - Selective memory loading (1-3k tokens vs full history), accessibility-tree browsing (90% reduction), and proactive compaction result in significantly lower API costs
 
-clawd.bot requires manual memory management through Markdown files and reactive compaction when approaching context limits.
+Clawd requires manual memory management through Markdown files and reactive compaction when approaching context limits.
 
 ### Choose Lethe if you want:
 - **Automated context management** via Letta (no manual memory engineering)
+- **3-5x lower token costs** through efficient memory architecture
 - **Brain-inspired cognitive architecture** with semantic memory consolidation
 - **Persistent autonomous agent** that operates 24/7 with long-term memory
 - **Token-efficient operation** (accessibility tree, selective memory loading)
 
-### Choose clawd.bot if you want:
+### Choose Clawd if you want:
 - **Multi-platform messaging** (WhatsApp, iMessage, Signal, Discord, Telegram)
 - **File-based memory** you can manually inspect and edit
 - **Multiple agents** with different personas/roles
