@@ -10,6 +10,87 @@ Lethe is a 24/7 AI assistant that you communicate with via Telegram. It processe
 >
 > Only run Lethe on systems where you trust the agent with full access. Consider running in a VM or container if you need isolation.
 
+## Comparison: Lethe vs clawd.bot
+
+Both Lethe and [clawd.bot](https://clawd.bot) are autonomous AI assistants with memory and system access, but they differ fundamentally in architecture and design philosophy.
+
+### Core Architecture
+
+**Lethe: Brain-Inspired Cognitive System**
+- **Three-tier memory hierarchy** modeled after human cognition:
+  - **Working Memory**: In-context blocks (persona, project, tasks, tools) - always accessible, editable by agent
+  - **Episodic Memory**: Conversation history searchable by semantic similarity - what happened when
+  - **Archival Memory**: Unlimited long-term semantic storage - facts, learnings, domain knowledge
+- **Autoassociative recall**: Hippocampus subagent retrieves relevant memories before main agent processing (inspired by biological memory consolidation)
+- **Identity-first**: Agent maintains persistent identity, persona, and self-model across sessions
+
+**clawd.bot: File-Based Messaging Gateway**
+- **Flat file memory**: Markdown files (`MEMORY.md`, `memory/YYYY-MM-DD.md`) with vector search
+- **Messaging bridge**: Gateway daemon routing messages from WhatsApp/Telegram/Discord/iMessage/Signal
+- **Session-based**: JSONL transcripts per session, compaction when context fills
+- **Bootstrap files**: AGENTS.md, SOUL.md, TOOLS.md loaded at session start
+
+### Token Economy & Efficiency
+
+**Lethe:**
+- **Token budget awareness**: Built-in budget management prevents context overflow
+- **Selective memory loading**: Hippocampus retrieves only relevant memories (typically 1-3k tokens), not entire history
+- **Accessibility-tree browsing**: 90% reduction in web context (semantic structure, not raw DOM)
+- **Proactive compaction**: Identity refresh every 2 hours, memory consolidation driven by cognitive model
+
+**clawd.bot:**
+- **Reactive compaction**: Triggers when approaching context window limit
+- **Full file injection**: Loads entire bootstrap files into context at session start
+- **Memory flush hooks**: Pre-compaction ping to remind agent to write durable memory
+- **Hybrid search**: BM25 + vector search for memory retrieval
+
+### Autonomy Model
+
+**Lethe:**
+- **24/7 background operation**: Heartbeats every 15 minutes to review commitments and surface reminders
+- **Proactive follow-ups**: Doesn't wait for user input - initiates actions based on memory and time
+- **Self-modifying**: Agent edits its own memory blocks, identity, and tool knowledge in real-time
+- **Task persistence**: Remembers commitments across sessions and days
+- **Cognitive-driven**: Identity refresh every 2 hours, memory consolidation based on brain-inspired model
+
+**clawd.bot:**
+- **Message-driven**: Responds to incoming messages from chat platforms
+- **Heartbeats & cron jobs**: Periodic check-ins and scheduled automation via cron/webhooks
+- **File-based memory updates**: Agent writes to Markdown files for persistence
+- **Session lifecycle**: Context maintained within session boundaries, compaction-driven memory
+
+### Key Differentiators
+
+| Feature | Lethe | clawd.bot |
+|---------|-------|-----------|
+| **Memory Model** | Brain-inspired 3-tier (Working/Episodic/Archival) | File-based Markdown + vector search |
+| **Cognitive Architecture** | Hippocampus for associative recall | Hybrid BM25 + vector retrieval |
+| **Token Awareness** | Built-in budget management | Compaction-driven memory flush |
+| **Operating Model** | Autonomous 24/7 agent with cognitive heartbeats | Messaging gateway with heartbeats/cron |
+| **Identity Persistence** | Self-modifying memory blocks | Bootstrap files loaded per session |
+| **Primary Focus** | Proactive executive assistant | Multi-platform chat bridge |
+| **Context Efficiency** | Accessibility tree (90% reduction) | Standard browser tools |
+
+### When to Choose Each
+
+**Choose Lethe if you want:**
+- A **proactive, persistent colleague** that remembers commitments long-term
+- **Brain-like memory consolidation** with semantic retrieval across conversations
+- **Token-efficient operation** with cognitive architecture inspired by neuroscience
+- **24/7 autonomous operation** that initiates actions without prompting
+- A **single, personified agent** with persistent identity and self-awareness
+
+**Choose clawd.bot if you want:**
+- A **messaging platform bridge** connecting WhatsApp, iMessage, Signal, Discord, etc.
+- **Multiple agents** with different personas/roles routed by platform or user
+- **File-based memory** that's easy to inspect and edit manually
+- **Production-ready gateway** with OAuth, webhook integrations, and multi-user support
+- **Sandboxed workspaces** per session for security isolation
+
+---
+
+**Bottom line**: Lethe is designed as a **cognitive agent with brain-inspired memory**, optimized for long-term collaboration and proactive assistance. clawd.bot is a **messaging gateway with agent capabilities**, optimized for multi-platform chat and production deployment. Both are powerful - choose based on whether you value cognitive architecture (Lethe) or messaging infrastructure (clawd.bot).
+
 ## Goals
 
 Build a **fully autonomous, personified AI assistant** that:
@@ -20,29 +101,6 @@ Build a **fully autonomous, personified AI assistant** that:
 - 🙋 **Feels like a colleague** - Anthropomorphic presence with consistent personality and expertise
 - ⚡ **Operates 24/7** - Always available, processes tasks asynchronously in the background
 - 😈 **A little scary to operate** - Full system access, relentless self-improvement, YOLO
-
-## Self-Modifying Agent
-
-Lethe uses Letta's persistent memory, which means:
-
-- **Teach it tools**: Show the agent how to use CLI tools, and it will remember for future sessions
-- **Shape its identity**: Ask it to update its persona, communication style, or areas of expertise
-- **Project context**: It maintains notes about your current projects and priorities
-- **Learn your preferences**: It remembers how you like things done
-
-The agent can modify its own memory blocks (`persona`, `human`, `project`, `tasks`, `tools`) using `core_memory_append` and `core_memory_replace`, and store unlimited long-term memories in archival storage.
-
-## Proactive & Persistent
-
-Unlike typical chatbots that wait for input, Lethe is designed to be genuinely autonomous:
-
-- **Background Task Processing**: Handles long-running tasks asynchronously while staying responsive to new requests
-- **Periodic Heartbeats**: Checks in every 15 minutes to review memory, conversation history, and proactively surface reminders or follow-ups
-- **Self-Improvement**: Continuously learns from interactions, updating its own memory blocks and tool knowledge
-- **Full System Access**: Can execute shell commands, manage files, browse the web, and interact with CLI tools—all without waiting for permission
-- **Task Persistence**: Remembers commitments across sessions and follows up on promises made in previous conversations
-
-The agent doesn't just respond—it actively manages ongoing work, reminds you of important items, and suggests next steps based on your project context.
 
 ## Heartbeats
 
