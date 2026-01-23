@@ -10,6 +10,17 @@ Lethe is a 24/7 AI assistant that you communicate with via Telegram. It processe
 >
 > Only run Lethe on systems where you trust the agent with full access. Consider running in a VM or container if you need isolation.
 
+## Goals
+
+Build a **fully autonomous, personified AI assistant** that:
+
+- 🧠 **Never forgets** - Persistent memory ensures important details are retained across sessions
+- 🎯 **Proactively helps** - Doesn't just wait for commands; anticipates needs and follows up
+- 📈 **Learns continuously** - Improves its knowledge and adapts to your preferences over time
+- 🙋 **Feels like a colleague** - Anthropomorphic presence with consistent personality and expertise
+- ⚡ **Operates 24/7** - Always available, processes tasks asynchronously in the background
+- 😈 **A little scary to operate** - Full system access, relentless self-improvement, YOLO
+
 ## Comparison: Lethe vs clawd.bot
 
 Both Lethe and [clawd.bot](https://clawd.bot) are autonomous AI assistants, but differ in how they handle memory and context.
@@ -47,17 +58,6 @@ clawd.bot requires manual memory management through Markdown files and reactive 
 - **File-based memory** you can manually inspect and edit
 - **Multiple agents** with different personas/roles
 - **Production gateway** with OAuth and webhook integrations
-
-## Goals
-
-Build a **fully autonomous, personified AI assistant** that:
-
-- 🧠 **Never forgets** - Persistent memory ensures important details are retained across sessions
-- 🎯 **Proactively helps** - Doesn't just wait for commands; anticipates needs and follows up
-- 📈 **Learns continuously** - Improves its knowledge and adapts to your preferences over time
-- 🙋 **Feels like a colleague** - Anthropomorphic presence with consistent personality and expertise
-- ⚡ **Operates 24/7** - Always available, processes tasks asynchronously in the background
-- 😈 **A little scary to operate** - Full system access, relentless self-improvement, YOLO
 
 ## Heartbeats
 
