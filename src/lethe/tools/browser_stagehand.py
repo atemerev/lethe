@@ -152,10 +152,17 @@ async def stagehand_act_async(instruction: str) -> str:
         )
         result = response.data.result
         
+        message = result.message if hasattr(result, 'message') else str(result)
+        success = getattr(result, 'success', True)
+        
+        # Check if the message indicates failure (Stagehand doesn't always set success=False)
+        if "failed" in message.lower() or "could not find" in message.lower():
+            success = False
+        
         return json.dumps({
-            "status": "OK",
-            "message": result.message if hasattr(result, 'message') else str(result),
-            "success": getattr(result, 'success', True),
+            "status": "OK" if success else "error",
+            "message": message,
+            "success": success,
         }, indent=2)
     except Exception as e:
         return json.dumps({
