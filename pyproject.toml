@@ -12,7 +12,8 @@ dependencies = [
     "httpx>=0.28.0",
     "rich>=13.9.0",
     "steel-sdk>=0.15.0",
-    "pyte>=0.8.0",  # Terminal emulator for TUI capture
+    "pyte>=0.8.0", # Terminal emulator for TUI capture
+    "pillow>=12.1.0",
 ]
 
 [project.optional-dependencies]

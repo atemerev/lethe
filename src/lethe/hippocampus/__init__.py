@@ -216,7 +216,14 @@ JSON only:"""
                 passages = list(archival_results)
             
             for passage in passages[:max_results]:
-                results.append(f"[Archival] {passage.content}")
+                # Handle different response types
+                if hasattr(passage, 'content'):
+                    content = passage.content
+                elif isinstance(passage, tuple) and len(passage) > 0:
+                    content = str(passage[0])
+                else:
+                    content = str(passage)
+                results.append(f"[Archival] {content}")
                     
         except Exception as e:
             logger.warning(f"Archival search failed: {e}")
@@ -238,7 +245,15 @@ JSON only:"""
                 messages = list(conv_results)
             
             for msg in messages[:max_results]:
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                # Handle different message types (some don't have 'content')
+                if hasattr(msg, 'content'):
+                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                elif hasattr(msg, 'reasoning'):
+                    content = msg.reasoning if isinstance(msg.reasoning, str) else str(msg.reasoning)
+                elif hasattr(msg, 'text'):
+                    content = msg.text
+                else:
+                    content = str(msg)
                 role = getattr(msg, 'message_type', 'message').replace('_message', '')
                 results.append(f"[{role}] {content}")
                     
