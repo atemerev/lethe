@@ -440,6 +440,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyte" },
     { name = "rich" },
+    { name = "stagehand-alpha" },
     { name = "steel-sdk" },
 ]
 
@@ -469,6 +470,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
+    { name = "stagehand-alpha", specifier = ">=0.3.1" },
     { name = "steel-sdk", specifier = ">=0.15.0" },
     { name = "steel-sdk", marker = "extra == 'browser'", specifier = ">=0.15.0" },
 ]
@@ -1096,6 +1098,26 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235 },
+]
+
+[[package]]
+name = "stagehand-alpha"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a1/26/2db182b0ad2b3c7c766b9582d9c2a594acc46d2fc5f0356bdedf26e366a3/stagehand_alpha-0.3.1.tar.gz", hash = "sha256:5d41d77992b475118cc03bda2961d5a6ce866ed1c114cf7ba0dcf184fef35a1d", size = 248672 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/e3/d57c5602bab0009410fbd0afd49195bf003863a1efebe6b3926b41c8823d/stagehand_alpha-0.3.1-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:c29b305839ddfc3b033f0d805bb13b702dd51b9c63760519f674155053a5915c", size = 100560 },
+    { url = "https://files.pythonhosted.org/packages/87/3b/fc0a052c460571bfc2478dde35ce9bec2c68fe74b9ad000581e6a91ab578/stagehand_alpha-0.3.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7da06725c46278c9243be9e00de61cca8f51255bb0eb879de2f9746b559ec1a9", size = 100560 },
+    { url = "https://files.pythonhosted.org/packages/66/c8/18f6019da36d34e66655b9de780e6e1e04cdb087b7036e69eba7dffcf5b5/stagehand_alpha-0.3.1-py3-none-manylinux2014_x86_64.whl", hash = "sha256:a229f63dd894ae04d8c6d5bb7593d040e42af0d1bbc5ef92dfa77fed99b558ae", size = 100562 },
+    { url = "https://files.pythonhosted.org/packages/0d/2a/a47c3085c23e9719af6cdd08ca28d34d64dba0aec2a87719f2001d78206f/stagehand_alpha-0.3.1-py3-none-win_amd64.whl", hash = "sha256:a3ff1ba91cdfe98efd4efb0f0a586333cc07e513f195a690b3c9e86544e38fd8", size = 101413 },
 ]
 
 [[package]]
