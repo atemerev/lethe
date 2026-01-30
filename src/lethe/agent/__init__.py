@@ -1422,8 +1422,9 @@ I'll update this as I learn about my principal's current projects and priorities
                 continue
             
             # Use hippocampus to judge response and decide next steps
-            # Skip for system messages (heartbeats) - they don't need judging
-            if stop_reason == "end_turn" and not is_system_message:
+            # DISABLED: The judge LLM keeps hallucinating reasons to continue even when
+            # agent explicitly says "nothing to continue". Agent decides for itself.
+            if False and stop_reason == "end_turn" and not is_system_message:
                 original_request = context.get("_original_request", message) if context else message
                 
                 # Ask hippocampus to judge this response
