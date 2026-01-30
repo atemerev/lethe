@@ -267,6 +267,24 @@ class TelegramBot:
                 current_model = agent.model
 
                 if new_model:
+                    # Validate model exists first
+                    available_models = []
+                    models = await client.models.list()
+                    if hasattr(models, '__aiter__'):
+                        async for m in models:
+                            available_models.append(m.model)
+                    else:
+                        available_models = [m.model for m in models]
+                    
+                    if new_model not in available_models:
+                        # Try to find similar models
+                        similar = [m for m in available_models if new_model.lower() in m.lower()][:5]
+                        msg = f"Model '{new_model}' not found."
+                        if similar:
+                            msg += f"\n\nDid you mean:\n" + "\n".join(f"  {m}" for m in similar)
+                        await message.answer(msg, parse_mode=None)
+                        return
+                    
                     # Switch model
                     await client.agents.update(agent_id, model=new_model)
                     await message.answer(f"✅ Model switched to: {new_model}", parse_mode=None)
