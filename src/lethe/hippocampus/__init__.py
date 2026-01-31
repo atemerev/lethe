@@ -221,6 +221,10 @@ JSON only:"""
         """
         results = []
         
+        # Truncate query to avoid BM25 limit (max 1024 Unicode code points)
+        if len(query) > 1000:
+            query = query[:1000]
+        
         try:
             # Search archival memory (passages) - semantic search
             archival_results = await self.client.agents.passages.search(
