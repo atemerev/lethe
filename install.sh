@@ -211,17 +211,17 @@ prompt_tokens() {
     echo "   Settings → API Keys → Create new key"
     echo ""
     
-    read -p "Telegram Bot Token: " TELEGRAM_TOKEN
+    read -p "Telegram Bot Token: " TELEGRAM_TOKEN < /dev/tty
     if [ -z "$TELEGRAM_TOKEN" ]; then
         error "Telegram token is required"
     fi
     
-    read -p "Letta API Key: " LETTA_KEY
+    read -p "Letta API Key: " LETTA_KEY < /dev/tty
     if [ -z "$LETTA_KEY" ]; then
         error "Letta API key is required"
     fi
     
-    read -p "Your Telegram User ID (for authorization): " TELEGRAM_USER_ID
+    read -p "Your Telegram User ID (for authorization): " TELEGRAM_USER_ID < /dev/tty
     if [ -z "$TELEGRAM_USER_ID" ]; then
         warn "No user ID provided - bot will accept messages from anyone!"
     fi

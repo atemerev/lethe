@@ -58,7 +58,7 @@ echo "  - Configuration: $CONFIG_DIR"
 echo "  - System service (systemd/launchd)"
 echo "  - Container (if installed with --contained)"
 echo ""
-read -p "Are you sure you want to uninstall Lethe? [y/N] " -n 1 -r
+read -p "Are you sure you want to uninstall Lethe? [y/N] " -n 1 -r < /dev/tty
 echo ""
 
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -115,7 +115,7 @@ fi
 # Ask about config/data
 if [ -d "$CONFIG_DIR" ]; then
     echo ""
-    read -p "Remove configuration and data? (includes .env with tokens) [y/N] " -n 1 -r
+    read -p "Remove configuration and data? (includes .env with tokens) [y/N] " -n 1 -r < /dev/tty
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -rf "$CONFIG_DIR"
