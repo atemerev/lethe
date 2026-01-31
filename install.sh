@@ -225,11 +225,11 @@ prompt_tokens() {
     
     echo -e "${BLUE}3. Your Telegram User ID${NC}"
     echo "   Message @userinfobot on Telegram - it replies with your ID (a number like 123456789)"
-    echo "   This restricts the bot to only respond to you. Leave blank to allow anyone."
+    echo "   This restricts the bot to only respond to you."
     echo ""
-    read -p "   Telegram User ID (or blank): " TELEGRAM_USER_ID < /dev/tty
+    read -p "   Telegram User ID: " TELEGRAM_USER_ID < /dev/tty
     if [ -z "$TELEGRAM_USER_ID" ]; then
-        warn "No user ID provided - bot will accept messages from anyone!"
+        error "Telegram User ID is required (security: prevents strangers from using your bot)"
     fi
 }
 
