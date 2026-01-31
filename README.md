@@ -1,14 +1,16 @@
 # Lethe
 
-Autonomous executive assistant with Letta memory layer.
+Autonomous executive assistant with persistent memory.
 
-Lethe is a 24/7 AI assistant that you communicate with via Telegram. It processes tasks asynchronously, maintains persistent memory across conversations, and has full access to your machine.
+Lethe is a 24/7 AI assistant that you communicate with via Telegram. It remembers everything - your preferences, your projects, conversations from months ago. The more you use it, the more useful it becomes.
 
-> **⚠️ WARNING: NO SANDBOXING**
+Runs safely in a container by default, with access only to `~/lethe/`. Optional `--unsafe` mode for full system access.
+
+> **Safe Mode by Default**
 > 
-> Lethe has **unrestricted access** to your system with the same rights as the user running it. It can read, write, and delete any files you can access, execute any commands, and browse the web. There is **no sandboxing or isolation**. 
+> Lethe runs in a container with access limited to `~/lethe/` only. This is the default, safe way to run it.
 >
-> Only run Lethe on systems where you trust the agent with full access. Consider running in a VM or container if you need isolation.
+> If you install with `--unsafe`, Lethe has **unrestricted access** to your system - it can read, write, and delete any files, execute any commands, and browse the web. Only use `--unsafe` on systems where you trust the agent with full access.
 
 ## Goals
 
