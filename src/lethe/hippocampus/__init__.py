@@ -375,11 +375,8 @@ SUMMARY (be concise but preserve key details):"""
     ) -> str:
         """Pattern completion: automatically recall relevant memories.
         
-        Like biological hippocampus CA3 - given context, retrieve related memories
-        automatically via similarity search. No explicit "should I recall?" decision.
-        
-        Uses recent conversation context + new message as search query, so even
-        short messages like "do it" work when combined with preceding context.
+        Uses LLM to generate a concise search query (2-5 words), then retrieves
+        related memories via semantic similarity search.
         
         Args:
             main_agent_id: The main agent's ID (for memory search)
@@ -392,41 +389,21 @@ SUMMARY (be concise but preserve key details):"""
         if not self.enabled:
             return new_message
 
-        # Build search context from recent messages + new message
-        # This enables pattern completion even for short messages like "yes" or "do it"
-        context_parts = []
-        for msg in recent_messages[-5:]:  # Last 5 messages for context
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    part.get("text", "") for part in content 
-                    if isinstance(part, dict) and part.get("type") == "text"
-                )
-            if content:
-                # Truncate very long messages to keep search focused
-                if len(content) > 300:
-                    content = content[:300]
-                context_parts.append(content)
-        context_parts.append(new_message)
+        # Use LLM to analyze message and generate concise search query
+        analysis = await self.analyze_for_recall(new_message, recent_messages)
         
-        # Build search query - prioritize new message, add context within limit
-        # BM25 has 1024 char limit, so we budget carefully
-        MAX_QUERY_LEN = 900
+        if not analysis or not analysis.get("should_recall"):
+            logger.info(f"Hippocampus: no recall needed - {analysis.get('reason') if analysis else 'disabled'}")
+            return new_message
         
-        # New message is most important - keep up to 500 chars
-        new_msg_budget = min(len(new_message), 500)
-        search_query = new_message[:new_msg_budget]
+        search_query = analysis.get("search_query")
+        if not search_query:
+            logger.warning("Hippocampus: should_recall=True but no search_query provided")
+            return new_message
         
-        # Add context from remaining budget (most recent first)
-        remaining = MAX_QUERY_LEN - len(search_query) - 10  # buffer for separator
-        if remaining > 50 and context_parts[:-1]:  # exclude new_message from context
-            context_text = "\n".join(context_parts[:-1])
-            # Take the tail (most recent context)
-            if len(context_text) > remaining:
-                context_text = "..." + context_text[-(remaining-3):]
-            search_query = context_text + "\n\n" + search_query
+        logger.info(f"Hippocampus: searching with query '{search_query}'")
         
-        # Search memories using semantic similarity
+        # Search memories using the LLM-generated concise query
         memories = await self.search_memories(main_agent_id, search_query)
         
         if not memories:
