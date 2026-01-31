@@ -410,12 +410,6 @@ EOF
 
     launchctl load "$HOME/Library/LaunchAgents/com.lethe.agent.plist"
     success "Launchd service configured and started"
-    
-    echo ""
-    echo "Mac-specific commands:"
-    echo "  Start:   launchctl start com.lethe.agent"
-    echo "  Stop:    launchctl stop com.lethe.agent"
-    echo "  Logs:    tail -f ~/Library/Logs/lethe.log"
 }
 
 install_contained() {
