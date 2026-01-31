@@ -465,7 +465,9 @@ WORKDIR /app
 RUN git clone https://github.com/atemerev/lethe.git .
 RUN uv sync
 
-# Workspace for agent
+# Create data directories
+RUN mkdir -p /app/workspace /app/data
+
 VOLUME /app/workspace
 VOLUME /app/data
 
