@@ -210,6 +210,9 @@ prompt_tokens() {
     echo "2. Letta API Key - Sign up at https://app.letta.com"
     echo "   Settings → API Keys → Create new key"
     echo ""
+    echo "3. Your Telegram User ID - Message @userinfobot on Telegram"
+    echo "   It will reply with your user ID (a number like 123456789)"
+    echo ""
     
     read -p "Telegram Bot Token: " TELEGRAM_TOKEN < /dev/tty
     if [ -z "$TELEGRAM_TOKEN" ]; then
@@ -221,7 +224,7 @@ prompt_tokens() {
         error "Letta API key is required"
     fi
     
-    read -p "Your Telegram User ID (for authorization): " TELEGRAM_USER_ID < /dev/tty
+    read -p "Your Telegram User ID: " TELEGRAM_USER_ID < /dev/tty
     if [ -z "$TELEGRAM_USER_ID" ]; then
         warn "No user ID provided - bot will accept messages from anyone!"
     fi
