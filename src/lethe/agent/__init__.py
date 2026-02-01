@@ -190,7 +190,7 @@ class AgentManager:
                 try:
                     import asyncio as _asyncio
                     # Timeout denial to prevent hanging (30 seconds should be plenty)
-                    await _asyncio.wait_for(
+                    response = await _asyncio.wait_for(
                         self.client.agents.messages.create(
                             agent_id=agent_id,
                             messages=[{
@@ -203,6 +203,18 @@ class AgentManager:
                     
                     for tc_id in tool_call_ids:
                         logger.info(f"  Cleared: {tc_id}")
+                    
+                    # Check if agent created new tool calls after denial
+                    # If stop_reason is requires_approval, loop will continue to clear
+                    stop_reason_obj = getattr(response, "stop_reason", None)
+                    if hasattr(stop_reason_obj, "stop_reason"):
+                        stop_reason = stop_reason_obj.stop_reason
+                    else:
+                        stop_reason = str(stop_reason_obj) if stop_reason_obj else None
+                    
+                    if stop_reason == "requires_approval":
+                        logger.info("  Agent made another tool call after denial, continuing to clear...")
+                        # Don't exit early - continue loop to clear the new approval
                     
                     cleared_any = True
                 except _asyncio.TimeoutError:
