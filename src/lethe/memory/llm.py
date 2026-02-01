@@ -460,7 +460,9 @@ class AsyncLLMClient:
     def add_tools(self, tools: List[tuple[Callable, Dict]]):
         """Add multiple tools as (function, schema) tuples."""
         for func, schema in tools:
-            self._tools[func.__name__] = (func, schema)
+            # Use schema name as key (allows name overrides for async imports)
+            name = schema.get("name", func.__name__)
+            self._tools[name] = (func, schema)
     
     @property
     def tools(self) -> List[Dict]:
@@ -601,7 +603,7 @@ class AsyncLLMClient:
                 
                 # Execute tools and add results
                 for tool_call in tool_calls:
-                    tool_name = tool_call["function"]["name"]
+                    tool_name = tool_call["function"]["name"].strip()  # Strip whitespace (model quirk)
                     tool_args = json.loads(tool_call["function"]["arguments"])
                     tool_id = tool_call["id"]
                     
