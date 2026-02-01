@@ -30,42 +30,34 @@ class Settings(BaseSettings):
             return []
         return [int(x.strip()) for x in self.telegram_allowed_user_ids.split(",") if x.strip()]
 
-    # Letta (default: Letta Cloud)
-    letta_base_url: str = Field(
-        default="https://api.letta.com",
-        description="Letta server URL (default: Letta Cloud, use http://localhost:8283 for local server)",
-    )
-    letta_api_key: Optional[str] = Field(
+    # LLM (OpenRouter)
+    openrouter_api_key: Optional[str] = Field(
         default=None,
-        description="Letta API key (required for Letta Cloud, get from https://app.letta.com)",
+        description="OpenRouter API key (reads from OPENROUTER_API_KEY env var)",
+    )
+    llm_model: str = Field(
+        default="moonshotai/kimi-k2.5",
+        description="LLM model (OpenRouter model ID)",
+    )
+    llm_context_limit: int = Field(
+        default=128000,
+        description="Context window size in tokens",
     )
 
     # Agent
     lethe_agent_name: str = Field(default="lethe", description="Agent name")
-    lethe_agent_model: str = Field(default="letta/letta-free", description="Model handle (e.g., letta/letta-free, anthropic/claude-sonnet-4-20250514)")
     lethe_config_dir: Path = Field(default=Path("./config"), description="Config directory")
-    workspace_dir: Path = Field(default=Path("./workspace"), description="Agent workspace directory for organized file work")
+    workspace_dir: Path = Field(default=Path("./workspace"), description="Agent workspace directory")
 
-    # Hippocampus (memory retrieval subagent)
-    hippocampus_enabled: bool = Field(default=True, description="Enable hippocampus memory retrieval")
-    hippocampus_agent_name: str = Field(default="lethe-hippocampus", description="Hippocampus agent name")
-    hippocampus_model: str = Field(default="anthropic/claude-haiku-4-5-20251001", description="Cheap/fast model for hippocampus")
+    # Memory
+    memory_dir: Path = Field(default=Path("./data/memory"), description="Memory storage directory")
 
     # Conversation
-    debounce_seconds: float = Field(default=5.0, description="Wait time for additional messages before processing (0 to disable)")
+    debounce_seconds: float = Field(default=5.0, description="Wait time for additional messages")
 
     # Database
     db_path: Path = Field(default=Path("./data/lethe.db"), description="SQLite database path")
 
-    # Browser / Steel
-    steel_base_url: str = Field(
-        default="http://127.0.0.1:3000",
-        description="Steel Browser API URL (local Docker or cloud). Use 127.0.0.1, not localhost (IPv6 issues).",
-    )
-    steel_api_key: Optional[str] = Field(
-        default=None,
-        description="Steel API key (required for Steel Cloud, optional for local)",
-    )
 
 _settings: Optional[Settings] = None
 

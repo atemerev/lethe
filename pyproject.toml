@@ -5,7 +5,6 @@ description = "Autonomous executive assistant with Letta memory layer"
 requires-python = ">=3.11"
 dependencies = [
     "aiogram>=3.24.0",
-    "letta-client>=1.1.0",
     "aiosqlite>=0.22.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.12.0",

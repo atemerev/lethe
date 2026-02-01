@@ -263,15 +263,6 @@ wheels = [
 ]
 
 [[package]]
-name = "distro"
-version = "1.9.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fc/f8/98eea607f65de6527f8a2e8885fc8015d3e6f5775df186e443e0964a11c3/distro-1.9.0.tar.gz", hash = "sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed", size = 60722 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/b3/231ffd4ab1fc9d679809f356cebee130ac7daa00d6d6f3206dd4fd137e9e/distro-1.9.0-py3-none-any.whl", hash = "sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2", size = 20277 },
-]
-
-[[package]]
 name = "filelock"
 version = "3.20.3"
 source = { registry = "https://pypi.org/simple" }
@@ -579,7 +570,6 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "httpx" },
     { name = "lancedb" },
-    { name = "letta-client" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -602,7 +592,6 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "lancedb", specifier = ">=0.27.1" },
-    { name = "letta-client", specifier = ">=1.1.0" },
     { name = "pillow", specifier = ">=12.1.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
@@ -615,23 +604,6 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=5.2.2" },
 ]
 provides-extras = ["dev"]
-
-[[package]]
-name = "letta-client"
-version = "1.7.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/06/7c/9f890ba9f43b48ed04f40433385ba9cb0d864ccbe5082ff71d1a5bb9bbbd/letta_client-1.7.1.tar.gz", hash = "sha256:4983e2a2a257c9429daecdda3e48d28a02bbb3063215571c7d2efcdaa95c806b", size = 246963 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/07/11164f31b5caf6f1a8c2dd8c8c217342b06cf5bc26ee00c7a87c63c869fd/letta_client-1.7.1-py3-none-any.whl", hash = "sha256:88a494274e1e4975f5474201609d1c038bbefd73aaa39d62cf7c1380c0053558", size = 363461 },
-]
 
 [[package]]
 name = "magic-filter"
@@ -1922,15 +1894,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050 },
-]
-
-[[package]]
-name = "sniffio"
-version = "1.3.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235 },
 ]
 
 [[package]]
