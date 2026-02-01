@@ -17,31 +17,60 @@ class MemoryStore:
     """Unified memory store.
     
     Provides:
-    - blocks: Core memory as files (persona.md, human.md, project.md, etc.)
+    - blocks: Core memory as files in workspace (persona.md, human.md, etc.)
     - archival: Long-term semantic memory with hybrid search (LanceDB)
     - messages: Conversation history (LanceDB)
+    
+    Blocks live in workspace for easy editing. Initialized from data/ templates.
     """
     
-    def __init__(self, data_dir: str = "data/memory"):
+    def __init__(self, data_dir: str = "data/memory", workspace_dir: str = "workspace"):
         """Initialize memory store.
         
         Args:
-            data_dir: Directory for storing memory data
+            data_dir: Directory for persistent data (archival, messages, block templates)
+            workspace_dir: Working directory for blocks (agent reads/writes here)
         """
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.workspace_dir = Path(workspace_dir)
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
         
         # Connect to LanceDB (for archival and messages only)
         self.db = lancedb.connect(str(self.data_dir / "lancedb"))
         logger.info(f"Connected to LanceDB at {self.data_dir / 'lancedb'}")
         
+        # Initialize blocks in workspace, copying from data/ templates if needed
+        blocks_workspace = self.workspace_dir / "memory"
+        blocks_workspace.mkdir(parents=True, exist_ok=True)
+        self._init_blocks_from_templates(blocks_workspace)
+        
         # Initialize subsystems
-        # Blocks are now files in data_dir/blocks/
-        self.blocks = BlockManager(self.data_dir / "blocks")
+        self.blocks = BlockManager(blocks_workspace)
         self.archival = ArchivalMemory(self.db)
         self.messages = MessageHistory(self.db)
         
         logger.info("Memory store initialized")
+    
+    def _init_blocks_from_templates(self, blocks_workspace: Path):
+        """Copy block templates from data/ to workspace if not present."""
+        templates_dir = self.data_dir / "blocks"
+        if not templates_dir.exists():
+            return
+        
+        for template_file in templates_dir.glob("*.md"):
+            target_file = blocks_workspace / template_file.name
+            if not target_file.exists():
+                # Copy content
+                target_file.write_text(template_file.read_text())
+                logger.info(f"Initialized block from template: {template_file.name}")
+                
+                # Copy metadata if exists
+                meta_file = template_file.with_suffix(".meta.json")
+                if meta_file.exists():
+                    target_meta = blocks_workspace / meta_file.name
+                    target_meta.write_text(meta_file.read_text())
     
     def get_context_for_prompt(self, max_tokens: int = 8000) -> str:
         """Get formatted memory context for LLM prompt.

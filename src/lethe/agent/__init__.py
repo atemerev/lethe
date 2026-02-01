@@ -29,7 +29,10 @@ class Agent:
         self.settings = settings or get_settings()
         
         # Initialize memory store
-        self.memory = MemoryStore(data_dir=str(self.settings.memory_dir))
+        self.memory = MemoryStore(
+            data_dir=str(self.settings.memory_dir),
+            workspace_dir=str(self.settings.workspace_dir),
+        )
         
         # Initialize LLM client
         llm_config = LLMConfig(
