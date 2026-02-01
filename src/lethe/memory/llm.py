@@ -555,18 +555,21 @@ class AsyncLLMClient:
         message: str,
         max_tool_iterations: int = 10,
         on_message: Optional[Callable] = None,
+        _continuation_depth: int = 0,  # Internal: track auto-continue depth
     ) -> str:
         """Send a message and get response, handling tool calls.
         
         Args:
             message: User message
-            max_tool_iterations: Max tool call loops
+            max_tool_iterations: Max tool call loops per batch
             on_message: Optional callback for intermediate messages
             
         Returns:
             Final assistant response text
         """
         import asyncio
+        
+        MAX_CONTINUATION_DEPTH = 3  # Max auto-continues (total iterations = 3 * 10 = 30)
         
         # Add user message
         self.context.add_message(Message(role="user", content=message))
@@ -639,16 +642,20 @@ class AsyncLLMClient:
             self.context.add_message(Message(role="assistant", content=content))
             return content
         
-        # Max iterations reached - ask for final response without tools
-        logger.warning(f"Max tool iterations ({max_tool_iterations}) reached, requesting final response")
+        # Max iterations reached - continue with another batch automatically
+        if _continuation_depth < MAX_CONTINUATION_DEPTH:
+            logger.info(f"Max tool iterations reached, auto-continuing (depth {_continuation_depth + 1}/{MAX_CONTINUATION_DEPTH})")
+            
+            # Recurse with fresh iteration count
+            return await self.chat(
+                message="[Continue with your task]",
+                max_tool_iterations=max_tool_iterations,
+                on_message=on_message,
+                _continuation_depth=_continuation_depth + 1,
+            )
         
-        # Add a system message to prompt for final response
-        self.context.add_message(Message(
-            role="user", 
-            content="[System: Tool iteration limit reached. Please provide your final response to the user without using any more tools.]"
-        ))
-        
-        # Make one more API call without tools
+        # Hit continuation limit - request final response without tools
+        logger.warning(f"Max continuation depth reached, requesting final response")
         response = await self._call_api_no_tools()
         content = response["choices"][0]["message"].get("content", "")
         
@@ -656,7 +663,7 @@ class AsyncLLMClient:
             self.context.add_message(Message(role="assistant", content=content))
             return content
         
-        return "I was working on your request but hit the tool usage limit. Please send another message to continue."
+        return "Task processing limit reached. The work done so far has been saved."
     
     async def _call_api(self) -> Dict:
         """Make API call to OpenRouter."""
