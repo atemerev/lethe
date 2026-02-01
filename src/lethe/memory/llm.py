@@ -607,12 +607,6 @@ class AsyncLLMClient:
                     
                     logger.info(f"Executing tool: {tool_name}({list(tool_args.keys())})")
                     
-                    # Notify about tool execution
-                    if on_message:
-                        # Format tool call for user visibility
-                        args_preview = ", ".join(f"{k}={repr(v)[:30]}" for k, v in list(tool_args.items())[:3])
-                        await on_message(f"🔧 {tool_name}({args_preview})")
-                    
                     # Execute tool (handle both sync and async)
                     handler = self.get_tool(tool_name)
                     if handler:
