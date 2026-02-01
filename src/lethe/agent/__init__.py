@@ -158,6 +158,25 @@ class Agent:
             }
         )
         
+        # Conversation search tool
+        self.llm.register_tool(
+            "conversation_search",
+            self._tool_conversation_search,
+            {
+                "name": "conversation_search",
+                "description": "Search conversation history using semantic/hybrid search. Find past discussions, decisions, and context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer", "description": "Max results (default 10)"},
+                        "role": {"type": "string", "description": "Filter by role (user, assistant)"}
+                    },
+                    "required": ["query"]
+                }
+            }
+        )
+        
         logger.info("Registered internal memory tools")
     
     # Tool implementations
@@ -204,6 +223,25 @@ class Agent:
         """Insert into archival memory."""
         mem_id = self.memory.archival.add(text, tags=tags)
         return f"Stored in archival memory (id: {mem_id})"
+    
+    def _tool_conversation_search(self, query: str, limit: int = 10, role: Optional[str] = None) -> str:
+        """Search conversation history."""
+        if role:
+            results = self.memory.messages.search_by_role(query, role, limit=limit)
+        else:
+            results = self.memory.messages.search(query, limit=limit)
+        
+        if not results:
+            return "No matching messages found"
+        
+        output = []
+        for r in results:
+            score = r.get('score', 0)
+            timestamp = r['created_at'][:16].replace('T', ' ')
+            content = r['content'][:200] + "..." if len(r['content']) > 200 else r['content']
+            output.append(f"[{timestamp}] {r['role']}: {content}")
+        
+        return f"Found {len(results)} messages:\n\n" + "\n\n".join(output)
     
     def register_tool(self, name: str, handler: Callable, schema: dict):
         """Register an external tool."""
