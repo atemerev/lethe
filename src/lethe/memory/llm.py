@@ -639,7 +639,24 @@ class AsyncLLMClient:
             self.context.add_message(Message(role="assistant", content=content))
             return content
         
-        return "Max tool iterations reached"
+        # Max iterations reached - ask for final response without tools
+        logger.warning(f"Max tool iterations ({max_tool_iterations}) reached, requesting final response")
+        
+        # Add a system message to prompt for final response
+        self.context.add_message(Message(
+            role="user", 
+            content="[System: Tool iteration limit reached. Please provide your final response to the user without using any more tools.]"
+        ))
+        
+        # Make one more API call without tools
+        response = await self._call_api_no_tools()
+        content = response["choices"][0]["message"].get("content", "")
+        
+        if content:
+            self.context.add_message(Message(role="assistant", content=content))
+            return content
+        
+        return "I was working on your request but hit the tool usage limit. Please send another message to continue."
     
     async def _call_api(self) -> Dict:
         """Make API call to OpenRouter."""
@@ -657,6 +674,25 @@ class AsyncLLMClient:
             payload["tools"] = self.tools
         
         logger.debug(f"API call: {len(messages)} messages, {len(self.tools)} tools")
+        
+        response = await client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        return response.json()
+    
+    async def _call_api_no_tools(self) -> Dict:
+        """Make API call without tools (for final response after hitting limit)."""
+        client = await self._get_client()
+        messages = self.context.build_messages()
+        
+        payload = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_output_tokens,
+        }
+        # Deliberately not including tools
+        
+        logger.debug(f"API call (no tools): {len(messages)} messages")
         
         response = await client.post("/chat/completions", json=payload)
         response.raise_for_status()
