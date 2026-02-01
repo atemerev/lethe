@@ -6,6 +6,10 @@ import os
 import signal
 import sys
 
+# Load .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 from rich.console import Console
 from rich.logging import RichHandler
 
