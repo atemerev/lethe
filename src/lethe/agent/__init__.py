@@ -1472,7 +1472,10 @@ I'll update this as I learn about my principal's current projects and priorities
                 elif "Invalid tool call IDs" in error_str:
                     # Race condition: tool call ID changed while we were executing locally
                     # Agent created a new tool call before we could submit results
-                    logger.warning("Tool call ID mismatch (race condition), prompting continuation...")
+                    # We need to execute the NEW pending tool call
+                    logger.warning("Tool call ID mismatch (race condition), clearing pending approvals...")
+                    await self._ensure_agent_ready(agent_id)
+                    # Now retry with a continuation prompt
                     messages = [{"role": "user", "content": "[SYSTEM] Continue with the task."}]
                     continue
                 else:
