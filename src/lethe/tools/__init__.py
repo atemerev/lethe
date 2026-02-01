@@ -28,10 +28,10 @@ from lethe.tools.filesystem import (
 )
 
 from lethe.tools.browser_agent import (
-    browser_open,
-    browser_snapshot,
-    browser_click,
-    browser_fill,
+    browser_open_async as browser_open,
+    browser_snapshot_async as browser_snapshot,
+    browser_click_async as browser_click,
+    browser_fill_async as browser_fill,
 )
 
 
@@ -134,28 +134,35 @@ def function_to_schema(func: Callable) -> dict:
 
 def get_all_tools() -> list[tuple[Callable, dict]]:
     """Get all available tools as (function, schema) tuples."""
+    # Tools with optional name override (for async imports)
     tools = [
         # CLI tools
-        bash,
-        bash_output,
-        kill_bash,
+        (bash, None),
+        (bash_output, None),
+        (kill_bash, None),
         
         # File tools
-        read_file,
-        write_file,
-        edit_file,
-        list_directory,
-        glob_search,
-        grep_search,
+        (read_file, None),
+        (write_file, None),
+        (edit_file, None),
+        (list_directory, None),
+        (glob_search, None),
+        (grep_search, None),
         
-        # Browser tools
-        browser_open,
-        browser_snapshot,
-        browser_click,
-        browser_fill,
+        # Browser tools (async, need name override)
+        (browser_open, "browser_open"),
+        (browser_snapshot, "browser_snapshot"),
+        (browser_click, "browser_click"),
+        (browser_fill, "browser_fill"),
     ]
     
-    return [(func, function_to_schema(func)) for func in tools]
+    result = []
+    for func, name_override in tools:
+        schema = function_to_schema(func)
+        if name_override:
+            schema["name"] = name_override
+        result.append((func, schema))
+    return result
 
 
 def get_tool_by_name(name: str) -> Optional[Callable]:
@@ -170,6 +177,7 @@ def get_tool_by_name(name: str) -> Optional[Callable]:
         "list_directory": list_directory,
         "glob_search": glob_search,
         "grep_search": grep_search,
+        # Browser tools (async versions)
         "browser_open": browser_open,
         "browser_snapshot": browser_snapshot,
         "browser_click": browser_click,
