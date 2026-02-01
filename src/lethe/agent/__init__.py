@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 class AgentManager:
     """Manages the Letta agent lifecycle and interactions."""
 
+    # Letta built-in tools that run server-side (not client-side)
+    # These should NOT have RequiresApprovalToolRule
+    LETTA_BUILTIN_TOOLS = {
+        "web_search", "fetch_webpage",
+        "archival_memory_insert", "archival_memory_search",
+        "memory", "memory_insert", "memory_replace", "memory_rethink", "memory_finish_edits",
+        "conversation_search", "send_message",
+        "core_memory_append", "core_memory_replace",  # deprecated but may exist
+    }
+
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self._client: Optional[AsyncLetta] = None
@@ -343,18 +353,20 @@ I'll update this as I learn about my principal's current projects and priorities
         self._agent_id = agent.id
         logger.info(f"Created agent: {self._agent_id}")
 
-        # Add RequiresApprovalToolRule for all tools to enable client-side execution
-        # Without this, Letta executes tools server-side (hitting our stubs)
+        # Add RequiresApprovalToolRule for CLIENT-SIDE tools only
+        # Built-in tools (memory_*, archival_*, web_search, etc.) run server-side
         from letta_client.types import RequiresApprovalToolRuleParam
+        client_side_tools = [t for t in agent.tools if t.name not in self.LETTA_BUILTIN_TOOLS]
         tool_rules = [
             RequiresApprovalToolRuleParam(tool_name=t.name, type="requires_approval")
-            for t in agent.tools
+            for t in client_side_tools
         ]
-        await self.client.agents.update(
-            agent_id=agent.id,
-            tool_rules=tool_rules,
-        )
-        logger.info(f"Added {len(tool_rules)} approval rules for client-side execution")
+        if tool_rules:
+            await self.client.agents.update(
+                agent_id=agent.id,
+                tool_rules=tool_rules,
+            )
+            logger.info(f"Added {len(tool_rules)} approval rules for client-side tools")
 
         return self._agent_id
 
@@ -1091,14 +1103,7 @@ I'll update this as I learn about my principal's current projects and priorities
         
         # Detach extra tools (no longer in codebase)
         # But skip Letta built-in tools - they're managed by include_base_tools=True
-        letta_builtin_tools = {
-            "web_search", "fetch_webpage",
-            "archival_memory_insert", "archival_memory_search",
-            "memory", "memory_insert", "memory_replace", "memory_rethink", "memory_finish_edits",
-            "conversation_search", "send_message",
-            "core_memory_append", "core_memory_replace",  # deprecated but may exist
-        }
-        extra_custom_tools = extra_tools - letta_builtin_tools
+        extra_custom_tools = extra_tools - self.LETTA_BUILTIN_TOOLS
         
         if extra_custom_tools:
             logger.info(f"Detaching {len(extra_custom_tools)} removed custom tools: {extra_custom_tools}")
@@ -1114,24 +1119,26 @@ I'll update this as I learn about my principal's current projects and priorities
                     except Exception as e:
                         logger.warning(f"  Failed to detach {tool_name}: {e}")
 
-        # Ensure tool_rules exist for all tools (enables client-side execution)
+        # Ensure tool_rules exist for CLIENT-SIDE tools only (not built-ins)
+        # Built-in tools (memory_*, archival_*, web_search, etc.) run server-side
         # Re-fetch agent to get updated tool list
         agent = await self.client.agents.retrieve(agent_id)
         existing_rules = {r.tool_name for r in (agent.tool_rules or [])}
         all_tool_names = {t.name for t in agent.tools}
-        missing_rules = all_tool_names - existing_rules
+        client_side_tools = all_tool_names - self.LETTA_BUILTIN_TOOLS
+        missing_rules = client_side_tools - existing_rules
 
         if missing_rules:
             from letta_client.types import RequiresApprovalToolRuleParam
             tool_rules = [
                 RequiresApprovalToolRuleParam(tool_name=name, type="requires_approval")
-                for name in all_tool_names  # Include all tools, not just missing
+                for name in client_side_tools  # Only client-side tools, not built-ins
             ]
             await self.client.agents.update(
                 agent_id=agent_id,
                 tool_rules=tool_rules,
             )
-            logger.info(f"Updated tool_rules: added {len(missing_rules)} missing approval rules")
+            logger.info(f"Updated tool_rules: added {len(missing_rules)} approval rules for client-side tools")
 
     async def _recover_from_pending_approval(self, agent_id: str, original_messages: list, error_str: str = ""):
         """Recover from a stuck pending approval state by denying it and retrying."""
