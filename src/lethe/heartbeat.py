@@ -15,22 +15,32 @@ logger = logging.getLogger(__name__)
 
 # Default interval in seconds (15 minutes)
 DEFAULT_HEARTBEAT_INTERVAL = 15 * 60
+# Full context heartbeat interval (2 hours)
+FULL_CONTEXT_INTERVAL = 2 * 60 * 60
 
 HEARTBEAT_MESSAGE = """[System Heartbeat - {timestamp}]
 
-Periodic check-in. You may use tools if needed to check tasks, reminders, or gather information.
-
-After your work, provide a final summary. The summary will be evaluated to decide if it's worth sending to the user.
-
-Guidelines:
-- Check pending tasks, reminders, calendar if relevant
-- Gather any time-sensitive information
-- Your tool outputs and ponderings are captured but NOT sent directly to user
-- Only your final summary is evaluated
+{reminders}
+Review any pending items and report if anything needs attention NOW.
 
 End with either:
 - "ok" if nothing urgent
-- A brief, actionable message if something needs user attention NOW
+- A brief, actionable message if something needs user attention
+"""
+
+HEARTBEAT_MESSAGE_FULL = """[System Heartbeat - {timestamp}]
+
+This is a full context check-in. Review your identity, current projects, and all pending items.
+
+{reminders}
+Consider:
+- Any tasks or reminders that need attention
+- Projects that need progress updates
+- Anything the user should know about
+
+End with either:
+- "ok" if nothing urgent  
+- A brief, actionable message if something needs user attention
 """
 
 
@@ -56,28 +66,37 @@ class Heartbeat:
         process_callback: Callable[[str], Awaitable[Optional[str]]],
         send_callback: Callable[[str], Awaitable[None]],
         summarize_callback: Optional[Callable[[str], Awaitable[str]]] = None,
+        full_context_callback: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
+        get_reminders_callback: Optional[Callable[[], Awaitable[str]]] = None,
         interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+        full_context_interval: int = FULL_CONTEXT_INTERVAL,
         enabled: bool = True,
     ):
         """Initialize heartbeat.
         
         Args:
-            process_callback: Async function to process heartbeat message through agent
-                             Returns response string or None
+            process_callback: Async function to process heartbeat (minimal context)
             send_callback: Async function to send response to user (e.g., Telegram)
             summarize_callback: Async function to summarize/evaluate response before sending
+            full_context_callback: Async function to process with full agent context
+            get_reminders_callback: Async function to get active reminders as string
             interval: Seconds between heartbeats
+            full_context_interval: Seconds between full context heartbeats (default 2h)
             enabled: Whether heartbeats are enabled
         """
         self.process_callback = process_callback
         self.send_callback = send_callback
         self.summarize_callback = summarize_callback
+        self.full_context_callback = full_context_callback
+        self.get_reminders_callback = get_reminders_callback
         self.interval = interval
+        self.full_context_interval = full_context_interval
         self.enabled = enabled
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._last_full_context: Optional[datetime] = None
         
-        logger.info(f"Heartbeat initialized (interval={interval}s, enabled={enabled})")
+        logger.info(f"Heartbeat initialized (interval={interval}s, full_context={full_context_interval}s, enabled={enabled})")
     
     async def start(self):
         """Start the heartbeat loop."""
@@ -126,13 +145,40 @@ class Heartbeat:
     async def _send_heartbeat(self):
         """Send a heartbeat message to the agent."""
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        message = HEARTBEAT_MESSAGE.format(timestamp=timestamp)
+        now = datetime.now(timezone.utc)
         
-        logger.info(f"Sending heartbeat at {timestamp}")
+        # Get active reminders
+        reminders_text = ""
+        if self.get_reminders_callback:
+            try:
+                reminders = await self.get_reminders_callback()
+                if reminders:
+                    reminders_text = f"Active reminders:\n{reminders}\n\n"
+            except Exception as e:
+                logger.warning(f"Failed to get reminders: {e}")
+        
+        # Check if we should do full context heartbeat
+        use_full_context = False
+        if self.full_context_callback:
+            if self._last_full_context is None:
+                use_full_context = True  # First heartbeat is always full
+            elif (now - self._last_full_context).total_seconds() >= self.full_context_interval:
+                use_full_context = True
+        
+        if use_full_context:
+            message = HEARTBEAT_MESSAGE_FULL.format(timestamp=timestamp, reminders=reminders_text)
+            self._last_full_context = now
+            logger.info(f"Sending FULL CONTEXT heartbeat at {timestamp}")
+        else:
+            message = HEARTBEAT_MESSAGE.format(timestamp=timestamp, reminders=reminders_text)
+            logger.info(f"Sending heartbeat at {timestamp}")
         
         try:
-            # Process through agent (may use tools, full context)
-            response = await self.process_callback(message)
+            # Use full context callback for full heartbeats, otherwise minimal
+            if use_full_context and self.full_context_callback:
+                response = await self.full_context_callback(message)
+            else:
+                response = await self.process_callback(message)
             
             if not response or not response.strip():
                 logger.debug("No heartbeat response")

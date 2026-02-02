@@ -133,6 +133,10 @@ async def run():
         """Process heartbeat with minimal context and aux model."""
         return await agent.heartbeat(message)
     
+    async def heartbeat_full_context(message: str) -> str:
+        """Process heartbeat with full agent context (every 2 hours)."""
+        return await agent.chat(message, use_hippocampus=False)
+    
     async def heartbeat_send(response: str):
         """Send heartbeat response to user."""
         if heartbeat_chat_id:
@@ -142,10 +146,32 @@ async def run():
         """Summarize/evaluate heartbeat response before sending (uses aux model)."""
         return await agent.llm.complete(prompt, use_aux=True)
     
+    async def get_active_reminders() -> str:
+        """Get active reminders as formatted string."""
+        from lethe.todos import TodoManager
+        todo_manager = TodoManager(settings.db_path)
+        await todo_manager.initialize()
+        todos = await todo_manager.list(status="pending")
+        await todo_manager.close()
+        
+        if not todos:
+            return ""
+        
+        lines = []
+        for todo in todos[:10]:  # Limit to 10
+            priority = todo.get("priority", "normal")
+            due = todo.get("due_at", "")
+            due_str = f" (due: {due})" if due else ""
+            lines.append(f"- [{priority}] {todo['title']}{due_str}")
+        
+        return "\n".join(lines)
+    
     heartbeat = Heartbeat(
         process_callback=heartbeat_process,
         send_callback=heartbeat_send,
         summarize_callback=heartbeat_summarize,
+        full_context_callback=heartbeat_full_context,
+        get_reminders_callback=get_active_reminders,
         interval=heartbeat_interval,
         enabled=heartbeat_enabled and heartbeat_chat_id is not None,
     )
