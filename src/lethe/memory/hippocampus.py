@@ -21,20 +21,20 @@ MIN_SCORE_THRESHOLD = 0.3
 SUMMARIZE_PROMPT = """Summarize these recalled memories concisely for context. 
 
 CRITICAL: Preserve ALL of the following exactly as-is (do not paraphrase or omit):
+- Timestamps and dates (keep [YYYY-MM-DD HH:MM] format)
 - URLs, links, file paths
 - Credentials, API keys, tokens
 - IDs, reference numbers
-- Dates and times
 - Names of people, projects, tools
 - Code snippets, commands
 - Specific numbers and measurements
 
-Strip out filler, redundancy, and conversational fluff. Keep facts dense.
+Keep timing context - when things happened matters. Strip filler and redundancy, keep facts dense.
 
 Memories to summarize:
 {memories}
 
-Summary (preserve all reference data):"""
+Summary (preserve timestamps and reference data):"""
 
 
 # Warning added to recall block
@@ -186,7 +186,7 @@ class Hippocampus:
                     break
                     
                 text = mem.get("text", "")
-                created = mem.get("created_at", "")[:10]  # Just date
+                created = mem.get("created_at", "")[:16].replace("T", " ")  # YYYY-MM-DD HH:MM
                 
                 archival_lines.append(f"- [{created}] {text}")
                 total_lines += 1
@@ -203,7 +203,7 @@ class Hippocampus:
                     
                 role = msg.get("role", "?")
                 content = msg.get("content", "")
-                created = msg.get("created_at", "")[:16].replace("T", " ")
+                created = msg.get("created_at", "")[:16].replace("T", " ")  # YYYY-MM-DD HH:MM
                 
                 conv_lines.append(f"- [{created}] {role}: {content}")
                 total_lines += 1
