@@ -9,9 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+# Install uv (move to /usr/local/bin so non-root user can access)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    mv /root/.local/bin/uv /usr/local/bin/ && \
+    mv /root/.local/bin/uvx /usr/local/bin/ 2>/dev/null || true
+ENV PATH="/usr/local/bin:$PATH"
 
 # Create workspace directory (this will be mounted from host)
 RUN mkdir -p /workspace /app
