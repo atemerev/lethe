@@ -8,6 +8,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 import logging
 
@@ -18,6 +19,33 @@ logger = logging.getLogger(__name__)
 
 # Suppress litellm's verbose logging
 litellm.suppress_debug_info = True
+
+# Debug logging for LLM interactions
+LLM_DEBUG = os.environ.get("LLM_DEBUG", "false").lower() == "true"
+LLM_DEBUG_DIR = Path(os.environ.get("LLM_DEBUG_DIR", "logs/llm"))
+
+
+def _log_llm_interaction(request: Dict, response: Dict, label: str = "chat"):
+    """Log LLM request/response to debug directory."""
+    if not LLM_DEBUG:
+        return
+    
+    try:
+        LLM_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        filepath = LLM_DEBUG_DIR / f"{timestamp}_{label}.json"
+        
+        log_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "request": request,
+            "response": response,
+        }
+        
+        filepath.write_text(json.dumps(log_data, indent=2, default=str))
+        logger.debug(f"Logged LLM interaction to {filepath}")
+    except Exception as e:
+        logger.warning(f"Failed to log LLM interaction: {e}")
 
 # Provider configurations
 PROVIDERS = {
@@ -548,22 +576,32 @@ class AsyncLLMClient:
         logger.debug(f"API call: {len(messages)} messages, {len(self.tools)} tools")
         
         response = await acompletion(**kwargs)
-        # Convert litellm response to dict format
-        return response.model_dump()
+        result = response.model_dump()
+        
+        # Debug logging
+        _log_llm_interaction(kwargs, result, "chat")
+        
+        return result
     
     async def _call_api_no_tools(self) -> Dict:
         """Make API call without tools (for final response after hitting limit)."""
         messages = self.context.build_messages()
         
+        kwargs = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_output_tokens,
+        }
+        
         logger.debug(f"API call (no tools): {len(messages)} messages")
         
-        response = await acompletion(
-            model=self.config.model,
-            messages=messages,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_output_tokens,
-        )
-        return response.model_dump()
+        response = await acompletion(**kwargs)
+        result = response.model_dump()
+        
+        _log_llm_interaction(kwargs, result, "chat_no_tools")
+        
+        return result
     
     async def complete(self, prompt: str) -> str:
         """Simple completion without tools or context management.
@@ -576,12 +614,18 @@ class AsyncLLMClient:
         Returns:
             The completion text
         """
-        response = await acompletion(
-            model=self.config.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,  # Lower temperature for factual tasks
-            max_tokens=2000,
-        )
+        kwargs = {
+            "model": self.config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,  # Lower temperature for factual tasks
+            "max_tokens": 2000,
+        }
+        
+        response = await acompletion(**kwargs)
+        result = response.model_dump()
+        
+        _log_llm_interaction(kwargs, result, "complete")
+        
         return response.choices[0].message.content or ""
     
     async def close(self):
