@@ -13,7 +13,7 @@ load_dotenv()
 from rich.console import Console
 from rich.logging import RichHandler
 
-from lethe.agent import Agent
+from lethe.agent import Agent, set_oauth_callbacks
 from lethe.config import get_settings
 from lethe.conversation import ConversationManager
 from lethe.telegram import TelegramBot
@@ -56,6 +56,49 @@ async def run():
     console.print(f"Model: {settings.llm_model}")
     console.print(f"Memory: {settings.memory_dir}")
     console.print()
+    
+    # Get primary user ID for OAuth messages
+    allowed_ids = settings.telegram_allowed_user_ids
+    primary_chat_id = int(allowed_ids.split(",")[0]) if allowed_ids else None
+    
+    # Check if Claude Max needs OAuth setup
+    provider = os.environ.get("LLM_PROVIDER", "").lower()
+    if provider == "claude-max":
+        from lethe.oauth import ClaudeOAuth
+        oauth = ClaudeOAuth()
+        if not oauth.has_valid_tokens():
+            # Need to authenticate - create minimal bot to send auth URL
+            from aiogram import Bot
+            oauth_bot = Bot(token=settings.telegram_bot_token)
+            
+            auth_url = oauth.start_auth_flow()
+            message = (
+                "🔐 *Claude Max Authentication Required*\n\n"
+                "1️⃣ Click this link to authenticate:\n"
+                f"{auth_url}\n\n"
+                "2️⃣ After logging in, you'll see a page that won't load.\n"
+                "3️⃣ Copy the *entire URL* from your browser.\n"
+                "4️⃣ Send it here with: `/oauth <url>`\n\n"
+                "_Example: /oauth http://localhost:19532/callback?code=abc&state=xyz_"
+            )
+            
+            if primary_chat_id:
+                await oauth_bot.send_message(primary_chat_id, message, parse_mode="Markdown")
+                console.print("[yellow]Claude Max authentication required![/yellow]")
+                console.print(f"[dim]Auth URL sent to Telegram. Waiting for /oauth command...[/dim]")
+            else:
+                console.print("[yellow]Claude Max authentication required![/yellow]")
+                console.print(f"\nVisit: {auth_url}\n")
+                console.print("Then paste the redirect URL below:")
+                redirect_url = input("Redirect URL: ").strip()
+                await oauth.complete_auth_flow(redirect_url)
+            
+            await oauth_bot.session.close()
+            # Store oauth instance for later use
+            set_oauth_callbacks()  # Clear any previous callbacks
+            from lethe.agent import _oauth_instance
+            import lethe.agent as agent_module
+            agent_module._oauth_instance = oauth
 
     # Initialize agent (tools auto-loaded)
     console.print("[dim]Initializing agent...[/dim]")
@@ -113,11 +156,26 @@ async def run():
         finally:
             await telegram_bot.stop_typing(chat_id)
 
-    # Initialize Telegram bot (heartbeat_callback set after heartbeat is created)
+    # OAuth callback for Claude Max (if pending auth)
+    oauth_callback = None
+    if provider == "claude-max":
+        from lethe.oauth import ClaudeOAuth
+        # Check if we have a pending OAuth flow
+        import lethe.agent as agent_module
+        if hasattr(agent_module, '_oauth_instance') and agent_module._oauth_instance:
+            oauth_instance = agent_module._oauth_instance
+            if oauth_instance._pending_auth:  # Auth flow started but not completed
+                async def complete_oauth(redirect_url: str):
+                    """Complete pending OAuth flow."""
+                    await oauth_instance.complete_auth_flow(redirect_url)
+                oauth_callback = complete_oauth
+    
+    # Initialize Telegram bot
     telegram_bot = TelegramBot(
         settings,
         conversation_manager=conversation_manager,
         process_callback=process_message,
+        oauth_callback=oauth_callback,
     )
     # heartbeat_callback will be set below after Heartbeat is created
 

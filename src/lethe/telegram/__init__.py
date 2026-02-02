@@ -25,11 +25,13 @@ class TelegramBot:
         conversation_manager: Optional[ConversationManager] = None,
         process_callback: Optional[Callable] = None,
         heartbeat_callback: Optional[Callable] = None,
+        oauth_callback: Optional[Callable] = None,
     ):
         self.settings = settings or get_settings()
         self.conversation_manager = conversation_manager
         self.process_callback = process_callback
         self.heartbeat_callback = heartbeat_callback
+        self.oauth_callback = oauth_callback  # For Claude Max OAuth
 
         self.bot = Bot(
             token=self.settings.telegram_bot_token,
@@ -56,7 +58,8 @@ class TelegramBot:
                 "Commands:\n"
                 "/status - Check status\n"
                 "/stop - Cancel current processing\n"
-                "/heartbeat - Force a check-in"
+                "/heartbeat - Force a check-in\n"
+                "/oauth <url> - Complete Claude Max authentication"
             )
 
         @self.dp.message(Command("status"))
@@ -102,6 +105,34 @@ class TelegramBot:
                 await self.heartbeat_callback()
             else:
                 await message.answer("Heartbeat not configured.")
+        
+        @self.dp.message(Command("oauth"))
+        async def handle_oauth(message: Message):
+            """Handle OAuth redirect URL for Claude Max authentication."""
+            if not self._is_authorized(message.from_user.id):
+                return
+            
+            # Extract URL from command
+            text = message.text or ""
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                await message.answer(
+                    "Usage: /oauth <redirect_url>\n\n"
+                    "Paste the full URL from your browser after authenticating."
+                )
+                return
+            
+            redirect_url = parts[1].strip()
+            
+            if self.oauth_callback:
+                try:
+                    await message.answer("Processing OAuth...")
+                    await self.oauth_callback(redirect_url)
+                    await message.answer("✅ Claude Max authentication successful!")
+                except Exception as e:
+                    await message.answer(f"❌ OAuth failed: {e}")
+            else:
+                await message.answer("OAuth not configured or already authenticated.")
 
         @self.dp.message(F.text)
         async def handle_message(message: Message):

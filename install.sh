@@ -52,10 +52,10 @@ declare -A PROVIDER_KEYS=(
     ["claude-max"]=""  # Uses OAuth
 )
 declare -A PROVIDER_MODELS=(
-    ["openrouter"]="openrouter/moonshotai/kimi-k2.5"
-    ["anthropic"]="claude-opus-4-5-20250514"
+    ["openrouter"]="openrouter/moonshotai/kimi-k2.5-0127"
+    ["anthropic"]="claude-opus-4-5-20251101"
     ["openai"]="gpt-5.2"
-    ["claude-max"]="anthropic/claude-sonnet-4-20250514"
+    ["claude-max"]="anthropic/claude-opus-4-5-20251101"
 )
 declare -A PROVIDER_URLS=(
     ["openrouter"]="https://openrouter.ai/keys"

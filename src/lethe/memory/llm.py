@@ -48,29 +48,30 @@ def _log_llm_interaction(request: Dict, response: Dict, label: str = "chat"):
         logger.warning(f"Failed to log LLM interaction: {e}")
 
 # Provider configurations
+# Models updated 2026-02
 PROVIDERS = {
     "openrouter": {
         "env_key": "OPENROUTER_API_KEY",
         "model_prefix": "openrouter/",
-        "default_model": "openrouter/moonshotai/kimi-k2.5",
+        "default_model": "openrouter/moonshotai/kimi-k2.5-0127",  # Latest Kimi K2.5
         "uses_oauth": False,
     },
     "anthropic": {
         "env_key": "ANTHROPIC_API_KEY",
         "model_prefix": "",  # litellm auto-detects claude models
-        "default_model": "claude-opus-4-5-20250514",
+        "default_model": "claude-opus-4-5-20251101",  # Claude Opus 4.5
         "uses_oauth": False,
     },
     "openai": {
         "env_key": "OPENAI_API_KEY",
         "model_prefix": "",  # litellm auto-detects gpt models
-        "default_model": "gpt-5.2",
+        "default_model": "gpt-5.2",  # GPT-5.2
         "uses_oauth": False,
     },
     "claude-max": {
         "env_key": None,  # Uses OAuth instead
         "model_prefix": "anthropic/",
-        "default_model": "anthropic/claude-sonnet-4-20250514",
+        "default_model": "anthropic/claude-opus-4-5-20251101",  # Claude Opus 4.5
         "uses_oauth": True,
         "api_base": "https://api.anthropic.com",
     },

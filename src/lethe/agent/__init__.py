@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 
 # OAuth support (lazy import to avoid circular deps)
 _oauth_instance = None
+_oauth_send_message = None
+_oauth_receive_message = None
+
+
+def set_oauth_callbacks(
+    send_message: Optional[Callable] = None,
+    receive_message: Optional[Callable] = None,
+):
+    """Set callbacks for OAuth flow (called from main.py with Telegram functions)."""
+    global _oauth_send_message, _oauth_receive_message
+    _oauth_send_message = send_message
+    _oauth_receive_message = receive_message
 
 
 async def _get_oauth_token() -> str:
@@ -25,7 +37,10 @@ async def _get_oauth_token() -> str:
     global _oauth_instance
     if _oauth_instance is None:
         from lethe.oauth import ensure_claude_max_auth
-        _oauth_instance = await ensure_claude_max_auth()
+        _oauth_instance = await ensure_claude_max_auth(
+            send_message=_oauth_send_message,
+            receive_message=_oauth_receive_message,
+        )
     return await _oauth_instance.get_access_token()
 
 
