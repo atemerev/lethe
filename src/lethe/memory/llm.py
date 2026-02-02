@@ -82,6 +82,15 @@ TOKEN_SAFETY_MARGIN = 1.3  # Safety margin for approximate token counting
 SLIDING_WINDOW_KEEP_RATIO = 0.7  # Keep 70% of context after compaction
 COMPACTION_TRIGGER_RATIO = 0.85  # Trigger compaction at 85% capacity
 
+# Minimal heartbeat system prompt (lightweight, no full identity)
+HEARTBEAT_SYSTEM_PROMPT = """You are a background task checker. Your job is to:
+1. Check pending tasks, reminders, or calendar items if tools are available
+2. Report anything time-sensitive that needs user attention
+
+Be concise. End with either:
+- "ok" if nothing urgent
+- A brief message if something needs attention NOW"""
+
 # Letta-style summarization prompt
 SUMMARIZE_PROMPT = """Your job is to summarize a history of previous messages in a conversation between an AI persona and a human.
 The conversation you are given is from a fixed context window and may not be complete.
@@ -648,6 +657,81 @@ class AsyncLLMClient:
         _log_llm_interaction(kwargs, result, "complete" if not use_aux else "complete_aux")
         
         return response.choices[0].message.content or ""
+    
+    async def heartbeat(self, message: str) -> str:
+        """Process heartbeat with minimal context and aux model.
+        
+        Uses lightweight system prompt, no conversation history, and aux model
+        for cost efficiency. Tools are still available for checking tasks.
+        
+        Args:
+            message: Heartbeat message
+            
+        Returns:
+            Response string
+        """
+        # Build minimal messages (just system + heartbeat message)
+        messages = [
+            {"role": "system", "content": HEARTBEAT_SYSTEM_PROMPT},
+            {"role": "user", "content": message},
+        ]
+        
+        # Get only task-related tools (if any)
+        task_tools = []
+        for name, (func, schema) in self._tools.items():
+            if any(kw in name.lower() for kw in ["todo", "task", "remind", "calendar"]):
+                task_tools.append({"type": "function", "function": schema})
+        
+        kwargs = {
+            "model": self.config.model_aux,  # Use aux model
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 1000,
+        }
+        
+        if task_tools:
+            kwargs["tools"] = task_tools
+        
+        # Simple loop for tool calls (max 3 iterations)
+        for _ in range(3):
+            response = await acompletion(**kwargs)
+            result = response.model_dump()
+            _log_llm_interaction(kwargs, result, "heartbeat")
+            
+            choice = response.choices[0]
+            
+            # Check for tool calls
+            if choice.message.tool_calls:
+                # Execute tools and add results
+                kwargs["messages"].append(choice.message.model_dump())
+                
+                for tool_call in choice.message.tool_calls:
+                    func_name = tool_call.function.name.strip()
+                    func = self.get_tool(func_name)
+                    
+                    if func:
+                        try:
+                            import json
+                            args = json.loads(tool_call.function.arguments)
+                            if asyncio.iscoroutinefunction(func):
+                                tool_result = await func(**args)
+                            else:
+                                tool_result = func(**args)
+                        except Exception as e:
+                            tool_result = f"Error: {e}"
+                    else:
+                        tool_result = f"Unknown tool: {func_name}"
+                    
+                    kwargs["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": str(tool_result)[:2000],
+                    })
+            else:
+                # No tool calls, return response
+                return choice.message.content or "ok"
+        
+        return "ok"  # Max iterations reached
     
     async def close(self):
         """Cleanup (no-op with litellm, kept for API compatibility)."""

@@ -260,6 +260,20 @@ class Agent:
         
         return response
     
+    async def heartbeat(self, message: str) -> str:
+        """Process heartbeat with minimal context and aux model.
+        
+        Uses lightweight context (no full identity, limited history) and
+        aux model for cost efficiency.
+        
+        Args:
+            message: Heartbeat message
+            
+        Returns:
+            Response string
+        """
+        return await self.llm.heartbeat(message)
+    
     async def close(self):
         """Clean up resources."""
         await self.llm.close()
