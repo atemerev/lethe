@@ -191,7 +191,7 @@ class ClaudeOAuth:
         
         logger.info("Refreshing Claude OAuth access token...")
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.post(
                 TOKEN_URL,
                 json={
@@ -199,12 +199,23 @@ class ClaudeOAuth:
                     "refresh_token": self._tokens.refresh_token,
                     "client_id": CLIENT_ID,
                 },
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Lethe/1.0",
+                },
                 timeout=30.0,
             )
             
             if response.status_code != 200:
                 logger.error(f"Token refresh failed: {response.text}")
-                raise ValueError(f"Token refresh failed: {response.status_code}")
+                # Clear tokens so we know they're invalid
+                self._tokens = None
+                if self.token_path.exists():
+                    self.token_path.unlink()
+                raise ValueError(
+                    f"Token refresh failed ({response.status_code}). "
+                    "Please re-authenticate: run 'claude login' and restart Lethe."
+                )
             
             data = response.json()
             self._tokens = OAuthTokens(
@@ -213,6 +224,19 @@ class ClaudeOAuth:
                 expires_at=datetime.now(timezone.utc) + timedelta(seconds=data.get("expires_in", 28800)),
             )
             self._save_tokens()
+            
+            # Also update Claude Code credentials if we got a new refresh token
+            if "refresh_token" in data and CLAUDE_CODE_CREDENTIALS.exists():
+                try:
+                    cc_data = json.loads(CLAUDE_CODE_CREDENTIALS.read_text())
+                    cc_data["claudeAiOauth"]["accessToken"] = data["access_token"]
+                    cc_data["claudeAiOauth"]["refreshToken"] = data["refresh_token"]
+                    cc_data["claudeAiOauth"]["expiresAt"] = int(self._tokens.expires_at.timestamp() * 1000)
+                    CLAUDE_CODE_CREDENTIALS.write_text(json.dumps(cc_data))
+                    logger.info("Updated Claude Code credentials")
+                except Exception as e:
+                    logger.warning(f"Failed to update Claude Code credentials: {e}")
+            
             logger.info("Token refresh successful")
     
     def start_auth_flow(self) -> str:

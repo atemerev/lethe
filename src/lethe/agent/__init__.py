@@ -68,9 +68,12 @@ class Agent:
         provider = os.environ.get("LLM_PROVIDER", "").lower()
         oauth_getter = _get_oauth_token if provider == "claude-max" else None
         
+        # Only pass model if explicitly set in env (otherwise use provider default)
+        explicit_model = os.environ.get("LLM_MODEL", "")
+        
         llm_config = LLMConfig(
             provider=provider or "",  # Empty = auto-detect
-            model=self.settings.llm_model or "",  # Empty = use provider default
+            model=explicit_model,  # Empty = use provider default
             context_limit=self.settings.llm_context_limit,
             oauth_token_getter=oauth_getter,
         )
