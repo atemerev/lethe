@@ -113,12 +113,13 @@ async def run():
         finally:
             await telegram_bot.stop_typing(chat_id)
 
-    # Initialize Telegram bot
+    # Initialize Telegram bot (heartbeat_callback set after heartbeat is created)
     telegram_bot = TelegramBot(
         settings,
         conversation_manager=conversation_manager,
         process_callback=process_message,
     )
+    # heartbeat_callback will be set below after Heartbeat is created
 
     # Initialize heartbeat
     heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 15 * 60))  # Default 15 min
@@ -143,6 +144,9 @@ async def run():
         interval=heartbeat_interval,
         enabled=heartbeat_enabled and heartbeat_chat_id is not None,
     )
+    
+    # Set heartbeat trigger on telegram bot for /heartbeat command
+    telegram_bot.heartbeat_callback = heartbeat.trigger
 
     # Set up shutdown handling
     shutdown_event = asyncio.Event()

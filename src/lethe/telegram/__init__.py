@@ -24,10 +24,12 @@ class TelegramBot:
         settings: Optional[Settings] = None,
         conversation_manager: Optional[ConversationManager] = None,
         process_callback: Optional[Callable] = None,
+        heartbeat_callback: Optional[Callable] = None,
     ):
         self.settings = settings or get_settings()
         self.conversation_manager = conversation_manager
         self.process_callback = process_callback
+        self.heartbeat_callback = heartbeat_callback
 
         self.bot = Bot(
             token=self.settings.telegram_bot_token,
@@ -53,7 +55,8 @@ class TelegramBot:
                 "Send me any message and I'll help you.\n\n"
                 "Commands:\n"
                 "/status - Check status\n"
-                "/stop - Cancel current processing"
+                "/stop - Cancel current processing\n"
+                "/heartbeat - Force a check-in"
             )
 
         @self.dp.message(Command("status"))
@@ -88,6 +91,17 @@ class TelegramBot:
                     await message.answer("Processing cancelled.")
                 else:
                     await message.answer("Nothing to cancel.")
+
+        @self.dp.message(Command("heartbeat"))
+        async def handle_heartbeat(message: Message):
+            if not self._is_authorized(message.from_user.id):
+                return
+
+            if self.heartbeat_callback:
+                await message.answer("Triggering heartbeat...")
+                await self.heartbeat_callback()
+            else:
+                await message.answer("Heartbeat not configured.")
 
         @self.dp.message(F.text)
         async def handle_message(message: Message):
