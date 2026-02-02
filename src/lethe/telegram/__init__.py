@@ -38,6 +38,8 @@ class TelegramBot:
         self.dp = Dispatcher()
         self._running = False
         self._typing_tasks: dict[int, asyncio.Task] = {}
+        self._last_message_id: Optional[int] = None
+        self._last_chat_id: Optional[int] = None
 
         self._setup_handlers()
 
@@ -115,6 +117,10 @@ class TelegramBot:
                 await message.answer("Bot not fully initialized.")
                 return
 
+            # Store last message ID for reactions
+            self._last_message_id = message.message_id
+            self._last_chat_id = message.chat.id
+            
             # Add message to conversation manager
             await self.conversation_manager.add_message(
                 chat_id=message.chat.id,
@@ -123,6 +129,7 @@ class TelegramBot:
                 metadata={
                     "username": message.from_user.username,
                     "first_name": message.from_user.first_name,
+                    "message_id": message.message_id,
                 },
                 process_callback=self.process_callback,
             )
@@ -238,6 +245,26 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
             await self.send_message(chat_id, f"[Image: {photo_path}]")
+    
+    async def react_to_message(self, chat_id: int, message_id: int, emoji: str = "👍"):
+        """React to a message with an emoji."""
+        from aiogram.types import ReactionTypeEmoji
+        try:
+            await self.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_id,
+                reaction=[ReactionTypeEmoji(emoji=emoji)]
+            )
+            logger.info(f"Reacted to message {message_id} with {emoji}")
+        except Exception as e:
+            logger.warning(f"Failed to react to message: {e}")
+    
+    async def react_to_last_message(self, emoji: str = "👍"):
+        """React to the last received message."""
+        if self._last_chat_id and self._last_message_id:
+            await self.react_to_message(self._last_chat_id, self._last_message_id, emoji)
+        else:
+            logger.warning("No last message to react to")
 
     async def start_typing(self, chat_id: int):
         """Start showing typing indicator."""
