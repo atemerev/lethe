@@ -242,16 +242,30 @@ class ContextWindow:
         
         Args:
             messages: List of dicts with 'role', 'content', and optionally 'created_at' keys
+        
+        Note: Tool messages are filtered out - they require paired tool_use/tool_result
+        which can't be guaranteed from history. Only user/assistant messages loaded.
         """
         for msg in messages:
+            role = msg.get("role", "user")
+            
+            # Skip tool messages - they can't be properly paired from history
+            # Anthropic requires tool_result to immediately follow tool_use
+            if role == "tool":
+                continue
+            
             content = msg.get("content", "")
             # Prepend timestamp if available
             if msg.get("created_at"):
                 timestamp = msg["created_at"][:16].replace("T", " ")  # "2026-02-02 10:30"
                 content = f"[{timestamp}] {content}"
             
+            # Skip assistant messages that were just tool calls (no text content)
+            if role == "assistant" and not content:
+                continue
+            
             self.messages.append(Message(
-                role=msg.get("role", "user"),
+                role=role,
                 content=content,
             ))
         # Compress if needed after loading
