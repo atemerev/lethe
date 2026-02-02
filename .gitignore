@@ -37,3 +37,6 @@ build/
 # Letta Code
 .letta/
 workspace/
+
+# Debug logs
+logs/
