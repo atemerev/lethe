@@ -532,10 +532,11 @@ EOF
     $CONTAINER_CMD stop lethe 2>/dev/null || true
     $CONTAINER_CMD rm lethe 2>/dev/null || true
     
-    # Run container
+    # Run container (--userns=keep-id maps container user to host user for file permissions)
     $CONTAINER_CMD run -d \
         --name lethe \
         --restart unless-stopped \
+        --userns=keep-id \
         --env-file "$CONFIG_DIR/container.env" \
         -v "$WORKSPACE_DIR:/workspace:Z" \
         lethe:latest
