@@ -281,7 +281,7 @@ should be working now
             output = []
             for r in results:
                 timestamp = r['created_at'][:16].replace('T', ' ')
-                content = r['content'][:200] + "..." if len(r['content']) > 200 else r['content']
+                content = r['content']
                 output.append(f"[{timestamp}] {r['role']}: {content}")
             
             return f"Found {len(results)} messages:\n\n" + "\n\n".join(output)
