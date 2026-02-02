@@ -139,8 +139,8 @@ async def run():
             await telegram_bot.send_message(heartbeat_chat_id, response)
     
     async def heartbeat_summarize(prompt: str) -> str:
-        """Summarize/evaluate heartbeat response before sending."""
-        return await agent.llm.complete(prompt)
+        """Summarize/evaluate heartbeat response before sending (uses aux model)."""
+        return await agent.llm.complete(prompt, use_aux=True)
     
     heartbeat = Heartbeat(
         process_callback=heartbeat_process,

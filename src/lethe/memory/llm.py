@@ -53,17 +53,20 @@ PROVIDERS = {
     "openrouter": {
         "env_key": "OPENROUTER_API_KEY",
         "model_prefix": "openrouter/",
-        "default_model": "openrouter/moonshotai/kimi-k2.5-0127",  # Latest Kimi K2.5
+        "default_model": "openrouter/moonshotai/kimi-k2.5-0127",
+        "default_model_aux": "openrouter/moonshotai/kimi-k2.5-0127",
     },
     "anthropic": {
         "env_key": "ANTHROPIC_API_KEY",
         "model_prefix": "",  # litellm auto-detects claude models
         "default_model": "claude-opus-4-5-20251101",  # Claude Opus 4.5
+        "default_model_aux": "claude-haiku-4-5-20251001",  # Claude Haiku 4.5
     },
     "openai": {
         "env_key": "OPENAI_API_KEY",
         "model_prefix": "",  # litellm auto-detects gpt models
-        "default_model": "gpt-5.2",  # GPT-5.2
+        "default_model": "gpt-5.2",
+        "default_model_aux": "gpt-5.2-mini",
     },
 }
 
@@ -96,6 +99,7 @@ class LLMConfig:
     """LLM configuration with multi-provider support via litellm."""
     provider: str = ""  # Auto-detect if not set
     model: str = ""  # Use provider default if not set
+    model_aux: str = ""  # Auxiliary model for heartbeats, summarization (empty = use main)
     context_limit: int = DEFAULT_CONTEXT_LIMIT
     max_output_tokens: int = DEFAULT_MAX_OUTPUT
     temperature: float = 0.7
@@ -110,21 +114,29 @@ class LLMConfig:
         if not provider_config:
             raise ValueError(f"Unknown provider: {self.provider}. Valid: {list(PROVIDERS.keys())}")
         
+        prefix = provider_config["model_prefix"]
+        
         # Set model from provider default if not set
         if not self.model:
             self.model = provider_config["default_model"]
         else:
             # Add provider prefix if needed (for litellm)
-            prefix = provider_config["model_prefix"]
             if prefix and not self.model.startswith(prefix):
                 self.model = prefix + self.model
+        
+        # Set aux model (for heartbeats, summarization)
+        if not self.model_aux:
+            self.model_aux = provider_config.get("default_model_aux", self.model)
+        else:
+            if prefix and not self.model_aux.startswith(prefix):
+                self.model_aux = prefix + self.model_aux
         
         # Verify API key exists
         env_key = provider_config.get("env_key")
         if env_key and not os.environ.get(env_key):
             raise ValueError(f"{env_key} not set")
         
-        logger.info(f"LLM config: provider={self.provider}, model={self.model}")
+        logger.info(f"LLM config: provider={self.provider}, model={self.model}, aux={self.model_aux}")
     
     def _detect_provider(self) -> str:
         """Auto-detect provider from available API keys."""
@@ -609,13 +621,14 @@ class AsyncLLMClient:
         
         return result
     
-    async def complete(self, prompt: str) -> str:
+    async def complete(self, prompt: str, use_aux: bool = False) -> str:
         """Simple completion without tools or context management.
         
         Used for summarization and other utility tasks.
         
         Args:
             prompt: The prompt to complete
+            use_aux: If True, use auxiliary model (cheaper, for heartbeats/summarization)
             
         Returns:
             The completion text
@@ -625,10 +638,14 @@ class AsyncLLMClient:
         kwargs["temperature"] = 0.3  # Lower temperature for factual tasks
         kwargs["max_tokens"] = 2000
         
+        # Use aux model if requested
+        if use_aux:
+            kwargs["model"] = self.config.model_aux
+        
         response = await acompletion(**kwargs)
         result = response.model_dump()
         
-        _log_llm_interaction(kwargs, result, "complete")
+        _log_llm_interaction(kwargs, result, "complete" if not use_aux else "complete_aux")
         
         return response.choices[0].message.content or ""
     

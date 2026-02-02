@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        env_file_priority="env_file",  # .env takes precedence over shell environment
     )
 
     # Telegram
@@ -30,14 +31,18 @@ class Settings(BaseSettings):
             return []
         return [int(x.strip()) for x in self.telegram_allowed_user_ids.split(",") if x.strip()]
 
-    # LLM (OpenRouter)
+    # LLM
     openrouter_api_key: Optional[str] = Field(
         default=None,
         description="OpenRouter API key (reads from OPENROUTER_API_KEY env var)",
     )
     llm_model: str = Field(
-        default="moonshotai/kimi-k2.5",
-        description="LLM model (OpenRouter model ID)",
+        default="",
+        description="Main LLM model (empty = use provider default)",
+    )
+    llm_model_aux: str = Field(
+        default="",
+        description="Auxiliary LLM model for heartbeats, summarization (empty = use main model)",
     )
     llm_context_limit: int = Field(
         default=128000,

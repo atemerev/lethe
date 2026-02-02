@@ -36,12 +36,11 @@ class Agent:
         )
         
         # Initialize LLM client (provider auto-detected from env vars)
-        # Only pass model if explicitly set in env (otherwise use provider default)
-        explicit_model = os.environ.get("LLM_MODEL", "")
-        
+        # Only pass model if explicitly set in env/settings (otherwise use provider default)
         llm_config = LLMConfig(
             provider=os.environ.get("LLM_PROVIDER", ""),  # Empty = auto-detect
-            model=explicit_model,  # Empty = use provider default
+            model=self.settings.llm_model,  # Empty = use provider default
+            model_aux=self.settings.llm_model_aux,  # Empty = use provider default aux
             context_limit=self.settings.llm_context_limit,
         )
         
