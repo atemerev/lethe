@@ -1,6 +1,7 @@
 """Lethe Agent - Local agent with memory and tool execution.
 
-Uses the local memory layer (LanceDB) and direct LLM calls (OpenRouter).
+Uses the local memory layer (LanceDB) and direct LLM calls.
+Supports multiple providers including Claude Max subscription via OAuth.
 Tools are just Python functions - no complex registration or approval loops.
 """
 
@@ -14,6 +15,18 @@ from lethe.memory import MemoryStore, AsyncLLMClient, LLMConfig, Hippocampus
 from lethe.tools import get_all_tools, function_to_schema
 
 logger = logging.getLogger(__name__)
+
+# OAuth support (lazy import to avoid circular deps)
+_oauth_instance = None
+
+
+async def _get_oauth_token() -> str:
+    """Get OAuth token for Claude Max, initializing if needed."""
+    global _oauth_instance
+    if _oauth_instance is None:
+        from lethe.oauth import ensure_claude_max_auth
+        _oauth_instance = await ensure_claude_max_auth()
+    return await _oauth_instance.get_access_token()
 
 
 class Agent:
@@ -36,9 +49,15 @@ class Agent:
         )
         
         # Initialize LLM client (provider auto-detected from env vars)
+        # Check if using OAuth provider (claude-max)
+        provider = os.environ.get("LLM_PROVIDER", "").lower()
+        oauth_getter = _get_oauth_token if provider == "claude-max" else None
+        
         llm_config = LLMConfig(
+            provider=provider or "",  # Empty = auto-detect
             model=self.settings.llm_model or "",  # Empty = use provider default
             context_limit=self.settings.llm_context_limit,
+            oauth_token_getter=oauth_getter,
         )
         
         # Load system prompt from config

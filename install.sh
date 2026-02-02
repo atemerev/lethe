@@ -41,23 +41,27 @@ INSTALL_MODE="container"
 # Provider defaults
 declare -A PROVIDERS=(
     ["openrouter"]="OpenRouter (recommended - access to all models)"
-    ["anthropic"]="Anthropic (Claude models directly)"
-    ["openai"]="OpenAI (GPT models directly)"
+    ["anthropic"]="Anthropic API (Claude models with API key)"
+    ["openai"]="OpenAI (GPT models)"
+    ["claude-max"]="Claude Max subscription (uses OAuth, no API key needed)"
 )
 declare -A PROVIDER_KEYS=(
     ["openrouter"]="OPENROUTER_API_KEY"
     ["anthropic"]="ANTHROPIC_API_KEY"
     ["openai"]="OPENAI_API_KEY"
+    ["claude-max"]=""  # Uses OAuth
 )
 declare -A PROVIDER_MODELS=(
     ["openrouter"]="openrouter/moonshotai/kimi-k2.5"
     ["anthropic"]="claude-opus-4-5-20250514"
     ["openai"]="gpt-5.2"
+    ["claude-max"]="anthropic/claude-sonnet-4-20250514"
 )
 declare -A PROVIDER_URLS=(
     ["openrouter"]="https://openrouter.ai/keys"
     ["anthropic"]="https://console.anthropic.com/settings/keys"
     ["openai"]="https://platform.openai.com/api-keys"
+    ["claude-max"]="(OAuth - no API key needed)"
 )
 
 print_header() {
@@ -143,7 +147,7 @@ prompt_provider() {
     fi
     
     local i=1
-    for provider in openrouter anthropic openai; do
+    for provider in openrouter anthropic openai claude-max; do
         local desc="${PROVIDERS[$provider]}"
         local detected=""
         if [[ " ${DETECTED_PROVIDERS[*]} " =~ " $provider " ]]; then
@@ -161,13 +165,14 @@ prompt_provider() {
         default_choice=3
     fi
     
-    read -p "Choose provider [1-3, default=$default_choice]: " choice < /dev/tty
+    read -p "Choose provider [1-4, default=$default_choice]: " choice < /dev/tty
     choice=${choice:-$default_choice}
     
     case $choice in
         1) SELECTED_PROVIDER="openrouter" ;;
         2) SELECTED_PROVIDER="anthropic" ;;
         3) SELECTED_PROVIDER="openai" ;;
+        4) SELECTED_PROVIDER="claude-max" ;;
         *) SELECTED_PROVIDER="openrouter" ;;
     esac
     
@@ -191,6 +196,15 @@ prompt_model() {
 prompt_api_key() {
     local key_name="${PROVIDER_KEYS[$SELECTED_PROVIDER]}"
     local key_url="${PROVIDER_URLS[$SELECTED_PROVIDER]}"
+    
+    # Claude Max uses OAuth, no API key needed
+    if [[ "$SELECTED_PROVIDER" == "claude-max" ]]; then
+        echo ""
+        echo -e "${GREEN}Claude Max uses OAuth authentication${NC}"
+        echo "   You'll be prompted to log in via browser on first run."
+        API_KEY=""
+        return
+    fi
     
     # Check if already have key
     local existing_key=""
@@ -307,6 +321,12 @@ setup_config() {
     mkdir -p "$CONFIG_DIR"
     
     local key_name="${PROVIDER_KEYS[$SELECTED_PROVIDER]}"
+    local api_key_line=""
+    
+    # Only add API key line if not using OAuth provider
+    if [[ -n "$key_name" && -n "$API_KEY" ]]; then
+        api_key_line="$key_name=$API_KEY"
+    fi
     
     cat > "$CONFIG_DIR/.env" << EOF
 # Lethe Configuration
@@ -319,7 +339,7 @@ TELEGRAM_ALLOWED_USER_IDS=$TELEGRAM_USER_ID
 # LLM Provider
 LLM_PROVIDER=$SELECTED_PROVIDER
 LLM_MODEL=$SELECTED_MODEL
-$key_name=$API_KEY
+$api_key_line
 
 # Optional: Heartbeat interval (seconds, default 900 = 15 min)
 # HEARTBEAT_INTERVAL=900

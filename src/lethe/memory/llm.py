@@ -53,16 +53,26 @@ PROVIDERS = {
         "env_key": "OPENROUTER_API_KEY",
         "model_prefix": "openrouter/",
         "default_model": "openrouter/moonshotai/kimi-k2.5",
+        "uses_oauth": False,
     },
     "anthropic": {
         "env_key": "ANTHROPIC_API_KEY",
         "model_prefix": "",  # litellm auto-detects claude models
         "default_model": "claude-opus-4-5-20250514",
+        "uses_oauth": False,
     },
     "openai": {
         "env_key": "OPENAI_API_KEY",
         "model_prefix": "",  # litellm auto-detects gpt models
         "default_model": "gpt-5.2",
+        "uses_oauth": False,
+    },
+    "claude-max": {
+        "env_key": None,  # Uses OAuth instead
+        "model_prefix": "anthropic/",
+        "default_model": "anthropic/claude-sonnet-4-20250514",
+        "uses_oauth": True,
+        "api_base": "https://api.anthropic.com",
     },
 }
 
@@ -98,6 +108,7 @@ class LLMConfig:
     context_limit: int = DEFAULT_CONTEXT_LIMIT
     max_output_tokens: int = DEFAULT_MAX_OUTPUT
     temperature: float = 0.7
+    oauth_token_getter: Optional[Callable] = None  # For OAuth providers
     
     def __post_init__(self):
         # Auto-detect provider from environment if not set
@@ -117,10 +128,16 @@ class LLMConfig:
             if prefix and not self.model.startswith(prefix):
                 self.model = prefix + self.model
         
-        # Verify API key exists
-        env_key = provider_config["env_key"]
-        if not os.environ.get(env_key):
-            raise ValueError(f"{env_key} not set")
+        # Check authentication
+        if provider_config.get("uses_oauth"):
+            # OAuth provider - token getter must be provided or set later
+            if not self.oauth_token_getter:
+                logger.warning(f"OAuth provider {self.provider} requires oauth_token_getter")
+        else:
+            # API key provider - verify key exists
+            env_key = provider_config.get("env_key")
+            if env_key and not os.environ.get(env_key):
+                raise ValueError(f"{env_key} not set")
         
         logger.info(f"LLM config: provider={self.provider}, model={self.model}")
     
@@ -131,14 +148,19 @@ class LLMConfig:
         if provider and provider in PROVIDERS:
             return provider
         
-        # Check for API keys in order of preference
+        # Check for API keys in order of preference (skip OAuth providers)
         for name, config in PROVIDERS.items():
-            if os.environ.get(config["env_key"]):
+            env_key = config.get("env_key")
+            if env_key and os.environ.get(env_key):
                 logger.info(f"Auto-detected provider: {name}")
                 return name
         
         # Default
         return DEFAULT_PROVIDER
+    
+    def uses_oauth(self) -> bool:
+        """Check if this provider uses OAuth."""
+        return PROVIDERS.get(self.provider, {}).get("uses_oauth", False)
 
 
 @dataclass
@@ -559,16 +581,31 @@ class AsyncLLMClient:
         
         return "Task processing limit reached. The work done so far has been saved."
     
+    async def _get_api_kwargs(self) -> Dict:
+        """Build kwargs for litellm API call, including OAuth if needed."""
+        kwargs = {
+            "model": self.config.model,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_output_tokens,
+        }
+        
+        # Add OAuth token for claude-max provider
+        if self.config.uses_oauth() and self.config.oauth_token_getter:
+            token = await self.config.oauth_token_getter()
+            kwargs["api_key"] = token
+            # Also set api_base for Anthropic
+            provider_config = PROVIDERS.get(self.config.provider, {})
+            if "api_base" in provider_config:
+                kwargs["api_base"] = provider_config["api_base"]
+        
+        return kwargs
+    
     async def _call_api(self) -> Dict:
         """Make API call via litellm."""
         messages = self.context.build_messages()
         
-        kwargs = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_output_tokens,
-        }
+        kwargs = await self._get_api_kwargs()
+        kwargs["messages"] = messages
         
         if self.tools:
             kwargs["tools"] = self.tools
@@ -587,12 +624,8 @@ class AsyncLLMClient:
         """Make API call without tools (for final response after hitting limit)."""
         messages = self.context.build_messages()
         
-        kwargs = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_output_tokens,
-        }
+        kwargs = await self._get_api_kwargs()
+        kwargs["messages"] = messages
         
         logger.debug(f"API call (no tools): {len(messages)} messages")
         
@@ -614,12 +647,10 @@ class AsyncLLMClient:
         Returns:
             The completion text
         """
-        kwargs = {
-            "model": self.config.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,  # Lower temperature for factual tasks
-            "max_tokens": 2000,
-        }
+        kwargs = await self._get_api_kwargs()
+        kwargs["messages"] = [{"role": "user", "content": prompt}]
+        kwargs["temperature"] = 0.3  # Lower temperature for factual tasks
+        kwargs["max_tokens"] = 2000
         
         response = await acompletion(**kwargs)
         result = response.model_dump()
