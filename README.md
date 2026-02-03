@@ -1,5 +1,10 @@
 # Lethe
 
+[![Release](https://img.shields.io/github/v/release/atemerev/lethe?style=flat-square&color=blue)](https://github.com/atemerev/lethe/releases)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Telegram](https://img.shields.io/badge/Telegram-bot-blue?style=flat-square&logo=telegram)](https://telegram.org)
+
 Autonomous executive assistant with persistent memory.
 
 Lethe is a 24/7 AI assistant that you communicate with via Telegram. It remembers everything - your preferences, your projects, conversations from months ago. The more you use it, the more useful it becomes.
@@ -35,7 +40,7 @@ All data stays local. Only LLM API calls leave your machine.
 ### 1. One-Line Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/atemerev/lethe/main/install.sh | bash
+curl -fsSL https://lethe.gg/install | bash
 ```
 
 The installer will prompt for:
