@@ -146,29 +146,35 @@ class MessageHistory:
     def get_recent(self, limit: int = 20) -> List[dict]:
         """Get recent messages (oldest first for context).
         
-        Note: LanceDB doesn't reliably support ORDER BY, so we fetch more
-        results and sort in Python. Fetch 3x limit to ensure we get enough.
+        Uses PyArrow for efficient sorting since LanceDB search() doesn't
+        reliably support ORDER BY.
         """
         table = self._get_table()
-        # Fetch extra to account for _init_ row and ensure we get newest
-        fetch_limit = max(limit * 3, 100)
-        results = table.search().limit(fetch_limit).to_list()
+        
+        # Get full table as Arrow and sort by created_at descending
+        arrow_table = table.to_arrow()
+        sorted_table = arrow_table.sort_by([("created_at", "descending")])
         
         messages = []
-        for r in results:
-            if r["id"] == "_init_":
+        for i in range(min(limit + 1, sorted_table.num_rows)):  # +1 for possible _init_
+            row_id = sorted_table["id"][i].as_py()
+            if row_id == "_init_":
                 continue
+            
+            metadata_str = sorted_table["metadata"][i].as_py()
             messages.append({
-                "id": r["id"],
-                "role": r["role"],
-                "content": r["content"],
-                "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
-                "created_at": r["created_at"],
+                "id": row_id,
+                "role": sorted_table["role"][i].as_py(),
+                "content": sorted_table["content"][i].as_py(),
+                "metadata": json.loads(metadata_str) if metadata_str else {},
+                "created_at": sorted_table["created_at"][i].as_py(),
             })
+            
+            if len(messages) >= limit:
+                break
         
-        # Sort by created_at ascending, take last N (most recent)
-        messages.sort(key=lambda m: m["created_at"])
-        return messages[-limit:]
+        # Reverse to get oldest first (chronological order for context)
+        return list(reversed(messages))
     
     def search(
         self,
