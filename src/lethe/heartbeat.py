@@ -193,6 +193,17 @@ class Heartbeat:
                 final_response = evaluated.strip() if evaluated else "ok"
                 if "</think>" in final_response:
                     final_response = final_response.split("</think>")[-1].strip()
+                # Strip any instruction echoing from model response
+                prefixes_to_strip = [
+                    "A brief 1-2 sentence message (only if genuinely time-sensitive):",
+                    "A brief 1-2 sentence message:",
+                    "2. A brief",
+                    "1. The word",
+                ]
+                for prefix in prefixes_to_strip:
+                    if final_response.startswith(prefix):
+                        final_response = final_response[len(prefix):].strip()
+                
                 # Also handle reasoning_content that some models include
                 if final_response.startswith("The user is asking") or final_response.startswith("Analysis:"):
                     # Model outputted reasoning, try to find actual answer
