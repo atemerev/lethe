@@ -306,10 +306,51 @@ should be working now
                 "_image_attachment": {"path": file_path}
             }
         
+        def list_tools() -> str:
+            """List all available tools grouped by category.
+            
+            Returns a summary of all tools the agent can use.
+            """
+            tools = self.llm._tools
+            
+            # Categorize tools
+            categories = {
+                "Memory": ["memory_read", "memory_update", "memory_append", "archival_search", "archival_insert", "conversation_search"],
+                "Telegram": ["telegram_react", "telegram_send_message", "telegram_send_file", "send_image"],
+                "Browser": ["browser_open", "browser_close", "browser_snapshot", "browser_click", "browser_type", "browser_scroll", "browser_screenshot", "browser_url"],
+                "File": ["read_file", "write_file", "list_directory"],
+                "CLI": ["run_command", "check_tool"],
+                "Todo": ["todo_create", "todo_list", "todo_search", "todo_complete", "todo_remind_check", "todo_reminded"],
+            }
+            
+            output = ["# Available Tools\n"]
+            
+            for category, tool_names in categories.items():
+                available = [name for name in tool_names if name in tools]
+                if available:
+                    output.append(f"## {category}")
+                    for name in available:
+                        func, schema = tools[name]
+                        desc = schema.get("description", "")[:60] if schema else ""
+                        output.append(f"- `{name}`: {desc}...")
+                    output.append("")
+            
+            # Other tools not in categories
+            categorized = set(sum(categories.values(), []))
+            other = [name for name in tools if name not in categorized]
+            if other:
+                output.append("## Other")
+                for name in other:
+                    func, schema = tools[name]
+                    desc = schema.get("description", "")[:60] if schema else ""
+                    output.append(f"- `{name}`: {desc}...")
+            
+            return "\n".join(output)
+        
         # Add all memory tools
         for func in [memory_read, memory_update, memory_append, 
                      archival_search, archival_insert, conversation_search,
-                     send_image]:
+                     send_image, list_tools]:
             self.llm.add_tool(func)
     
     def add_tool(self, func: Callable):
