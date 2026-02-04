@@ -168,13 +168,19 @@ Summary:"""
         - Behavioral cues and roleplay instructions  
         - Communication style and output format rules
         """
-        # Load identity from memory block
+        # Load identity from memory block (preferred)
         identity_block = self.memory.blocks.get("identity")
         if identity_block:
             return identity_block.get("value", "") or ""
         
-        # Fallback if no identity block exists
-        logger.warning("No 'identity' memory block found, using minimal fallback")
+        # Fallback to legacy persona block
+        persona_block = self.memory.blocks.get("persona")
+        if persona_block:
+            logger.warning("Using legacy 'persona' block as system prompt. Consider migrating to 'identity' block (second person).")
+            return persona_block.get("value", "") or ""
+        
+        # Final fallback if no identity or persona block exists
+        logger.warning("No 'identity' or 'persona' memory block found, using minimal fallback")
         return "You are an AI assistant with persistent memory."
     
     async def _summarize_memories(self, prompt: str) -> str:
