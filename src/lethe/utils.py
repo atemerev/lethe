@@ -10,6 +10,7 @@ def strip_model_tags(content: str) -> str:
     - <think>...</think> blocks (Kimi reasoning)
     - <thinking>...</thinking> blocks (Claude extended thinking)
     - <result>...</result> wrapper (keeps inner content)
+    - <|tool_calls_section_begin|> and similar (Kimi tool markers)
     
     Args:
         content: Raw model output
@@ -27,5 +28,9 @@ def strip_model_tags(content: str) -> str:
     # Strip result wrapper but keep inner content
     content = re.sub(r'<result>\s*', '', content)
     content = re.sub(r'\s*</result>', '', content)
+    
+    # Strip Kimi tool call markers (these should be in tool_calls field, not content)
+    content = re.sub(r'<\|tool_calls_section_begin\|>.*', '', content, flags=re.DOTALL)
+    content = re.sub(r'<\|tool_call_begin\|>.*', '', content, flags=re.DOTALL)
     
     return content.strip()
