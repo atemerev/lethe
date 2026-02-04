@@ -118,15 +118,13 @@ detect_install_dir() {
         fi
     fi
     
-    # 5. Check common locations
-    for dir in "$HOME/.lethe" "$HOME/lethe" "$HOME/devel/lethe" "/opt/lethe"; do
-        if [ -d "$dir/.git" ] && [ -f "$dir/pyproject.toml" ]; then
-            echo "$dir"
-            return
-        fi
-    done
+    # 5. Default install location (NOT ~/lethe - that's workspace/memory!)
+    if [ -d "$HOME/.lethe/.git" ] && [ -f "$HOME/.lethe/pyproject.toml" ]; then
+        echo "$HOME/.lethe"
+        return
+    fi
     
-    # Fallback
+    # Not found
     echo ""
 }
 
