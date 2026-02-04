@@ -73,14 +73,24 @@ fi
 
 OS=$(detect_os)
 
-# Stop and remove systemd service (Linux/WSL)
+# Stop and remove systemd user service (Linux/WSL)
 if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
-    info "Stopping systemd service..."
+    info "Stopping systemd user service..."
     systemctl --user stop lethe 2>/dev/null || true
     systemctl --user disable lethe 2>/dev/null || true
     rm -f "$HOME/.config/systemd/user/lethe.service"
-    systemctl --user daemon-reload
-    success "Systemd service removed"
+    systemctl --user daemon-reload 2>/dev/null || true
+    success "Systemd user service removed"
+fi
+
+# Stop and remove systemd system service (root installs)
+if [ -f "/etc/systemd/system/lethe.service" ]; then
+    info "Stopping systemd system service..."
+    sudo systemctl stop lethe 2>/dev/null || systemctl stop lethe 2>/dev/null || true
+    sudo systemctl disable lethe 2>/dev/null || systemctl disable lethe 2>/dev/null || true
+    sudo rm -f "/etc/systemd/system/lethe.service" || rm -f "/etc/systemd/system/lethe.service"
+    sudo systemctl daemon-reload 2>/dev/null || systemctl daemon-reload 2>/dev/null || true
+    success "Systemd system service removed"
 fi
 
 # Stop and remove launchd service (Mac)

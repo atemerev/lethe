@@ -461,6 +461,13 @@ setup_service() {
 }
 
 setup_systemd() {
+    # Root user: use system-level service (no user bus available)
+    if [[ "$(id -u)" -eq 0 ]]; then
+        setup_systemd_system
+        return
+    fi
+    
+    # Non-root: use user-level service
     mkdir -p "$HOME/.config/systemd/user"
     
     # Enable lingering so user services run without login session
@@ -518,6 +525,36 @@ EOF
     
     success "Systemd service installed and started"
     info "View logs: journalctl --user -u lethe -f"
+}
+
+setup_systemd_system() {
+    # System-level service for root installations
+    info "Installing system-level service (running as root)..."
+    
+    cat > "/etc/systemd/system/lethe.service" << EOF
+[Unit]
+Description=Lethe Autonomous AI Agent
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/root/.local/bin/uv run lethe
+Restart=always
+RestartSec=10
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="HOME=/root"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable lethe
+    systemctl start lethe
+    
+    success "System service installed and started"
+    info "View logs: journalctl -u lethe -f"
 }
 
 setup_launchd() {
