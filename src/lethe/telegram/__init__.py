@@ -161,7 +161,9 @@ class TelegramBot:
                 
                 # Determine mime type from file extension
                 ext = file.file_path.split('.')[-1].lower() if file.file_path else 'jpg'
-                mime_type = f"image/{ext}" if ext in ('jpg', 'jpeg', 'png', 'gif', 'webp') else "image/jpeg"
+                mime_map = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 
+                            'gif': 'image/gif', 'webp': 'image/webp'}
+                mime_type = mime_map.get(ext, 'image/jpeg')
                 
                 # Build multimodal content
                 caption = message.caption or "What is this?"
