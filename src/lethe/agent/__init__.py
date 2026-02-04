@@ -331,18 +331,16 @@ should be working now
             if not os.path.exists(file_path):
                 return {"status": "error", "message": f"File not found: {file_path}"}
             
-            # Check file extension
+            # Check file extension - only Anthropic-supported formats
             ext = file_path.lower().split('.')[-1]
-            mime_types = {
-                'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-                'png': 'image/png', 'gif': 'image/gif',
-                'webp': 'image/webp', 'bmp': 'image/bmp'
-            }
+            # Anthropic only supports: image/jpeg, image/png, image/gif, image/webp
+            supported_exts = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'}  # bmp will be converted
             
-            if ext not in mime_types:
-                return {"status": "error", "message": f"Unsupported image format: {ext}"}
+            if ext not in supported_exts:
+                return {"status": "error", "message": f"Unsupported image format: {ext}. Supported: jpg, png, gif, webp"}
             
-            mime_type = mime_types[ext]
+            # Default mime_type (will be overridden by PIL conversion)
+            mime_type = 'image/jpeg'  # Safe default
             
             try:
                 # Try to resize with PIL if available
@@ -378,7 +376,15 @@ should be working now
                         image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
                         
                 except ImportError:
-                    # PIL not available, use raw file
+                    # PIL not available - can only handle JPEG/PNG/GIF/WebP natively
+                    if ext == 'bmp':
+                        return {"status": "error", "message": "BMP requires PIL to convert. Install pillow: pip install pillow"}
+                    
+                    # Set correct mime type for native formats
+                    native_mime = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 
+                                   'gif': 'image/gif', 'webp': 'image/webp'}
+                    mime_type = native_mime.get(ext, 'image/jpeg')
+                    
                     with open(file_path, 'rb') as f:
                         image_data = base64.b64encode(f.read()).decode('utf-8')
                     resized = " (not resized - PIL not installed)"
