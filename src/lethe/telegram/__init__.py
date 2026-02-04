@@ -189,6 +189,61 @@ class TelegramBot:
                 logger.error(f"Failed to process photo: {e}")
                 await message.answer(f"Failed to process photo: {e}")
 
+        @self.dp.message(F.document)
+        async def handle_document(message: Message):
+            """Handle document/file messages - save to workspace/Downloads."""
+            if not self._is_authorized(message.from_user.id):
+                await message.answer("Unauthorized.")
+                return
+
+            if not self.conversation_manager or not self.process_callback:
+                await message.answer("Bot not fully initialized.")
+                return
+
+            document = message.document
+            file_name = document.file_name or f"file_{document.file_id}"
+            
+            # Create Downloads directory in workspace
+            downloads_dir = self.settings.workspace_dir / "Downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Download file
+            try:
+                file = await self.bot.get_file(document.file_id)
+                file_path = downloads_dir / file_name
+                
+                await self.bot.download_file(file.file_path, file_path)
+                
+                logger.info(f"Received file: {file_name} ({document.file_size} bytes) -> {file_path}")
+                
+                # Build message with file info
+                caption = message.caption or ""
+                file_info = f"[Received file: {file_path}]"
+                if caption:
+                    content = f"{file_info}\n{caption}"
+                else:
+                    content = file_info
+                
+                # Add message to conversation manager
+                await self.conversation_manager.add_message(
+                    chat_id=message.chat.id,
+                    user_id=message.from_user.id,
+                    content=content,
+                    metadata={
+                        "username": message.from_user.username,
+                        "first_name": message.from_user.first_name,
+                        "is_document": True,
+                        "file_name": file_name,
+                        "file_path": str(file_path),
+                        "file_size": document.file_size,
+                        "mime_type": document.mime_type,
+                    },
+                    process_callback=self.process_callback,
+                )
+            except Exception as e:
+                logger.error(f"Failed to process document: {e}")
+                await message.answer(f"Failed to download file: {e}")
+
     def _is_authorized(self, user_id: int) -> bool:
         """Check if user is authorized."""
         allowed = self.settings.allowed_user_ids
