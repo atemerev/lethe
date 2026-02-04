@@ -1,0 +1,5 @@
+{
+  "label": "identity",
+  "description": "System prompt - who you are, biography, communication style, output format. Written in second person.",
+  "limit": 20000
+}
