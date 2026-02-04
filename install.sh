@@ -683,8 +683,9 @@ EOF
     $CONTAINER_CMD rm lethe 2>/dev/null || true
     
     # Run container
-    # Podman: --userns=keep-id automatically maps host user (files owned correctly)
-    # Docker: pass HOST_UID/GID, entrypoint creates matching user with sudo
+    # Podman: --userns=keep-id maps host user
+    # Docker rootless: run as root inside, UID mapping is automatic
+    # Docker traditional: use gosu entrypoint with HOST_UID/GID
     if [[ "$CONTAINER_CMD" == "podman" ]]; then
         $CONTAINER_CMD run -d \
             --name lethe \
@@ -693,7 +694,16 @@ EOF
             --env-file "$CONFIG_DIR/container.env" \
             -v "$WORKSPACE_DIR:/workspace:Z" \
             lethe:latest
+    elif docker info 2>/dev/null | grep -q "rootless"; then
+        # Rootless Docker - UID mapping handled automatically
+        $CONTAINER_CMD run -d \
+            --name lethe \
+            --restart unless-stopped \
+            --env-file "$CONFIG_DIR/container.env" \
+            -v "$WORKSPACE_DIR:/workspace:z" \
+            lethe:latest
     else
+        # Traditional Docker - use gosu entrypoint for UID mapping
         $CONTAINER_CMD run -d \
             --name lethe \
             --restart unless-stopped \

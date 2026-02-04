@@ -203,7 +203,16 @@ update_container() {
             --env-file "$config_file" \
             -v "$workspace_dir:/workspace:Z" \
             lethe:latest
+    elif docker info 2>/dev/null | grep -q "rootless"; then
+        # Rootless Docker - UID mapping handled automatically
+        $container_cmd run -d \
+            --name lethe \
+            --restart unless-stopped \
+            --env-file "$config_file" \
+            -v "$workspace_dir:/workspace:z" \
+            lethe:latest
     else
+        # Traditional Docker - use gosu entrypoint for UID mapping
         $container_cmd run -d \
             --name lethe \
             --restart unless-stopped \
