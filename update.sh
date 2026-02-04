@@ -199,7 +199,6 @@ update_container() {
         $container_cmd run -d \
             --name lethe \
             --restart unless-stopped \
-            --userns=keep-id \
             --env-file "$config_file" \
             -v "$workspace_dir:/workspace:Z" \
             lethe:latest
@@ -207,11 +206,13 @@ update_container() {
         $container_cmd run -d \
             --name lethe \
             --restart unless-stopped \
-            --user "$(id -u):$(id -g)" \
             --env-file "$config_file" \
             -v "$workspace_dir:/workspace" \
             lethe:latest
     fi
+    
+    # Fix workspace permissions for container user
+    $container_cmd exec lethe sudo chown -R lethe:lethe /workspace 2>/dev/null || true
     
     success "Container updated and restarted!"
     echo ""
