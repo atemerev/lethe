@@ -348,6 +348,9 @@ EOF
             fi
             echo ""
             success "Update complete! ($current_version → $latest_version)"
+            echo ""
+            echo "  💡 If upgrading from v0.3.7 or earlier, migrate persona to identity:"
+            echo "     uv run python scripts/migrate_persona_to_identity.py"
             ;;
             
         *)
