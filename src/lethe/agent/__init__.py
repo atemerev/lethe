@@ -331,16 +331,13 @@ should be working now
             if not os.path.exists(file_path):
                 return {"status": "error", "message": f"File not found: {file_path}"}
             
-            # Check file extension - only Anthropic-supported formats
+            # Only image formats supported by LLM APIs
             ext = file_path.lower().split('.')[-1]
-            # Anthropic only supports: image/jpeg, image/png, image/gif, image/webp
-            supported_exts = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'}  # bmp will be converted
+            mime_map = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 
+                        'gif': 'image/gif', 'webp': 'image/webp'}
             
-            if ext not in supported_exts:
-                return {"status": "error", "message": f"Unsupported image format: {ext}. Supported: jpg, png, gif, webp"}
-            
-            # Default mime_type (will be overridden by PIL conversion)
-            mime_type = 'image/jpeg'  # Safe default
+            if ext not in mime_map:
+                return {"status": "error", "message": f"Not an image or unsupported format: {ext}. Use: jpg, png, gif, webp"}
             
             try:
                 # Try to resize with PIL if available
@@ -352,7 +349,6 @@ should be working now
                         
                         # Resize if larger than max_size
                         if img.width > max_size or img.height > max_size:
-                            # Calculate new size preserving aspect ratio
                             ratio = min(max_size / img.width, max_size / img.height)
                             new_size = (int(img.width * ratio), int(img.height * ratio))
                             img = img.resize(new_size, Image.Resampling.LANCZOS)
@@ -360,14 +356,12 @@ should be working now
                         else:
                             resized = ""
                         
-                        # Convert to bytes
+                        # Convert to bytes - JPEG for most, PNG for transparency
                         buffer = BytesIO()
-                        # Use JPEG for better compression unless PNG needed for transparency
                         if ext == 'png' and img.mode == 'RGBA':
                             img.save(buffer, format='PNG', optimize=True)
                             mime_type = 'image/png'
                         else:
-                            # Convert to RGB for JPEG
                             if img.mode in ('RGBA', 'P'):
                                 img = img.convert('RGB')
                             img.save(buffer, format='JPEG', quality=85, optimize=True)
@@ -376,24 +370,16 @@ should be working now
                         image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
                         
                 except ImportError:
-                    # PIL not available - can only handle JPEG/PNG/GIF/WebP natively
-                    if ext == 'bmp':
-                        return {"status": "error", "message": "BMP requires PIL to convert. Install pillow: pip install pillow"}
-                    
-                    # Set correct mime type for native formats
-                    native_mime = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 
-                                   'gif': 'image/gif', 'webp': 'image/webp'}
-                    mime_type = native_mime.get(ext, 'image/jpeg')
-                    
+                    # PIL not available - read raw file
+                    mime_type = mime_map[ext]
                     with open(file_path, 'rb') as f:
                         image_data = base64.b64encode(f.read()).decode('utf-8')
-                    resized = " (not resized - PIL not installed)"
+                    resized = ""
                 
                 # Check encoded size
                 if len(image_data) > 5_000_000:
-                    return {"status": "error", "message": f"Image too large after processing: {len(image_data)//1_000_000}MB"}
+                    return {"status": "error", "message": f"Image too large: {len(image_data)//1_000_000}MB (max 5MB)"}
                 
-                # Return with _image_view to inject into context
                 return {
                     "status": "ok",
                     "message": f"Viewing image: {file_path}{resized}",
