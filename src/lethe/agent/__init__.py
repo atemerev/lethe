@@ -171,7 +171,7 @@ Summary:"""
         # Load identity from memory block
         identity_block = self.memory.blocks.get("identity")
         if identity_block:
-            return identity_block
+            return identity_block.get("value", "") or ""
         
         # Fallback if no identity block exists
         logger.warning("No 'identity' memory block found, using minimal fallback")
