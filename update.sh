@@ -69,13 +69,23 @@ detect_install_mode() {
         fi
     fi
     
-    # Check for systemd system service (root installs)
-    if [ -f "/etc/systemd/system/lethe.service" ]; then
-        echo "native-systemd-system"
+    # Root user: always use system-level service
+    if [[ "$(id -u)" -eq 0 ]]; then
+        # Clean up any leftover user service from failed install
+        if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
+            rm -f "$HOME/.config/systemd/user/lethe.service"
+        fi
+        # Check if system service exists, or we need to create it
+        if [ -f "/etc/systemd/system/lethe.service" ]; then
+            echo "native-systemd-system"
+            return
+        fi
+        # No service yet - will need to create system service
+        echo "native-systemd-system-new"
         return
     fi
     
-    # Check for systemd user service (Linux native)
+    # Non-root: check for systemd user service
     if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
         echo "native-systemd-user"
         return
@@ -257,7 +267,7 @@ main() {
             success "Update complete!"
             ;;
             
-        native-systemd-system|native-systemd-user|native-launchd)
+        native-systemd-system|native-systemd-system-new|native-systemd-user|native-launchd)
             local install_dir=$(detect_install_dir)
             
             if [ -z "$install_dir" ] || [ ! -d "$install_dir" ]; then
@@ -283,8 +293,33 @@ main() {
             
             if [[ "$install_mode" == "native-systemd-system" ]]; then
                 info "Restarting systemd system service..."
-                sudo systemctl restart lethe 2>/dev/null || systemctl restart lethe
+                systemctl restart lethe
                 success "Service restarted!"
+                echo ""
+                echo "  View logs: journalctl -u lethe -f"
+            elif [[ "$install_mode" == "native-systemd-system-new" ]]; then
+                info "Creating systemd system service..."
+                cat > "/etc/systemd/system/lethe.service" << EOF
+[Unit]
+Description=Lethe Autonomous AI Agent
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$install_dir
+ExecStart=/root/.local/bin/uv run lethe
+Restart=always
+RestartSec=10
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="HOME=/root"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+                systemctl daemon-reload
+                systemctl enable lethe
+                systemctl start lethe
+                success "System service created and started!"
                 echo ""
                 echo "  View logs: journalctl -u lethe -f"
             elif [[ "$install_mode" == "native-systemd-user" ]]; then
