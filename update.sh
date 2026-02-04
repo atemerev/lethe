@@ -172,13 +172,46 @@ update_code() {
     success "Code updated to $target_version"
 }
 
-rebuild_container() {
+restart_container() {
     local container_cmd="$1"
+    local config_file="$CONFIG_DIR/container.env"
+    local workspace_dir="${LETHE_WORKSPACE_DIR:-$HOME/lethe}"
+    
+    info "Stopping container..."
+    $container_cmd stop lethe 2>/dev/null || true
+    $container_cmd rm lethe 2>/dev/null || true
     
     info "Rebuilding container image..."
     cd "$INSTALL_DIR"
     $container_cmd build -t lethe:latest .
-    success "Container image rebuilt"
+    
+    info "Starting container..."
+    if [ ! -f "$config_file" ]; then
+        error "Config file not found: $config_file"
+    fi
+    
+    if [[ "$container_cmd" == "podman" ]]; then
+        $container_cmd run -d \
+            --name lethe \
+            --restart unless-stopped \
+            --userns=keep-id \
+            --env-file "$config_file" \
+            -v "$workspace_dir:/workspace:Z" \
+            lethe:latest
+    else
+        $container_cmd run -d \
+            --name lethe \
+            --restart unless-stopped \
+            --user "$(id -u):$(id -g)" \
+            --env-file "$config_file" \
+            -v "$workspace_dir:/workspace" \
+            lethe:latest
+    fi
+    
+    success "Container restarted!"
+    echo ""
+    echo "  View logs: $container_cmd logs -f lethe"
+    echo ""
 }
 
 print_header() {
@@ -222,26 +255,10 @@ main() {
     # Handle restart based on install mode
     case "$install_mode" in
         container-podman)
-            rebuild_container "podman"
-            echo ""
-            warn "Container mode detected. To apply the update:"
-            echo ""
-            echo -e "  ${CYAN}podman stop lethe && podman rm lethe${NC}"
-            echo ""
-            echo "  Then run the same 'podman run' command you used to start it,"
-            echo "  or re-run the installer to recreate the container."
-            echo ""
+            restart_container "podman"
             ;;
         container-docker)
-            rebuild_container "docker"
-            echo ""
-            warn "Container mode detected. To apply the update:"
-            echo ""
-            echo -e "  ${CYAN}docker stop lethe && docker rm lethe${NC}"
-            echo ""
-            echo "  Then run the same 'docker run' command you used to start it,"
-            echo "  or re-run the installer to recreate the container."
-            echo ""
+            restart_container "docker"
             ;;
         native-systemd)
             info "Restarting systemd service..."
