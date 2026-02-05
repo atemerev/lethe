@@ -78,7 +78,8 @@ async def run():
         
         # Set up state updates
         lethe_console.update_stats(stats['total_messages'], stats['archival_memories'])
-        lethe_console.update_identity(agent.memory.blocks.get("identity", {}).get("value", ""))
+        identity_block = agent.memory.blocks.get("identity")
+        lethe_console.update_identity(identity_block.get("value", "") if identity_block else "")
         
         # Hook into agent for state updates
         agent.set_console_hooks(
