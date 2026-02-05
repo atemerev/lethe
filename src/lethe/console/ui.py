@@ -44,24 +44,25 @@ class ConsoleUI:
             # Custom CSS
             ui.add_head_html('''
             <style>
-                .message-block { 
+                .message-block, .context-block { 
                     border-left: 3px solid; 
                     padding: 8px 12px; 
                     margin: 4px 0;
                     border-radius: 4px;
                 }
-                .context-block {
-                    border-left: 3px solid;
-                    padding: 8px 12px;
-                    margin: 4px 0;
-                    border-radius: 4px;
-                }
-                .content-preview {
+                .content-full {
                     white-space: pre-wrap;
+                    word-wrap: break-word;
                     font-family: monospace;
-                    font-size: 12px;
-                    max-height: 150px;
-                    overflow: auto;
+                    font-size: 11px;
+                    margin: 8px 0 0 0;
+                    padding: 0;
+                    max-width: 100%;
+                }
+                .scroll-container {
+                    max-height: 70vh;
+                    overflow-y: auto;
+                    overflow-x: hidden;
                 }
             </style>
             ''')
@@ -82,18 +83,21 @@ class ConsoleUI:
             with ui.tab_panels(tabs, value=messages_tab).classes("w-full"):
                 # Messages panel
                 with ui.tab_panel(messages_tab):
-                    self.messages_container = ui.column().classes("w-full p-2 gap-1")
+                    with ui.scroll_area().classes("w-full scroll-container"):
+                        self.messages_container = ui.column().classes("w-full p-2 gap-1")
                 
                 # Memory panel
                 with ui.tab_panel(memory_tab):
-                    self.blocks_container = ui.column().classes("w-full p-2")
+                    with ui.scroll_area().classes("w-full scroll-container"):
+                        self.blocks_container = ui.column().classes("w-full p-2")
                 
                 # Context panel
                 with ui.tab_panel(context_tab):
-                    with ui.row().classes("w-full items-center mb-2"):
+                    with ui.row().classes("w-full items-center mb-2 p-2"):
                         ui.label("Last context sent to LLM").classes("text-h6")
                         self.context_info = ui.chip("", icon="token").classes("ml-4")
-                    self.context_container = ui.column().classes("w-full p-2 gap-1")
+                    with ui.scroll_area().classes("w-full scroll-container"):
+                        self.context_container = ui.column().classes("w-full p-2 gap-1")
             
             # Initial data load
             self._load_initial_data()
@@ -101,22 +105,18 @@ class ConsoleUI:
             # Start refresh timer
             ui.timer(REFRESH_INTERVAL, self._refresh_ui)
     
-    def _render_message(self, container, role: str, content: str, truncate: int = 300):
+    def _render_message(self, container, role: str, content: str):
         """Render a single message block."""
         style = ROLE_STYLES.get(role, ROLE_STYLES["system"])
         
-        # Truncate content for display
-        if isinstance(content, str):
-            display_content = content[:truncate] + "..." if len(content) > truncate else content
-        else:
-            display_content = str(content)[:truncate]
+        display_content = content if isinstance(content, str) else str(content)
         
         with container:
-            with ui.card().classes(f"w-full {style['bg']} {style['align']} message-block {style['border']}"):
+            with ui.card().classes(f"w-full {style['bg']} message-block {style['border']}"):
                 with ui.row().classes("items-center gap-2"):
                     ui.icon(style["icon"]).classes("text-lg")
                     ui.label(role.upper()).classes("font-bold text-sm")
-                ui.label(display_content).classes("content-preview mt-1")
+                ui.html(f"<pre class='content-full'>{display_content}</pre>")
     
     def _render_context_message(self, container, msg: dict):
         """Render a context message block."""
@@ -126,17 +126,16 @@ class ConsoleUI:
         
         # Handle different content types
         if isinstance(content, list):
-            # System message with content blocks
-            content_preview = f"[{len(content)} content blocks]"
-            for block in content[:2]:
+            # System message with content blocks - extract text
+            parts = []
+            for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "")[:200]
-                    content_preview = text + "..."
-                    break
+                    parts.append(block.get("text", ""))
+            content_display = "\n---\n".join(parts) if parts else f"[{len(content)} content blocks]"
         elif isinstance(content, str):
-            content_preview = content[:400] + "..." if len(content) > 400 else content
+            content_display = content
         else:
-            content_preview = str(content)[:400]
+            content_display = str(content)
         
         with container:
             with ui.card().classes(f"w-full {style['bg']} context-block {style['border']}"):
@@ -147,7 +146,7 @@ class ConsoleUI:
                         ui.chip(f"{len(msg['tool_calls'])} tools", icon="build", color="yellow").classes("ml-2")
                     if msg.get("tool_call_id"):
                         ui.chip("result", icon="check", color="orange").classes("ml-2")
-                ui.html(f"<pre class='content-preview mt-1'>{content_preview}</pre>")
+                ui.html(f"<pre class='content-full'>{content_display}</pre>")
     
     def _load_initial_data(self):
         """Load initial data into UI."""
