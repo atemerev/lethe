@@ -70,9 +70,23 @@ def update_summary(summary: str):
     _state.summary = summary
 
 
-def update_messages(messages: List[Dict]):
-    """Update recent messages."""
-    _state.messages = messages
+def update_messages(messages):
+    """Update recent messages.
+    
+    Args:
+        messages: List of Message objects or dicts
+    """
+    result = []
+    for msg in messages:
+        if hasattr(msg, 'role'):
+            # Message object
+            result.append({
+                "role": msg.role,
+                "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+            })
+        elif isinstance(msg, dict):
+            result.append(msg)
+    _state.messages = result
 
 
 def update_context(context: List[Dict], tokens: int):

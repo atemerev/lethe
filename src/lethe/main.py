@@ -76,10 +76,23 @@ async def run():
         await run_console(port=console_port)
         console.print(f"[cyan]Console[/cyan] running at http://localhost:{console_port}")
         
-        # Set up state updates
+        # Initialize console state with current data
         lethe_console.update_stats(stats['total_messages'], stats['archival_memories'])
+        
+        # Load identity
         identity_block = agent.memory.blocks.get("identity")
         lethe_console.update_identity(identity_block.get("value", "") if identity_block else "")
+        
+        # Load all memory blocks
+        all_blocks = agent.memory.blocks.list_blocks()
+        lethe_console.update_memory_blocks(all_blocks)
+        
+        # Load recent messages from context
+        lethe_console.update_messages(agent.llm.context.messages)
+        
+        # Load summary if available
+        if agent.llm.context.summary:
+            lethe_console.update_summary(agent.llm.context.summary)
         
         # Hook into agent for state updates
         agent.set_console_hooks(
