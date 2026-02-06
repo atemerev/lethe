@@ -68,20 +68,20 @@ class ConsoleUI:
                 self.status_chip = ui.chip("idle", icon="circle", color="green").classes("text-white")
                 self.stats_label = ui.label("").classes("text-white ml-4")
             
-            # Main layout - 3 columns
-            with ui.row().classes("w-full h-screen"):
+            # Main layout - 3 columns (flex, no wrap)
+            with ui.element("div").classes("flex flex-nowrap w-full h-screen"):
                 # Messages column - 30%
-                with ui.column().classes("w-[30%] h-full border-r border-gray-700 overflow-y-auto"):
+                with ui.element("div").classes("w-[30%] min-w-0 h-full border-r border-gray-700 overflow-y-auto flex-shrink-0"):
                     ui.label("💬 Messages").classes("text-h6 p-2 sticky top-0 bg-gray-900 z-10")
                     self.messages_container = ui.column().classes("w-full p-2 gap-1")
                 
                 # Memory column - 20%
-                with ui.column().classes("w-[20%] h-full border-r border-gray-700 overflow-y-auto"):
+                with ui.element("div").classes("w-[20%] min-w-0 h-full border-r border-gray-700 overflow-y-auto flex-shrink-0"):
                     ui.label("🧠 Memory").classes("text-h6 p-2 sticky top-0 bg-gray-900 z-10")
                     self.blocks_container = ui.column().classes("w-full p-2")
                 
                 # Context column - 50%
-                with ui.column().classes("w-[50%] h-full overflow-y-auto"):
+                with ui.element("div").classes("w-[50%] min-w-0 h-full overflow-y-auto flex-shrink-0"):
                     with ui.row().classes("w-full items-center p-2 sticky top-0 bg-gray-900 z-10"):
                         ui.label("📤 Context").classes("text-h6")
                         self.context_info = ui.chip("", icon="token").classes("ml-4")
