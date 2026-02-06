@@ -117,16 +117,10 @@ class MemoryStore:
                 block_lines.append(description)
                 block_lines.append("</description>")
                 block_lines.append("<metadata>")
-                block_lines.append(f"- chars_current={len(value)}")
-                block_lines.append(f"- chars_limit={limit}")
+                block_lines.append(f"- chars={len(value)}/{limit}")
                 block_lines.append("</metadata>")
-                block_lines.append("<warning>")
-                block_lines.append("# NOTE: Line numbers shown below (with arrows like '1→') are to help during editing. Do NOT include line number prefixes in your memory edit tool calls.")
-                block_lines.append("</warning>")
                 block_lines.append("<value>")
-                # Add line numbers like Letta does for Anthropic
-                for line_num, line in enumerate(value.split("\n"), 1):
-                    block_lines.append(f"{line_num}→ {line}")
+                block_lines.append(value)
                 block_lines.append("</value>")
                 block_lines.append(f"</{label}>")
                 

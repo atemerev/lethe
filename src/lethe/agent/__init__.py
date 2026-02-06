@@ -192,14 +192,18 @@ Summary:"""
         # Simple tool definitions - schemas auto-generated from docstrings
         
         def memory_read(label: str) -> str:
-            """Read a memory block by label.
+            """Read a memory block by label (with line numbers for editing).
             
             Args:
                 label: Block label to read (e.g., 'persona', 'human', 'project')
             """
             block = self.memory.blocks.get_by_label(label)
             if block:
-                return f"[{label}]\n{block['value']}"
+                value = block['value']
+                # Add line numbers for editing reference
+                lines = value.split('\n')
+                numbered = [f"{i+1}→ {line}" for i, line in enumerate(lines)]
+                return f"[{label}] ({len(value)} chars)\n" + '\n'.join(numbered)
             return f"Block '{label}' not found"
         
         def memory_update(label: str, value: str) -> str:
