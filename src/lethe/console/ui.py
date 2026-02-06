@@ -93,7 +93,7 @@ class ConsoleUI:
             # Start refresh timer
             ui.timer(REFRESH_INTERVAL, self._refresh_ui)
     
-    def _render_message(self, container, role: str, content: str):
+    def _render_message(self, container, role: str, content: str, timestamp: str = None):
         """Render a single message block."""
         style = ROLE_STYLES.get(role, ROLE_STYLES["system"])
         
@@ -104,6 +104,8 @@ class ConsoleUI:
                 with ui.row().classes("items-center gap-2"):
                     ui.icon(style["icon"]).classes("text-lg")
                     ui.label(role.upper()).classes("font-bold text-sm")
+                    if timestamp:
+                        ui.label(timestamp).classes("text-xs text-gray-400 ml-auto")
                 ui.html(f"<pre class='content-full'>{display_content}</pre>")
     
     def _render_context_message(self, container, msg: dict):
@@ -140,13 +142,14 @@ class ConsoleUI:
         """Load initial data into UI."""
         state = get_state()
         
-        # Render messages
+        # Render messages (chronological - oldest first, newest at bottom)
         self.messages_container.clear()
         for msg in state.messages[-30:]:
             self._render_message(
                 self.messages_container,
                 msg.get("role", "?"),
-                msg.get("content", "")
+                msg.get("content", ""),
+                msg.get("timestamp")
             )
         
         # Build memory blocks

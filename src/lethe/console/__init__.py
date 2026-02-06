@@ -80,9 +80,13 @@ def update_messages(messages):
     for msg in messages:
         if hasattr(msg, 'role'):
             # Message object
+            timestamp = None
+            if hasattr(msg, 'created_at') and msg.created_at:
+                timestamp = msg.created_at.strftime("%H:%M:%S") if hasattr(msg.created_at, 'strftime') else str(msg.created_at)[:19]
             result.append({
                 "role": msg.role,
                 "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                "timestamp": timestamp,
             })
         elif isinstance(msg, dict):
             result.append(msg)
