@@ -255,7 +255,7 @@ class ConsoleUI:
             title="Lethe Console",
             favicon="🧠",
             show=False,
-            reload=True,  # Auto-reload on file changes
+            reload=False,  # Can't use reload in background thread
         )
 
 
