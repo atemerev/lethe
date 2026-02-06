@@ -61,12 +61,13 @@ class ConsoleUI:
             </style>
             ''')
             
-            # Header
-            with ui.header().classes("bg-indigo-600"):
-                ui.label("🧠 Lethe Console").classes("text-h5 text-white")
-                ui.space()
-                self.status_chip = ui.chip("idle", icon="circle", color="green")
-                self.stats_label = ui.label("").classes("text-white ml-4")
+            # Header - compact
+            with ui.header().classes("bg-slate-100 border-b border-gray-200 py-1 min-h-0"):
+                with ui.row().classes("items-center gap-4 w-full"):
+                    ui.label("🧠 Lethe Console").classes("text-subtitle1 font-medium text-slate-700")
+                    ui.space()
+                    self.status_chip = ui.chip("idle", icon="circle", color="green").props("dense")
+                    self.stats_label = ui.label("").classes("text-sm text-slate-600")
             
             # Main layout - 3 columns (flex, no wrap)
             with ui.element("div").classes("flex flex-nowrap w-full h-screen bg-white"):
