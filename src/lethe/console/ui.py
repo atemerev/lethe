@@ -224,23 +224,9 @@ class ConsoleUI:
                         ui.html('<span style="flex:1"></span>')
                         self.clock_html = ui.html(self._render_clock())
                     
-                    # Bottom row: stats + system info
+                    # Bottom row: stats
                     with ui.element("div").classes("mc-header-bottom"):
                         self.stats_html = ui.html(self._render_stats_bar(state))
-                        ui.html('<span style="flex:1"></span>')
-                        # System info
-                        hw_parts = []
-                        hw_parts.append(f'{sys_info.get("os", "?")}')
-                        hw_parts.append(f'{sys_info.get("cpu", "?")}')
-                        hw_parts.append(f'{sys_info.get("cores", "?")} cores')
-                        hw_parts.append(f'{sys_info.get("ram_total", "?")} RAM')
-                        if sys_info.get("gpus"):
-                            for gpu in sys_info["gpus"]:
-                                hw_parts.append(f'⬡ {gpu}')
-                        hw_html = ' <span class="mc-sep">·</span> '.join(
-                            f'<b>{_esc(p)}</b>' for p in hw_parts
-                        )
-                        ui.html(f'<span class="mc-meta">{hw_html}</span>')
                 
                 # ── Columns ───────────────────────────────────
                 with ui.element("div").classes("mc-columns"):
@@ -270,6 +256,20 @@ class ConsoleUI:
                 # ── Footer ────────────────────────────────────
                 with ui.element("div").classes("mc-footer"):
                     self.footer_html = ui.html(self._render_footer(state))
+                    ui.html('<span class="mc-sep">│</span>')
+                    # Static system info
+                    hw_parts = []
+                    hw_parts.append(f'{sys_info.get("os", "?")}')
+                    hw_parts.append(f'{sys_info.get("cpu", "?")}')
+                    hw_parts.append(f'{sys_info.get("cores", "?")} cores')
+                    hw_parts.append(f'{sys_info.get("ram_total", "?")} RAM')
+                    if sys_info.get("gpus"):
+                        for gpu in sys_info["gpus"]:
+                            hw_parts.append(f'⬡ {gpu}')
+                    hw_html = ' <span class="mc-sep">·</span> '.join(
+                        f'<b>{_esc(p)}</b>' for p in hw_parts
+                    )
+                    ui.html(f'<span class="mc-meta">{hw_html}</span>')
                     ui.html('<span style="flex:1"></span>')
                     uptime = self._format_uptime()
                     self.uptime_html = ui.html(f'<span class="mc-meta">UPTIME <b>{uptime}</b></span>')
