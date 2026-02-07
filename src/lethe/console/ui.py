@@ -29,6 +29,8 @@ class ConsoleUI:
     
     def __init__(self, port: int = 8080):
         self.port = port
+        self._last_context_time = None
+        self._last_message_count = 0
         self._setup_ui()
     
     def _setup_ui(self):
@@ -241,15 +243,21 @@ class ConsoleUI:
         # Update stats
         self.stats_label.text = f"Messages: {len(state.messages)} | History: {state.total_messages} | Archival: {state.archival_count}"
         
-        # Update context info and rebuild context view
+        # Update context info and rebuild only if changed
         if state.last_context_time:
             time_str = state.last_context_time.strftime("%H:%M:%S")
             self.context_info.text = f"{state.last_context_tokens:,} tokens @ {time_str}"
             self.context_info.update()
             
-            # Rebuild context view if we have new context
-            if state.last_context:
+            # Only rebuild context if timestamp changed
+            if state.last_context and state.last_context_time != self._last_context_time:
                 self._rebuild_context()
+                self._last_context_time = state.last_context_time
+        
+        # Only rebuild messages if count changed
+        if len(state.messages) != self._last_message_count:
+            self._load_initial_data()
+            self._last_message_count = len(state.messages)
     
     def run(self):
         """Run the console server."""
