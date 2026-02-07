@@ -183,17 +183,23 @@ class Message:
     tool_call_id: Optional[str] = None  # for tool results
     tool_calls: Optional[List[Dict]] = None  # for assistant tool calls
     
+    @staticmethod
+    def _sanitize_tool_id(tid: str) -> str:
+        """Sanitize tool call ID for Anthropic (must match ^[a-zA-Z0-9-]+$)."""
+        import re
+        return re.sub(r'[^a-zA-Z0-9-]', '-', tid)
+    
     def __post_init__(self):
         """Set created_at if not provided. Sanitize tool IDs for Anthropic."""
         if self.created_at is None:
             self.created_at = datetime.now(timezone.utc)
         # Anthropic requires tool_call IDs to match ^[a-zA-Z0-9-]+$
         if self.tool_call_id:
-            self.tool_call_id = self.tool_call_id.replace("_", "-")
+            self.tool_call_id = self._sanitize_tool_id(self.tool_call_id)
         if self.tool_calls:
             for tc in self.tool_calls:
                 if "id" in tc:
-                    tc["id"] = tc["id"].replace("_", "-")
+                    tc["id"] = self._sanitize_tool_id(tc["id"])
     
     def get_text_content(self) -> str:
         """Get text content for token counting and logging."""
