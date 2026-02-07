@@ -68,10 +68,6 @@ class ConsoleUI:
             with ui.header().classes("bg-slate-100 border-b border-gray-200 py-1 min-h-0"):
                 with ui.row().classes("items-center gap-4 w-full"):
                     ui.label("🧠 Lethe Console").classes("text-subtitle1 font-medium text-slate-700")
-                    self.update_banner = ui.button(
-                        "🔄 New data available — click to refresh",
-                        on_click=self._do_full_rebuild,
-                    ).props("flat dense").classes("text-blue-600 text-xs hidden")
                     ui.space()
                     self.status_chip = ui.chip("idle", icon="circle", color="light-green").props("dense")
                     self.stats_label = ui.label("").classes("text-sm text-slate-600")
@@ -81,7 +77,8 @@ class ConsoleUI:
                 # Messages column - 30%
                 with ui.element("div").classes("w-[30%] min-w-0 h-full border-r border-gray-200 flex-shrink-0 flex flex-col"):
                     ui.label("💬 Messages").classes("text-subtitle1 font-medium px-3 py-2 bg-slate-200 border-b border-gray-300 flex-shrink-0")
-                    with ui.element("div").classes("flex-1 overflow-y-auto"):
+                    self.messages_scroll = ui.element("div").classes("flex-1 overflow-y-auto")
+                    with self.messages_scroll:
                         self.messages_container = ui.column().classes("w-full p-2 gap-1")
                 
                 # Memory column - 20%
@@ -95,11 +92,19 @@ class ConsoleUI:
                     with ui.row().classes("w-full items-center px-3 py-2 bg-slate-200 border-b border-gray-300 flex-shrink-0"):
                         ui.label("📤 Context").classes("text-subtitle1 font-medium")
                         self.context_info = ui.chip("", icon="token").props("dense").classes("ml-4")
-                    with ui.element("div").classes("flex-1 overflow-y-auto"):
+                    self.context_scroll = ui.element("div").classes("flex-1 overflow-y-auto")
+                    with self.context_scroll:
                         self.context_container = ui.column().classes("w-full p-2 gap-1")
             
             # Initial data load
             self._load_initial_data()
+            self._last_version = get_state().version
+            
+            # Scroll to bottom after initial render
+            ui.timer(0.5, lambda: (
+                self._scroll_to_bottom(self.messages_scroll),
+                self._scroll_to_bottom(self.context_scroll),
+            ), once=True)
             
             # Start refresh timer
             ui.timer(REFRESH_INTERVAL, self._refresh_ui)
@@ -233,15 +238,18 @@ class ConsoleUI:
             for msg in state.last_context:
                 self._render_context_message(self.context_container, msg)
     
+    def _scroll_to_bottom(self, element):
+        """Scroll a container element to the bottom."""
+        ui.run_javascript(f'document.querySelector("[id=\\"c{element.id}\\"]").scrollTop = 999999;')
+    
     def _refresh_ui(self):
         """Refresh UI with current state.
         
-        Only updates labels/chips on every tick. 
-        Full panel rebuilds only happen when data actually changes.
+        Updates labels every tick. Rebuilds panels only when data version changes.
         """
         state = get_state()
         
-        # Update status chip (lightweight, no DOM rebuild)
+        # Update status chip (lightweight)
         status_colors = {"idle": "green", "thinking": "blue", "tool_call": "orange"}
         self.status_chip.text = state.status
         if state.current_tool:
@@ -258,24 +266,12 @@ class ConsoleUI:
             self.context_info.text = f"{state.last_context_tokens:,} tokens @ {time_str}"
             self.context_info.update()
         
-        # Show update banner if data version changed
+        # Rebuild panels only if data changed
         if state.version != self._last_version:
-            self.update_banner.classes(remove="hidden")
-            self.update_banner.update()
-    
-    def _do_full_rebuild(self):
-        """Rebuild all panels (triggered by user click)."""
-        state = get_state()
-        self._last_version = state.version
-        self._last_message_count = len(state.messages)
-        self._last_context_time = state.last_context_time
-        
-        # Rebuild all panels
-        self._load_initial_data()
-        
-        # Hide banner
-        self.update_banner.classes(add="hidden")
-        self.update_banner.update()
+            self._last_version = state.version
+            self._load_initial_data()
+            self._scroll_to_bottom(self.messages_scroll)
+            self._scroll_to_bottom(self.context_scroll)
     
     def run(self):
         """Run the console server."""
