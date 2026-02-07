@@ -45,6 +45,14 @@ class ConsoleState:
     total_messages: int = 0
     archival_count: int = 0
     
+    # Model info
+    model: str = ""
+    model_aux: str = ""
+    
+    # Token tracking
+    tokens_today: int = 0
+    api_calls_today: int = 0
+    
     # Change tracking (incremented on data changes that need UI rebuild)
     version: int = 0
 
@@ -114,3 +122,15 @@ def update_stats(total_messages: int, archival_count: int):
     """Update stats."""
     _state.total_messages = total_messages
     _state.archival_count = archival_count
+
+
+def update_model_info(model: str, model_aux: str = ""):
+    """Update model info."""
+    _state.model = model
+    _state.model_aux = model_aux
+
+
+def track_tokens(tokens: int):
+    """Track tokens consumed."""
+    _state.tokens_today += tokens
+    _state.api_calls_today += 1

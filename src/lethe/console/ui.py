@@ -2,7 +2,10 @@
 
 import json
 import logging
-from datetime import datetime
+import os
+import platform
+import psutil
+from datetime import datetime, timezone
 from typing import Optional
 
 from nicegui import ui, app
@@ -15,11 +18,52 @@ REFRESH_INTERVAL = 2.0
 
 # Role styling
 ROLES = {
-    "user":      {"color": "#3b82f6", "bg": "rgba(59,130,246,0.08)", "icon": "person",    "label": "USER"},
-    "assistant": {"color": "#00d4aa", "bg": "rgba(0,212,170,0.08)",  "icon": "smart_toy", "label": "ASSISTANT"},
-    "tool":      {"color": "#f59e0b", "bg": "rgba(245,158,11,0.08)", "icon": "build",     "label": "TOOL"},
-    "system":    {"color": "#64748b", "bg": "rgba(100,116,139,0.1)", "icon": "settings",  "label": "SYSTEM"},
+    "user":      {"color": "#3b82f6", "bg": "rgba(59,130,246,0.08)", "label": "USER"},
+    "assistant": {"color": "#00d4aa", "bg": "rgba(0,212,170,0.08)",  "label": "ASSISTANT"},
+    "tool":      {"color": "#f59e0b", "bg": "rgba(245,158,11,0.08)", "label": "TOOL"},
+    "system":    {"color": "#64748b", "bg": "rgba(100,116,139,0.1)", "label": "SYSTEM"},
 }
+
+
+def _get_system_info():
+    """Get system hardware info (cached on first call)."""
+    info = {}
+    try:
+        info["os"] = f"{platform.system()} {platform.release()}"
+        info["cpu"] = platform.processor() or platform.machine()
+        info["cores"] = psutil.cpu_count(logical=True)
+        mem = psutil.virtual_memory()
+        info["ram_total"] = f"{mem.total / (1024**3):.0f}GB"
+        
+        # GPU detection
+        gpus = []
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=3
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.split(", ")
+                    if len(parts) == 2:
+                        gpus.append(f"{parts[0].strip()} ({int(parts[1].strip())//1024}GB)")
+        except Exception:
+            pass
+        info["gpus"] = gpus
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
+_sys_info = None
+
+def get_sys_info():
+    global _sys_info
+    if _sys_info is None:
+        _sys_info = _get_system_info()
+    return _sys_info
+
 
 CSS = """
 <style>
@@ -30,15 +74,26 @@ CSS = """
     
     /* Header */
     .mc-header {
-        display: flex; align-items: center; gap: 16px;
-        padding: 6px 16px; background: #111820;
-        border-bottom: 1px solid #1e2d3d; flex-shrink: 0; min-height: 36px;
+        display: flex; flex-direction: column; gap: 0;
+        background: #111820; border-bottom: 1px solid #1e2d3d; flex-shrink: 0;
     }
-    .mc-title { font-size: 13px; font-weight: 600; color: #00d4aa; letter-spacing: 2px; text-transform: uppercase; }
-    .mc-stat { font-size: 11px; color: #64748b; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
-    .mc-stat b { color: #94a3b8; font-weight: 500; }
+    .mc-header-top {
+        display: flex; align-items: center; gap: 12px;
+        padding: 6px 16px; border-bottom: 1px solid rgba(0,212,170,0.1);
+    }
+    .mc-header-bottom {
+        display: flex; align-items: center; gap: 16px;
+        padding: 4px 16px; background: rgba(0,0,0,0.2);
+    }
+    .mc-title { font-size: 14px; font-weight: 600; color: #00d4aa; letter-spacing: 2px; text-transform: uppercase; }
+    .mc-sep { color: #1e2d3d; }
+    .mc-meta { font-size: 10px; color: #475569; font-family: 'JetBrains Mono', monospace; }
+    .mc-meta b { color: #94a3b8; font-weight: 500; }
+    .mc-meta .accent { color: #00d4aa; }
+    .mc-meta .blue { color: #3b82f6; }
+    .mc-meta .amber { color: #f59e0b; }
     
-    /* Status dot */
+    /* Status */
     .mc-status { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #94a3b8; font-family: monospace; }
     .mc-dot { width: 8px; height: 8px; border-radius: 50%; }
     .mc-dot-idle { background: #22c55e; }
@@ -88,18 +143,23 @@ CSS = """
     .mc-block-arrow { font-size: 10px; color: #475569; transition: transform 0.2s; width: 12px; }
     .mc-block-label { font-weight: 600; color: #e2e8f0; }
     .mc-block-meta { font-size: 9px; color: #475569; margin-left: auto; font-family: monospace; }
-    .mc-block-body {
-        padding: 4px 8px 8px 26px; display: none;
-    }
+    .mc-block-body { padding: 4px 8px 8px 26px; display: none; }
     .mc-block-body.open { display: block; }
     .mc-block-body pre {
         white-space: pre-wrap; word-wrap: break-word;
-        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-family: 'JetBrains Mono', monospace;
         font-size: 10px; color: #94a3b8; margin: 0; line-height: 1.5;
     }
     .mc-block-desc { font-size: 10px; color: #475569; margin-bottom: 4px; font-style: italic; }
     
-    /* No data */
+    /* Footer */
+    .mc-footer {
+        display: flex; align-items: center; gap: 16px;
+        padding: 4px 16px; background: #111820;
+        border-top: 1px solid #1e2d3d; flex-shrink: 0;
+    }
+    .mc-footer .mc-meta { font-size: 9px; }
+    
     .mc-empty { color: #475569; font-size: 11px; padding: 16px; text-align: center; }
 </style>
 <script>
@@ -114,11 +174,18 @@ function toggleBlock(id) {
 </script>
 """
 
+
 def _esc(text):
-    """Escape HTML."""
     if not isinstance(text, str):
         text = str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _short_model(model):
+    """Shorten model name for display."""
+    # openrouter/moonshotai/kimi-k2.5 → kimi-k2.5
+    parts = model.split("/")
+    return parts[-1] if parts else model
 
 
 class ConsoleUI:
@@ -127,6 +194,7 @@ class ConsoleUI:
         self.port = port
         self._last_version = 0
         self._block_counter = 0
+        self._start_time = datetime.now(timezone.utc)
         self._setup_ui()
     
     def _setup_ui(self):
@@ -136,16 +204,45 @@ class ConsoleUI:
             ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">')
             ui.add_head_html(CSS)
             
-            # Root container
+            sys_info = get_sys_info()
+            state = get_state()
+            
             with ui.element("div").classes("mc-root"):
-                # Header
+                # ── Header ────────────────────────────────────
                 with ui.element("div").classes("mc-header"):
-                    ui.html('<span class="mc-title">◉ Lethe Console</span>')
-                    ui.html('<span style="flex:1"></span>')
-                    self.status_html = ui.html(self._render_status("idle", None))
-                    self.stats_html = ui.html(self._render_stats(0, 0, 0, 0))
+                    # Top row: title + status + model
+                    with ui.element("div").classes("mc-header-top"):
+                        ui.html('<span class="mc-title">◉ Lethe Console</span>')
+                        ui.html('<span class="mc-sep">│</span>')
+                        self.status_html = ui.html(self._render_status("idle", None))
+                        ui.html('<span class="mc-sep">│</span>')
+                        model_name = _short_model(state.model) if state.model else "unknown"
+                        self.model_html = ui.html(f'<span class="mc-meta">MODEL <b class="accent">{_esc(model_name)}</b></span>')
+                        if state.model_aux:
+                            aux_name = _short_model(state.model_aux)
+                            ui.html(f'<span class="mc-meta">AUX <b>{_esc(aux_name)}</b></span>')
+                        ui.html('<span style="flex:1"></span>')
+                        self.clock_html = ui.html(self._render_clock())
+                    
+                    # Bottom row: stats + system info
+                    with ui.element("div").classes("mc-header-bottom"):
+                        self.stats_html = ui.html(self._render_stats_bar(state))
+                        ui.html('<span style="flex:1"></span>')
+                        # System info
+                        hw_parts = []
+                        hw_parts.append(f'{sys_info.get("os", "?")}')
+                        hw_parts.append(f'{sys_info.get("cpu", "?")}')
+                        hw_parts.append(f'{sys_info.get("cores", "?")} cores')
+                        hw_parts.append(f'{sys_info.get("ram_total", "?")} RAM')
+                        if sys_info.get("gpus"):
+                            for gpu in sys_info["gpus"]:
+                                hw_parts.append(f'⬡ {gpu}')
+                        hw_html = ' <span class="mc-sep">·</span> '.join(
+                            f'<b>{_esc(p)}</b>' for p in hw_parts
+                        )
+                        ui.html(f'<span class="mc-meta">{hw_html}</span>')
                 
-                # Columns
+                # ── Columns ───────────────────────────────────
                 with ui.element("div").classes("mc-columns"):
                     # Messages — 30%
                     with ui.element("div").classes("mc-panel").style("width: 30%"):
@@ -165,16 +262,22 @@ class ConsoleUI:
                         with ui.element("div").classes("mc-panel-header"):
                             ui.html('<span class="accent">◆</span> Context')
                             ui.html('<span style="flex:1"></span>')
-                            self.ctx_info = ui.html('<span class="mc-stat"></span>')
+                            self.ctx_info = ui.html('<span class="mc-meta"></span>')
                         self.ctx_scroll = ui.element("div").classes("mc-panel-content")
                         with self.ctx_scroll:
                             self.ctx_container = ui.element("div")
+                
+                # ── Footer ────────────────────────────────────
+                with ui.element("div").classes("mc-footer"):
+                    self.footer_html = ui.html(self._render_footer(state))
+                    ui.html('<span style="flex:1"></span>')
+                    uptime = self._format_uptime()
+                    self.uptime_html = ui.html(f'<span class="mc-meta">UPTIME <b>{uptime}</b></span>')
             
             # Load data
             self._full_rebuild()
             self._last_version = get_state().version
             
-            # Scroll to bottom
             ui.timer(0.5, lambda: (
                 self._scroll_bottom(self.msg_scroll),
                 self._scroll_bottom(self.ctx_scroll),
@@ -182,24 +285,66 @@ class ConsoleUI:
             
             ui.timer(REFRESH_INTERVAL, self._refresh)
     
-    # ── Rendering ─────────────────────────────────────────────
+    # ── Render helpers ────────────────────────────────────────
     
     def _render_status(self, status, tool):
         dot_cls = f"mc-dot mc-dot-{status}"
-        label = status
+        label = status.upper()
         if tool:
-            label = f"{status}: {tool}"
+            label = f"{status.upper()}: {tool}"
         return f'<span class="mc-status"><span class="{dot_cls}"></span>{_esc(label)}</span>'
     
-    def _render_stats(self, msgs, total, archival, tokens):
-        parts = [
-            f'<b>{msgs}</b> msgs',
-            f'<b>{total}</b> history',
-            f'<b>{archival}</b> archival',
-        ]
-        if tokens:
-            parts.append(f'<b>{tokens:,}</b> tok')
-        return '<span class="mc-stat">' + ' │ '.join(parts) + '</span>'
+    def _render_clock(self):
+        now = datetime.now()
+        return f'<span class="mc-meta" style="font-size:12px"><b>{now.strftime("%H:%M:%S")}</b> <span style="color:#475569">{now.strftime("%b %d")}</span></span>'
+    
+    def _render_stats_bar(self, state):
+        parts = []
+        parts.append(f'MSGS <b class="blue">{len(state.messages)}</b>')
+        parts.append(f'HISTORY <b>{state.total_messages}</b>')
+        parts.append(f'ARCHIVAL <b>{state.archival_count}</b>')
+        parts.append(f'TOKENS TODAY <b class="accent">{state.tokens_today:,}</b>')
+        parts.append(f'API CALLS <b>{state.api_calls_today}</b>')
+        if state.last_context_tokens:
+            parts.append(f'CTX <b class="amber">{state.last_context_tokens:,}</b> tok')
+        return '<span class="mc-meta">' + ' <span class="mc-sep">│</span> '.join(parts) + '</span>'
+    
+    def _render_footer(self, state):
+        parts = []
+        try:
+            cpu = psutil.cpu_percent(interval=0)
+            mem = psutil.virtual_memory()
+            parts.append(f'CPU <b>{cpu:.0f}%</b>')
+            parts.append(f'MEM <b>{mem.percent:.0f}%</b> ({mem.used/(1024**3):.1f}/{mem.total/(1024**3):.0f}GB)')
+        except Exception:
+            pass
+        
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode == 0:
+                for i, line in enumerate(result.stdout.strip().split("\n")):
+                    p = [x.strip() for x in line.split(",")]
+                    if len(p) == 3:
+                        parts.append(f'GPU{i} <b>{p[0]}%</b> VRAM <b>{int(p[1])}/{int(p[2])}MB</b>')
+        except Exception:
+            pass
+        
+        if state.last_context_time:
+            parts.append(f'LAST CTX <b>{state.last_context_time.strftime("%H:%M:%S")}</b>')
+        
+        return '<span class="mc-meta">' + ' <span class="mc-sep">│</span> '.join(parts) + '</span>' if parts else ''
+    
+    def _format_uptime(self):
+        delta = datetime.now(timezone.utc) - self._start_time
+        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m {seconds}s"
     
     def _render_message_html(self, role, content, timestamp=None):
         r = ROLES.get(role, ROLES["system"])
@@ -217,7 +362,6 @@ class ConsoleUI:
         content = msg.get("content", "")
         r = ROLES.get(role, ROLES["system"])
         
-        # Extract text from content blocks
         if isinstance(content, list):
             parts = []
             for block in content:
@@ -225,7 +369,6 @@ class ConsoleUI:
                     parts.append(block.get("text", ""))
             content = "\n---\n".join(parts) if parts else f"[{len(content)} content blocks]"
         
-        # Chips for tool info
         chips = ""
         if msg.get("tool_calls"):
             chips += f'<span class="mc-msg-chip" style="background:rgba(245,158,11,0.15);color:#f59e0b">{len(msg["tool_calls"])} tools</span>'
@@ -243,9 +386,7 @@ class ConsoleUI:
     def _render_block_html(self, label, value, description="", chars=0, limit=20000):
         self._block_counter += 1
         bid = f"block-{self._block_counter}"
-        
         desc_html = f'<div class="mc-block-desc">{_esc(description)}</div>' if description else ''
-        
         return f'''<div class="mc-block">
             <div class="mc-block-header" onclick="toggleBlock('{bid}')">
                 <span class="mc-block-arrow" id="arrow-{bid}">▸</span>
@@ -267,9 +408,7 @@ class ConsoleUI:
         msg_html = []
         for m in state.messages[-30:]:
             msg_html.append(self._render_message_html(
-                m.get("role", "?"),
-                m.get("content", ""),
-                m.get("timestamp"),
+                m.get("role", "?"), m.get("content", ""), m.get("timestamp"),
             ))
         self.msg_container._props["innerHTML"] = "\n".join(msg_html) if msg_html else '<div class="mc-empty">No messages</div>'
         self.msg_container.update()
@@ -304,14 +443,11 @@ class ConsoleUI:
         # Context info
         if state.last_context_time:
             time_str = state.last_context_time.strftime("%H:%M:%S")
-            self.ctx_info._props["innerHTML"] = f'<span class="mc-stat"><b>{state.last_context_tokens:,}</b> tokens @ {time_str}</span>'
+            self.ctx_info._props["innerHTML"] = f'<span class="mc-meta"><b class="accent">{state.last_context_tokens:,}</b> tokens @ {time_str}</span>'
             self.ctx_info.update()
         
-        # Stats
-        self.stats_html._props["innerHTML"] = self._render_stats(
-            len(state.messages), state.total_messages, state.archival_count,
-            state.last_context_tokens,
-        )
+        # Stats bar
+        self.stats_html._props["innerHTML"] = self._render_stats_bar(state)
         self.stats_html.update()
     
     def _scroll_bottom(self, el):
@@ -322,11 +458,23 @@ class ConsoleUI:
     def _refresh(self):
         state = get_state()
         
-        # Always update status (lightweight)
+        # Always update lightweight elements
         self.status_html._props["innerHTML"] = self._render_status(state.status, state.current_tool)
         self.status_html.update()
         
-        # Rebuild only on data change
+        self.clock_html._props["innerHTML"] = self._render_clock()
+        self.clock_html.update()
+        
+        self.uptime_html._props["innerHTML"] = f'<span class="mc-meta">UPTIME <b>{self._format_uptime()}</b></span>'
+        self.uptime_html.update()
+        
+        self.footer_html._props["innerHTML"] = self._render_footer(state)
+        self.footer_html.update()
+        
+        self.stats_html._props["innerHTML"] = self._render_stats_bar(state)
+        self.stats_html.update()
+        
+        # Rebuild panels only on data change
         if state.version != self._last_version:
             self._last_version = state.version
             self._full_rebuild()
