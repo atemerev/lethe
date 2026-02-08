@@ -627,7 +627,23 @@ class ContextWindow:
                 m["tool_calls"] = msg.tool_calls
             messages.append(m)
         
-        return messages
+        # Merge consecutive assistant messages (confuses models about turn structure)
+        merged = []
+        for m in messages:
+            if (merged 
+                and m["role"] == "assistant" and not m.get("tool_calls")
+                and merged[-1]["role"] == "assistant" and not merged[-1].get("tool_calls")):
+                # Merge into previous
+                prev_content = merged[-1].get("content") or ""
+                cur_content = m.get("content") or ""
+                if prev_content and cur_content:
+                    merged[-1]["content"] = prev_content + "\n" + cur_content
+                elif cur_content:
+                    merged[-1]["content"] = cur_content
+            else:
+                merged.append(m)
+        
+        return merged
 
 
 class AsyncLLMClient:
