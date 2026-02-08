@@ -1205,6 +1205,7 @@ class AsyncLLMClient:
                 
                 for tool_call in tool_calls:
                     func_name = tool_call["function"]["name"].strip()
+                    logger.info(f"Heartbeat tool call: {func_name} (id={tool_call.get('id', '?')})")
                     func = self.get_tool(func_name)
                     
                     if func:
@@ -1227,7 +1228,9 @@ class AsyncLLMClient:
                     })
             else:
                 # No tool calls, return response
-                return message.get("content") or "ok"
+                content = message.get("content") or "ok"
+                logger.info(f"Heartbeat response (no tools): {content[:80]}...")
+                return content
         
         return "ok"  # Max iterations reached
     
