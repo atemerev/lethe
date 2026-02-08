@@ -825,12 +825,10 @@ class AsyncLLMClient:
             
             if tool_calls:
                 import uuid
-                logger.info(f"Tool calls received: {len(tool_calls)} calls")
                 for tc in tool_calls:
                     # Generate ID if missing (some models omit it)
                     if not tc.get("id"):
                         tc["id"] = f"call-{uuid.uuid4().hex[:12]}"
-                    logger.info(f"  Tool: {tc.get('function', {}).get('name', '?')} id={tc['id']}")
             
             # Callback with intermediate message (only when there are tool calls - i.e. more work to do)
             # Don't callback with final response - that's returned and handled by caller
