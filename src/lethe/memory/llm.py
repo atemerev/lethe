@@ -1208,7 +1208,11 @@ class AsyncLLMClient:
                 
                 for tool_call in tool_calls:
                     func_name = tool_call["function"]["name"].strip()
-                    logger.info(f"Heartbeat tool call: {func_name} (id={tool_call.get('id', '?')})")
+                    try:
+                        tool_args = json.loads(tool_call["function"]["arguments"])
+                    except:
+                        tool_args = {}
+                    logger.info(f"Heartbeat tool: {func_name}({tool_args})")
                     func = self.get_tool(func_name)
                     
                     if func:
@@ -1224,10 +1228,12 @@ class AsyncLLMClient:
                     else:
                         tool_result = f"Unknown tool: {func_name}"
                     
+                    result_str = str(tool_result)[:2000]
+                    logger.info(f"  Result: {result_str[:100]}...")
                     kwargs["messages"].append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
-                        "content": str(tool_result)[:2000],
+                        "content": result_str,
                     })
             else:
                 # No tool calls, return response
