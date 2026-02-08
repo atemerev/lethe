@@ -852,6 +852,7 @@ class AsyncLLMClient:
         # Add user message
         self.context.add_message(Message(role="user", content=message))
         
+        empty_count = 0  # Track consecutive empty responses
         for iteration in range(max_tool_iterations):
             # Make API call
             response = await self._call_api()
@@ -868,6 +869,7 @@ class AsyncLLMClient:
             
             if tool_calls:
                 import uuid
+                empty_count = 0  # Reset on actual tool use
                 for tc in tool_calls:
                     # Generate ID if missing (some models omit it)
                     if not tc.get("id"):
@@ -978,9 +980,26 @@ class AsyncLLMClient:
                 self.context.add_message(Message(role="assistant", content=content))
                 return content
             
-            # Empty response — model may want to continue with more tool calls
-            # Just loop again (don't strip tools)
-            logger.info("Empty response, continuing loop")
+            # Empty response — model stuck
+            empty_count += 1
+            if empty_count >= 2:
+                logger.warning(f"Model returned {empty_count} consecutive empty responses, forcing final")
+                self.context.add_message(Message(
+                    role="user",
+                    content="[Respond to the user now with what you know.]"
+                ))
+                response = await self._call_api_no_tools()
+                content = strip_model_tags(response["choices"][0]["message"].get("content", ""))
+                if content:
+                    self.context.add_message(Message(role="assistant", content=content))
+                    return content
+                return "Done."
+            
+            logger.info("Empty response, nudging model to act")
+            self.context.add_message(Message(
+                role="user",
+                content="[Continue — use your tools or respond to the user.]"
+            ))
             continue
         
         # Max iterations reached - continue with another batch automatically
