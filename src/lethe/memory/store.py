@@ -49,6 +49,10 @@ class MemoryStore:
         blocks_workspace.mkdir(parents=True, exist_ok=True)
         self._init_blocks_from_templates(blocks_workspace, str(self.config_dir))
         
+        # Create skills and projects directories
+        (self.workspace_dir / "skills").mkdir(parents=True, exist_ok=True)
+        (self.workspace_dir / "projects").mkdir(parents=True, exist_ok=True)
+        
         # Initialize subsystems
         self.blocks = BlockManager(blocks_workspace)
         self.archival = ArchivalMemory(self.db)

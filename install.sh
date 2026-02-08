@@ -734,6 +734,8 @@ setup_container() {
     
     # Create workspace directory (with write permissions for container user)
     mkdir -p "$WORKSPACE_DIR"
+    mkdir -p "$WORKSPACE_DIR/skills"
+    mkdir -p "$WORKSPACE_DIR/projects"
     chmod 777 "$WORKSPACE_DIR"
     
     # Build image (--load required for Docker buildx to load into local daemon)
