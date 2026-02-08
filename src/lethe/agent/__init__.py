@@ -82,6 +82,12 @@ class Agent:
         # Add external tools (file, bash, browser)
         self.llm.add_tools(get_all_tools())
         
+        # For non-Anthropic models: embed tool reference in system prompt
+        # (Kimi K2.5 needs tools visible in context text, not just tools parameter)
+        if "claude" not in llm_config.model.lower() and "anthropic" not in llm_config.model.lower():
+            self.llm.context._tool_reference = self.llm.context._build_tool_reference(self.llm.tools)
+            logger.info(f"Embedded tool reference in system prompt ({len(self.llm.context._tool_reference)} chars)")
+        
         # Note: call await agent.initialize() after creation to load message history
         self._initialized = False
         

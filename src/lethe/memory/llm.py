@@ -242,6 +242,7 @@ class ContextWindow:
     summary: str = ""  # Summary of older messages
     total_messages_db: int = 0  # Total messages in database (set by caller)
     _summarizer: Optional[Callable] = None  # Set by LLMClient
+    _tool_reference: str = ""  # Compact tool list for system prompt (non-Anthropic models)
     
     def count_tokens(self, text: str) -> int:
         """Approximate token count with safety margin.
@@ -508,6 +509,26 @@ class ContextWindow:
             logger.info(f"Cleaned {len(self.messages) - len(clean_messages)} orphaned tool messages")
             self.messages = clean_messages
     
+    def _build_tool_reference(self, tools: List[Dict]) -> str:
+        """Build compact tool reference for embedding in system prompt.
+        
+        Some models (Kimi K2.5) work better when tools are visible in context
+        text rather than only in the separate tools parameter.
+        """
+        if not tools:
+            return ""
+        
+        lines = ["<available_tools>"]
+        for tool in tools:
+            func = tool.get("function", {})
+            name = func.get("name", "?")
+            desc = func.get("description", "").split("\n")[0]  # First line only
+            params = func.get("parameters", {}).get("properties", {})
+            param_names = ", ".join(params.keys())
+            lines.append(f"- **{name}**({param_names}): {desc}")
+        lines.append("</available_tools>")
+        return "\n".join(lines)
+    
     def build_messages(self) -> List[Dict]:
         """Build messages array for API call (Letta-style structure with prompt caching)."""
         # Clean orphaned tool messages before building
@@ -526,6 +547,12 @@ class ContextWindow:
             static_parts.append(self.memory_context)
         
         static_text = "\n".join(static_parts)
+        
+        # For non-Anthropic models: embed tool reference directly in system prompt
+        # (Kimi K2.5 works much better with tools visible in context text)
+        if self._tool_reference:
+            static_text += "\n\n" + self._tool_reference
+        
         system_content.append({
             "type": "text",
             "text": static_text,
