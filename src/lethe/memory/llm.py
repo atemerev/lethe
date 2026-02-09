@@ -486,8 +486,28 @@ class ContextWindow:
                         logger.warning(f"Removing assistant tool_calls with no results: {expected_ids}")
                     expected_tool_ids = set()
                 else:
-                    clean_messages.append(msg)
-                    expected_tool_ids = expected_ids
+                    # Keep only tool_calls that have matching results
+                    if result_ids != expected_ids:
+                        # Partial results — filter tool_calls to matched ones only
+                        filtered_calls = [tc for tc in msg.tool_calls if tc["id"] in result_ids]
+                        if filtered_calls:
+                            clean_messages.append(Message(
+                                role="assistant",
+                                content=msg.content,
+                                created_at=msg.created_at,
+                                tool_calls=filtered_calls,
+                            ))
+                        elif msg.content:
+                            clean_messages.append(Message(
+                                role="assistant", content=msg.content,
+                                created_at=msg.created_at,
+                            ))
+                        else:
+                            logger.warning(f"Removing assistant with partial tool results: {expected_ids - result_ids}")
+                        expected_tool_ids = result_ids
+                    else:
+                        clean_messages.append(msg)
+                        expected_tool_ids = expected_ids
             elif msg.role == "tool" and msg.tool_call_id:
                 if msg.tool_call_id in expected_tool_ids:
                     clean_messages.append(msg)
