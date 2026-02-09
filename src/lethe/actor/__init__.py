@@ -3,9 +3,9 @@
 Actors are autonomous agents that can:
 - Have their own goals, model, and tools
 - Discover other actors in their group
-- Communicate with each other via messages
+- Communicate with parents, siblings, and children
 - Spawn child actors for subtasks
-- Terminate themselves (but not others)
+- Terminate themselves or their immediate children
 
 The principal actor ("butler") is the only one that talks to the user.
 All other actors communicate through the principal or with each other.
@@ -104,7 +104,7 @@ class Actor:
         self._result: Optional[str] = None
         # Task handle (for async execution)
         self._task: Optional[asyncio.Task] = None
-        # LLM client (set by registry on spawn)
+        # LLM client (set by runner or agent integration)
         self._llm = None
         # Turn counter
         self._turns = 0
@@ -125,6 +125,35 @@ class Actor:
             spawned_by=self.spawned_by,
         )
 
+    def can_message(self, target_id: str) -> bool:
+        """Check if this actor can message another.
+        
+        Actors can message their:
+        - Parent (spawned_by)
+        - Siblings (same spawned_by)
+        - Children (spawned by self)
+        - Group members (same group)
+        """
+        target = self.registry.get(target_id)
+        if target is None:
+            return False
+        # Parent
+        if target_id == self.spawned_by:
+            return True
+        # Child
+        if target.spawned_by == self.id:
+            return True
+        # Sibling (same parent)
+        if self.spawned_by and target.spawned_by == self.spawned_by:
+            return True
+        # Same group
+        if target.config.group == self.config.group:
+            return True
+        # Principal can message anyone
+        if self.is_principal:
+            return True
+        return False
+
     async def send(self, message: ActorMessage):
         """Receive a message from another actor."""
         self._messages.append(message)
@@ -133,15 +162,17 @@ class Actor:
 
     async def send_to(self, recipient_id: str, content: str, reply_to: Optional[str] = None) -> ActorMessage:
         """Send a message to another actor."""
+        recipient = self.registry.get(recipient_id)
+        if recipient is None:
+            raise ValueError(f"Actor {recipient_id} not found")
+        if not self.can_message(recipient_id):
+            raise PermissionError(f"Actor {self.id} cannot message actor {recipient_id} (not related)")
         msg = ActorMessage(
             sender=self.id,
             recipient=recipient_id,
             content=content,
             reply_to=reply_to,
         )
-        recipient = self.registry.get(recipient_id)
-        if recipient is None:
-            raise ValueError(f"Actor {recipient_id} not found")
         await recipient.send(msg)
         self._messages.append(msg)
         return msg
@@ -156,12 +187,32 @@ class Actor:
             return None
 
     def terminate(self, result: Optional[str] = None):
-        """Terminate this actor. Only the actor itself should call this."""
+        """Terminate this actor."""
+        if self.state == ActorState.TERMINATED:
+            return  # Already terminated
         self._result = result or f"Actor {self.config.name} terminated"
         self.state = ActorState.TERMINATED
+        # Cancel async task if running
+        if self._task and not self._task.done():
+            self._task.cancel()
         logger.info(f"Actor terminated: {self.config.name} (id={self.id}), result: {self._result[:80]}...")
-        # Notify registry
         self.registry._on_actor_terminated(self.id)
+
+    def kill_child(self, child_id: str) -> bool:
+        """Kill an immediate child actor. Only parents can do this.
+        
+        Returns True if killed, False if not a child or already terminated.
+        """
+        child = self.registry.get(child_id)
+        if child is None:
+            return False
+        if child.spawned_by != self.id:
+            logger.warning(f"Actor {self.id} tried to kill non-child {child_id}")
+            return False
+        if child.state == ActorState.TERMINATED:
+            return False
+        child.terminate(f"Killed by parent {self.config.name}")
+        return True
 
     def build_system_prompt(self) -> str:
         """Build the system prompt for this actor's LLM calls."""
@@ -172,21 +223,42 @@ class Actor:
             parts.append("You are the ONLY actor that communicates with the user.")
             parts.append("You can spawn subagents to handle subtasks, then report results to the user.")
         else:
+            parent = self.registry.get(self.spawned_by)
+            parent_name = parent.config.name if parent else self.spawned_by
             parts.append(f"You are a subagent actor named '{self.config.name}'.")
-            parts.append(f"You were spawned by actor '{self.spawned_by}' to accomplish a specific task.")
+            parts.append(f"You were spawned by '{parent_name}' (id={self.spawned_by}) to accomplish a specific task.")
             parts.append("You CANNOT talk to the user directly. Report your results to the actor that spawned you.")
         
         parts.append(f"\n<goals>\n{self.config.goals}\n</goals>")
         
-        # Group awareness
+        # Group awareness — show all visible actors
         group_actors = self.registry.discover(self.config.group)
-        other_actors = [a for a in group_actors if a.id != self.id]
-        if other_actors:
-            parts.append("\n<group_actors>")
-            parts.append(f"Other actors in group '{self.config.group}':")
-            for actor_info in other_actors:
-                parts.append(actor_info.format())
-            parts.append("</group_actors>")
+        children = self.registry.get_children(self.id)
+        
+        # Combine group + children (dedup by id)
+        seen_ids = set()
+        visible = []
+        for info in group_actors:
+            if info.id != self.id:
+                visible.append(info)
+                seen_ids.add(info.id)
+        for child in children:
+            if child.id not in seen_ids:
+                visible.append(child.info)
+                seen_ids.add(child.id)
+        
+        if visible:
+            parts.append("\n<visible_actors>")
+            for info in visible:
+                relationship = ""
+                if info.spawned_by == self.id:
+                    relationship = " [child]"
+                elif info.id == self.spawned_by:
+                    relationship = " [parent]"
+                elif info.spawned_by == self.spawned_by and self.spawned_by:
+                    relationship = " [sibling]"
+                parts.append(f"- {info.name} (id={info.id}, state={info.state.value}){relationship}: {info.goals}")
+            parts.append("</visible_actors>")
         
         # Recent messages from other actors
         inbox_messages = [m for m in self._messages if m.sender != self.id][-10:]
@@ -194,16 +266,21 @@ class Actor:
             parts.append("\n<inbox>")
             parts.append("Recent messages from other actors:")
             for m in inbox_messages:
-                parts.append(m.format())
+                sender = self.registry.get(m.sender)
+                sender_name = sender.config.name if sender else m.sender
+                ts = m.created_at.strftime("%H:%M:%S")
+                parts.append(f"[{ts}] {sender_name}: {m.content}")
             parts.append("</inbox>")
         
         parts.append("\n<rules>")
-        parts.append("- Use `send_message(actor_id, content)` to communicate with other actors")
-        parts.append("- Use `discover_actors(group)` to find actors in your group")
+        parts.append("- Use `send_message(actor_id, content)` to message parents, siblings, children, or group members")
+        parts.append("- Use `discover_actors(group)` to find actors in a group")
         if self.is_principal:
-            parts.append("- Use `spawn_subagent(name, group, goals, tools)` to create child actors for subtasks")
-        parts.append("- Use `terminate(result)` when your task is complete — include a summary of what you accomplished")
-        parts.append("- You can terminate yourself, but NOT other actors")
+            parts.append("- Use `spawn_subagent(name, goals, ...)` to create child actors for subtasks")
+            parts.append("- Use `kill_actor(actor_id)` to terminate an immediate child actor")
+        parts.append("- Use `terminate(result)` when YOUR task is complete — include a summary of results")
+        if not self.is_principal:
+            parts.append(f"- Report results to your parent '{parent_name}' (id={self.spawned_by}) before terminating")
         parts.append("</rules>")
         
         return "\n".join(parts)
@@ -215,10 +292,8 @@ class Actor:
             if msg.sender == self.id:
                 result.append({"role": "assistant", "content": msg.content})
             else:
-                label = msg.sender
                 actor = self.registry.get(msg.sender)
-                if actor:
-                    label = actor.config.name
+                label = actor.config.name if actor else msg.sender
                 result.append({"role": "user", "content": f"[From {label}]: {msg.content}"})
         return result
 
@@ -229,15 +304,17 @@ class ActorRegistry:
     def __init__(self):
         self._actors: Dict[str, Actor] = {}
         self._principal_id: Optional[str] = None
+        # Name → ID index for duplicate detection
+        self._name_index: Dict[str, str] = {}
         # Callbacks
-        self._on_user_message: Optional[Callable] = None  # When principal needs to send to user
-        self._llm_factory: Optional[Callable] = None  # Creates LLM client for actors
+        self._on_user_message: Optional[Callable] = None
+        self._llm_factory: Optional[Callable] = None
 
     def set_llm_factory(self, factory: Callable):
         """Set factory function that creates LLM clients for actors.
         
         Args:
-            factory: Callable(actor: Actor) -> AsyncLLMClient
+            factory: async Callable(actor: Actor) -> AsyncLLMClient
         """
         self._llm_factory = factory
 
@@ -248,6 +325,17 @@ class ActorRegistry:
             callback: async Callable(message: str) -> None
         """
         self._on_user_message = callback
+
+    def find_by_name(self, name: str, group: str = "") -> Optional[Actor]:
+        """Find a running actor by name (and optionally group).
+        
+        Used to check if an actor already exists before spawning a duplicate.
+        """
+        for actor in self._actors.values():
+            if actor.config.name == name and actor.state != ActorState.TERMINATED:
+                if not group or actor.config.group == group:
+                    return actor
+        return None
 
     def spawn(
         self,
@@ -272,6 +360,7 @@ class ActorRegistry:
             is_principal=is_principal,
         )
         self._actors[actor.id] = actor
+        self._name_index[config.name] = actor.id
         
         if is_principal:
             self._principal_id = actor.id
@@ -291,14 +380,7 @@ class ActorRegistry:
         return None
 
     def discover(self, group: str) -> List[ActorInfo]:
-        """Discover all running actors in a group.
-        
-        Args:
-            group: Group name to search
-            
-        Returns:
-            List of ActorInfo for running actors in the group
-        """
+        """Discover all non-terminated actors in a group."""
         return [
             actor.info
             for actor in self._actors.values()
@@ -306,19 +388,19 @@ class ActorRegistry:
         ]
 
     def get_children(self, parent_id: str) -> List[Actor]:
-        """Get all actors spawned by a given parent."""
+        """Get all non-terminated actors spawned by a given parent."""
         return [
             actor for actor in self._actors.values()
             if actor.spawned_by == parent_id and actor.state != ActorState.TERMINATED
         ]
 
     def _on_actor_terminated(self, actor_id: str):
-        """Called when an actor terminates itself."""
+        """Called when an actor terminates."""
         actor = self._actors.get(actor_id)
         if not actor:
             return
         
-        # Notify parent if exists
+        # Notify parent if exists and running
         parent = self._actors.get(actor.spawned_by) if actor.spawned_by else None
         if parent and parent.state == ActorState.RUNNING:
             msg = ActorMessage(
@@ -330,7 +412,6 @@ class ActorRegistry:
                 loop = asyncio.get_running_loop()
                 loop.create_task(parent.send(msg))
             except RuntimeError:
-                # No running loop (sync context) — queue directly
                 parent._messages.append(msg)
                 parent._inbox.put_nowait(msg)
 
@@ -348,6 +429,9 @@ class ActorRegistry:
         """Remove terminated actors from registry."""
         terminated = [aid for aid, a in self._actors.items() if a.state == ActorState.TERMINATED]
         for aid in terminated:
-            del self._actors[aid]
+            actor = self._actors.pop(aid)
+            # Clean name index
+            if self._name_index.get(actor.config.name) == aid:
+                del self._name_index[actor.config.name]
         if terminated:
             logger.info(f"Registry: cleaned up {len(terminated)} terminated actors")
