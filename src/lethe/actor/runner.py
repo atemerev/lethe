@@ -10,11 +10,26 @@ The runner manages the lifecycle of a non-principal actor:
 
 import asyncio
 import logging
+import os
 import time
 from typing import Callable, Dict, List, Optional
 
 from lethe.actor import Actor, ActorConfig, ActorMessage, ActorRegistry, ActorState
 from lethe.actor.tools import create_actor_tools
+
+# Workspace root — resolved once
+WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))
+
+WORKSPACE_CONTEXT = """<workspace>
+Your workspace is at: {workspace}
+Key paths:
+- {workspace}/projects/ — project notes and plans
+- {workspace}/skills/ — skill files and docs
+- {workspace}/data/ — databases and persistent data
+- {workspace}/reference/ — reference materials
+Home directory: {home}
+Use absolute paths. Never guess paths like /home/user/.
+</workspace>"""
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +111,15 @@ class ActorRunner:
             system_prompt = actor.build_system_prompt()
             llm.context.system_prompt = system_prompt
             
+            workspace_ctx = WORKSPACE_CONTEXT.format(
+                workspace=WORKSPACE_DIR,
+                home=os.path.expanduser("~"),
+            )
+            
             initial_message = (
                 f"You are actor '{actor.config.name}'. Your goals:\n\n"
                 f"{actor.config.goals}\n\n"
+                f"{workspace_ctx}\n\n"
                 f"Begin working. Use your tools to accomplish the task. "
                 f"When done, call terminate(result) with a detailed summary of what you accomplished.\n"
                 f"If something goes wrong, notify your parent with send_message().\n"
