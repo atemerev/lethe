@@ -536,18 +536,13 @@ class ContextWindow:
         # Clean orphaned tool messages before building
         self._clean_orphaned_tool_messages()
         
-        # Build system as array of content blocks for Anthropic prompt caching
-        # Static content (cacheable): system prompt + memory blocks
-        # Dynamic content (not cached): summary
+        # Build system prompt
+        # Static content: system prompt + memory blocks
+        # Dynamic content: summary
         
-        system_content = []
-        
-        # 1. Static block: System prompt + memory blocks (CACHED)
-        # These rarely change, so we cache them together
         static_parts = [self.system_prompt]
         if self.memory_context:
             static_parts.append(self.memory_context)
-        
         static_text = "\n".join(static_parts)
         
         # For non-Anthropic models: embed tool reference directly in system prompt
@@ -555,20 +550,28 @@ class ContextWindow:
         if self._tool_reference:
             static_text += "\n\n" + self._tool_reference
         
-        system_content.append({
-            "type": "text",
-            "text": static_text,
-            "cache_control": {"type": "ephemeral"}  # Cache for 5 minutes
-        })
+        is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
         
-        # 2. Dynamic block: Conversation summary (NOT cached - changes frequently)
-        if self.summary:
-            system_content.append({
+        if is_anthropic:
+            # Anthropic prompt caching: array of content blocks with cache_control
+            # Static block cached for 5min (refreshed on each hit), saves ~90% on input
+            system_content = [{
                 "type": "text",
-                "text": f"\n<conversation_summary>\n{self.summary}\n</conversation_summary>"
-            })
-        
-        messages = [{"role": "system", "content": system_content}]
+                "text": static_text,
+                "cache_control": {"type": "ephemeral"}
+            }]
+            if self.summary:
+                system_content.append({
+                    "type": "text",
+                    "text": f"\n<conversation_summary>\n{self.summary}\n</conversation_summary>"
+                })
+            messages = [{"role": "system", "content": system_content}]
+        else:
+            # Other models: plain string system prompt
+            system_text = static_text
+            if self.summary:
+                system_text += f"\n\n<conversation_summary>\n{self.summary}\n</conversation_summary>"
+            messages = [{"role": "system", "content": system_text}]
         
         # Find indices of image messages (to keep only most recent)
         image_indices = []
@@ -1108,7 +1111,14 @@ class AsyncLLMClient:
         kwargs["messages"] = messages
         
         if self.tools:
-            kwargs["tools"] = self.tools
+            tools = [t.copy() for t in self.tools]
+            # Anthropic prompt caching: mark last tool for caching
+            # Cache order is tools → system → messages, so caching last tool
+            # ensures all tool definitions are cached
+            is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
+            if is_anthropic and tools:
+                tools[-1]["cache_control"] = {"type": "ephemeral"}
+            kwargs["tools"] = tools
         
         # Notify console of context build
         token_count = self.context.count_tokens("".join(str(m) for m in messages))
