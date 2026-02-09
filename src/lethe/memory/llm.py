@@ -199,17 +199,29 @@ class Message:
             self.created_at = datetime.now(timezone.utc)
     
     def get_text_content(self) -> str:
-        """Get text content for token counting and logging."""
+        """Get text content for token counting and logging.
+        
+        Includes tool_calls JSON in the output since it consumes tokens
+        in the API call even though it's separate from content.
+        """
+        parts = []
+        
         if isinstance(self.content, str):
-            return self.content
-        # Multimodal: extract text parts
-        texts = []
-        for part in self.content:
-            if part.get("type") == "text":
-                texts.append(part.get("text", ""))
-            elif part.get("type") == "image_url":
-                texts.append("[Image]")
-        return " ".join(texts)
+            parts.append(self.content)
+        elif self.content:
+            # Multimodal: extract text parts
+            for part in self.content:
+                if part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+                elif part.get("type") == "image_url":
+                    parts.append("[Image]")
+        
+        # Include tool_calls JSON — these consume real tokens in the API call
+        if self.tool_calls:
+            import json
+            parts.append(json.dumps(self.tool_calls, separators=(',', ':')))
+        
+        return " ".join(parts)
     
     def format_timestamp(self) -> str:
         """Format timestamp for context display."""
@@ -236,6 +248,7 @@ class ContextWindow:
     total_messages_db: int = 0  # Total messages in database (set by caller)
     _summarizer: Optional[Callable] = None  # Set by LLMClient
     _tool_reference: str = ""  # Compact tool list for system prompt (non-Anthropic models)
+    _tool_schemas_text: str = ""  # Serialized tool schemas for token budget accounting
     
     def count_tokens(self, text: str) -> int:
         """Approximate token count with safety margin.
@@ -247,11 +260,13 @@ class ContextWindow:
         return int(base_count * TOKEN_SAFETY_MARGIN)
     
     def get_fixed_tokens(self) -> int:
-        """Get tokens used by fixed content."""
+        """Get tokens used by fixed content (including tool schemas)."""
         return (
             self.count_tokens(self.system_prompt) +
             self.count_tokens(self.memory_context) +
-            self.count_tokens(self.summary)
+            self.count_tokens(self.summary) +
+            self.count_tokens(self._tool_reference) +
+            self.count_tokens(self._tool_schemas_text)
         )
     
     def get_available_tokens(self) -> int:
@@ -753,6 +768,7 @@ class AsyncLLMClient:
             schema = function_to_schema(func)
         
         self._tools[func.__name__] = (func, schema)
+        self._update_tool_budget()
     
     def add_tools(self, tools: List[tuple[Callable, Dict]]):
         """Add multiple tools as (function, schema) tuples."""
@@ -760,6 +776,14 @@ class AsyncLLMClient:
             # Use schema name as key (allows name overrides for async imports)
             name = schema.get("name", func.__name__)
             self._tools[name] = (func, schema)
+        self._update_tool_budget()
+    
+    def _update_tool_budget(self):
+        """Update context window's tool schema budget for accurate token counting."""
+        if self.tools:
+            self.context._tool_schemas_text = json.dumps(self.tools, separators=(',', ':'))
+        else:
+            self.context._tool_schemas_text = ""
     
     @property
     def tools(self) -> List[Dict]:
