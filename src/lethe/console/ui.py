@@ -375,17 +375,40 @@ class ConsoleUI:
             content = "\n---\n".join(parts) if parts else f"[{len(content)} content blocks]"
         
         chips = ""
+        tool_detail = ""
         if msg.get("tool_calls"):
             chips += f'<span class="mc-msg-chip" style="background:rgba(245,158,11,0.15);color:#f59e0b">{len(msg["tool_calls"])} tools</span>'
+            # Show tool names and args
+            lines = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "?")
+                try:
+                    import json
+                    args = json.loads(fn.get("arguments", "{}"))
+                    args_str = ", ".join(f'{k}="{v}"' if isinstance(v, str) else f'{k}={v}' for k, v in args.items())
+                except Exception:
+                    args_str = fn.get("arguments", "")[:80]
+                lines.append(f"\U0001f527 {name}({args_str})")
+            tool_detail = "\n".join(lines)
         if msg.get("tool_call_id"):
-            chips += '<span class="mc-msg-chip" style="background:rgba(245,158,11,0.15);color:#f59e0b">result</span>'
+            chips += f'<span class="mc-msg-chip" style="background:rgba(245,158,11,0.15);color:#f59e0b">result {_esc(msg["tool_call_id"][:30])}</span>'
+        
+        # Combine content and tool detail
+        display = ""
+        if content:
+            display += _esc(str(content))
+        if tool_detail:
+            if display:
+                display += "\n"
+            display += _esc(tool_detail)
         
         return f'''<div class="mc-msg" style="border-color:{r['color']};background:{r['bg']}">
             <div class="mc-msg-header">
                 <span class="mc-msg-role" style="color:{r['color']}">{r['label']}</span>
                 {chips}
             </div>
-            <pre>{_esc(str(content))}</pre>
+            <pre>{display}</pre>
         </div>'''
     
     def _render_block_html(self, label, value, description="", chars=0, limit=20000):

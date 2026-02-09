@@ -287,21 +287,8 @@ class ContextWindow:
             content = msg.get("content", "")
             metadata = msg.get("metadata", {})
             
-            # Skip tool messages from history — tool_use/tool_result pairing
-            # only works within the same session. Different models use different
-            # ID formats (Kimi: "functions.name:N", Anthropic: "toolu_xxx")
-            if role == "tool":
-                skipped_tool += 1
-                continue
-            
-            # Skip assistant messages that are only tool_calls (no text)
-            if role == "assistant" and metadata.get("tool_calls") and not content:
-                skipped_tool += 1
-                continue
-            
-            # Strip tool_calls from assistant messages loaded from history
-            if role == "assistant" and metadata.get("tool_calls"):
-                metadata = {k: v for k, v in metadata.items() if k != "tool_calls"}
+            # Keep tool messages from history — orphan cleaner handles unpaired ones,
+            # tool result skimmer truncates old results to 5 lines
             
             # Handle multimodal content - extract text, skip base64
             if isinstance(content, str) and content.startswith("["):
