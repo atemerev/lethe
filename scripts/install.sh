@@ -773,42 +773,72 @@ EOF
     $CONTAINER_CMD stop lethe 2>/dev/null || true
     $CONTAINER_CMD rm lethe 2>/dev/null || true
     
-    # Run container
-    # Podman: --userns=keep-id maps host user
-    # Docker rootless: run as root inside, UID mapping is automatic
-    # Docker traditional: use gosu entrypoint with HOST_UID/GID
+    # Build runtime-specific run args
+    local RUN_ARGS="--name lethe --env-file $CONFIG_DIR/container.env"
     if [[ "$CONTAINER_CMD" == "podman" ]]; then
-        $CONTAINER_CMD run -d \
-            --name lethe \
-            --restart unless-stopped \
-            --userns=keep-id \
-            --env-file "$CONFIG_DIR/container.env" \
-            -v "$WORKSPACE_DIR:/workspace:Z" \
-            lethe:latest
+        RUN_ARGS="$RUN_ARGS --userns=keep-id -v $WORKSPACE_DIR:/workspace:Z"
     elif docker info 2>/dev/null | grep -q "rootless"; then
-        # Rootless Docker - UID mapping handled automatically
-        $CONTAINER_CMD run -d \
-            --name lethe \
-            --restart unless-stopped \
-            --env-file "$CONFIG_DIR/container.env" \
-            -v "$WORKSPACE_DIR:/workspace:z" \
-            lethe:latest
+        RUN_ARGS="$RUN_ARGS -v $WORKSPACE_DIR:/workspace:z"
     else
-        # Traditional Docker - use gosu entrypoint for UID mapping
-        # Requires sudo for apt-get inside container
-        $CONTAINER_CMD run -d \
-            --name lethe \
-            --restart unless-stopped \
-            -e HOST_UID=$(id -u) \
-            -e HOST_GID=$(id -g) \
-            --env-file "$CONFIG_DIR/container.env" \
-            -v "$WORKSPACE_DIR:/workspace" \
-            lethe:latest
+        RUN_ARGS="$RUN_ARGS -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) -v $WORKSPACE_DIR:/workspace"
     fi
     
-    success "Container started"
+    # On Linux (non-root): use systemd user service for boot persistence
+    # Solves: rootless Podman containers die on user logout
+    # Based on PR #2 by @alf239
+    local OS=$(detect_os)
+    if [[ "$OS" == "linux" || "$OS" == "wsl" ]] && [[ "$(id -u)" -ne 0 ]] && command -v systemctl &>/dev/null; then
+        setup_systemd_container "$RUN_ARGS"
+    else
+        # Fallback: detached with restart policy (Mac, root, no systemd)
+        $CONTAINER_CMD run -d --restart unless-stopped $RUN_ARGS lethe:latest
+        success "Container started"
+    fi
+    
     info "Workspace: $WORKSPACE_DIR"
     info "View logs: $CONTAINER_CMD logs -f lethe"
+}
+
+setup_systemd_container() {
+    local RUN_ARGS="$1"
+    
+    mkdir -p "$HOME/.config/systemd/user"
+    
+    # Enable lingering so user services run without login session
+    if command -v loginctl &>/dev/null; then
+        maybe_sudo loginctl enable-linger "$(whoami)" 2>/dev/null || true
+    fi
+    
+    # systemd owns the full lifecycle: run --rm (not -d), systemd handles restart
+    cat > "$HOME/.config/systemd/user/lethe-container.service" << EOF
+[Unit]
+Description=Lethe AI Assistant (Container)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10
+ExecStartPre=-$CONTAINER_CMD stop lethe
+ExecStartPre=-$CONTAINER_CMD rm lethe
+ExecStart=$CONTAINER_CMD run --rm $RUN_ARGS lethe:latest
+ExecStop=$CONTAINER_CMD stop lethe
+
+[Install]
+WantedBy=default.target
+EOF
+
+    if systemctl --user daemon-reload 2>/dev/null; then
+        systemctl --user enable --now lethe-container 2>/dev/null
+        success "Container managed by systemd (survives logout/reboot)"
+        info "Service: systemctl --user {start|stop|restart} lethe-container"
+        info "Logs: journalctl --user -u lethe-container -f"
+    else
+        warn "Could not set up systemd — falling back to container restart policy"
+        $CONTAINER_CMD run -d --restart unless-stopped $RUN_ARGS lethe:latest
+        success "Container started"
+    fi
 }
 
 main() {
