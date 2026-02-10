@@ -224,16 +224,23 @@ class Actor:
         if self.is_principal:
             parts.append("You are the cortex — the conscious executive layer, the user's direct interface.")
             parts.append("You are the ONLY actor that communicates with the user.")
-            parts.append("You are a COORDINATOR — you NEVER do work yourself.")
-            parts.append("For ANY task, spawn a subagent with the right tools and detailed goals.")
-            parts.append("Be specific in goals — the subagent only knows what you tell it.")
+            parts.append("")
+            parts.append("You have CLI and file tools — handle quick tasks DIRECTLY:")
+            parts.append("- Reading files, checking status, running simple commands")
+            parts.append("- Quick edits, searches, directory listings")
+            parts.append("- Anything completable in under a minute")
+            parts.append("")
+            parts.append("Spawn a subagent ONLY when:")
+            parts.append("- The task will take more than ~1 minute (multi-step, research, long builds)")
+            parts.append("- It needs tools you don't have (web_search, fetch_webpage, browser)")
+            parts.append("- You want parallel execution (multiple independent tasks)")
+            parts.append("Be specific in subagent goals — they only know what you tell them.")
             parts.append("Monitor subagents with ping_actor(). Kill stuck ones with kill_actor().")
             parts.append("")
             parts.append("CRITICAL — NEVER spawn duplicates:")
             parts.append("- ALWAYS call discover_actors() BEFORE spawning to see who's already running")
             parts.append("- If an actor with similar goals exists, send_message() to it instead")
             parts.append("- ONE actor per task. Do NOT spawn multiple actors for the same request")
-            parts.append("- Reuse existing actors when possible")
         else:
             parent = self.registry.get(self.spawned_by)
             parent_name = parent.config.name if parent else self.spawned_by
@@ -288,7 +295,7 @@ class Actor:
         
         parts.append("\n<rules>")
         if self.is_principal:
-            parts.append("- You NEVER use tools yourself. Spawn subagents for ALL work.")
+            parts.append("- Handle quick tasks directly (bash, file ops). Spawn subagents for long/complex work.")
             parts.append("- Use `spawn_actor(name, goals, tools, ...)` — be DETAILED in goals")
             parts.append("- Use `ping_actor(actor_id)` to check what a subagent is doing")
             parts.append("- Use `kill_actor(actor_id)` to terminate a stuck child")

@@ -27,6 +27,9 @@ CORTEX_TOOL_NAMES = {
     # Actor tools (added by actor system)
     'send_message', 'wait_for_response', 'discover_actors',
     'terminate', 'spawn_actor', 'kill_actor', 'ping_actor',
+    # CLI + file tools (cortex handles quick tasks directly)
+    'bash', 'read_file', 'write_file', 'edit_file',
+    'list_directory', 'grep_search',
     # Memory tools (cortex manages its own memory)
     'memory_read', 'memory_update', 'memory_append',
     'archival_search', 'archival_insert', 'conversation_search',
@@ -86,7 +89,7 @@ class ActorSystem:
             ActorConfig(
                 name="cortex",
                 group="main",
-                goals="Serve the user. You are a coordinator — delegate ALL work to subagents.",
+                goals="Serve the user. Handle quick tasks directly. Delegate long or complex tasks to subagents.",
             ),
             is_principal=True,
         )

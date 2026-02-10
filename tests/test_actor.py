@@ -480,8 +480,8 @@ class TestSystemPrompt:
         prompt = principal.build_system_prompt()
         assert "cortex" in prompt
         assert "ONLY actor" in prompt
-        assert "COORDINATOR" in prompt
-        assert "NEVER" in prompt  # Never do work yourself
+        assert "quick tasks" in prompt.lower()  # Handle quick tasks directly
+        assert "subagent" in prompt.lower()  # Spawn subagent for long tasks
         assert "spawn" in prompt.lower()
         assert "ping_actor" in prompt
         assert "kill_actor" in prompt
