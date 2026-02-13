@@ -98,12 +98,38 @@ curl -fsSL https://lethe.gg/update | bash
 | Provider | Env Variable | Default Model |
 |----------|--------------|---------------|
 | OpenRouter | `OPENROUTER_API_KEY` | `moonshotai/kimi-k2.5-0127` |
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-opus-4-6` |
+| Anthropic (API key) | `ANTHROPIC_API_KEY` | `claude-opus-4-6` |
+| Anthropic (subscription) | `ANTHROPIC_AUTH_TOKEN` | `claude-opus-4-6` |
 | OpenAI | `OPENAI_API_KEY` | `gpt-5.2` |
 
 Set `LLM_PROVIDER` to force a specific provider, or let it auto-detect from available API keys.
 
 **Multi-model support**: Set `LLM_MODEL_AUX` for a cheaper model used in summarization (e.g., `claude-haiku-4-5-20251001`).
+
+### Anthropic OAuth (Claude Pro/Max Subscription)
+
+Use your Claude Pro ($20/mo) or Max ($100-200/mo) subscription instead of pay-per-token API credits. This bypasses litellm and makes direct API calls with Claude Code-compatible request format.
+
+**Option A: Interactive login (recommended)**
+
+```bash
+uv run lethe oauth-login
+```
+
+Opens your browser to sign in with your Anthropic account. Tokens are saved to `~/.lethe/oauth_tokens.json` with automatic refresh.
+
+**Option B: Manual token**
+
+If you already have an OAuth access token (e.g. from `claude setup-token`):
+
+```bash
+# In your .env
+ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...
+```
+
+Note: tokens from `ANTHROPIC_AUTH_TOKEN` cannot be refreshed automatically. Use `oauth-login` for persistent sessions.
+
+**Priority**: If both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are set, OAuth takes priority (logged on startup).
 
 ### Run as Service
 
@@ -224,6 +250,7 @@ Enable with `LETHE_CONSOLE=true`. Web dashboard on port 8777.
 | `LLM_PROVIDER` | Force provider (`openrouter`, `anthropic`, `openai`) | (auto-detect) |
 | `OPENROUTER_API_KEY` | OpenRouter API key | (one required) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | (one required) |
+| `ANTHROPIC_AUTH_TOKEN` | Anthropic OAuth token (subscription) | (alternative) |
 | `OPENAI_API_KEY` | OpenAI API key | (one required) |
 | `LLM_MODEL` | Main model | (provider default) |
 | `LLM_MODEL_AUX` | Aux model for summarization | (provider default) |
@@ -291,6 +318,7 @@ src/lethe/
 ├── console/        # NiceGUI web dashboard
 ├── memory/         # LanceDB-based memory backend
 │   ├── llm.py      # LLM client with context budget management
+│   ├── anthropic_oauth.py  # Direct Anthropic API for OAuth (subscription auth)
 │   ├── store.py    # Unified memory coordinator
 │   ├── blocks.py   # Core memory blocks
 │   └── context.py  # Context assembly and caching
