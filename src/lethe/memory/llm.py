@@ -344,8 +344,8 @@ class ContextWindow:
         """Summarize oldest messages using Letta-style sliding window.
         
         Approach:
-        1. Trigger when messages exceed COMPACTION_TRIGGER_RATIO (85%) of available
-        2. Find cutoff point to keep SLIDING_WINDOW_KEEP_RATIO (70%) of messages
+        1. Trigger when messages exceed COMPACTION_TRIGGER_RATIO (85%) of available tokens
+        2. Find cutoff point by TOKEN budget (not message count) to hit SLIDING_WINDOW_KEEP_RATIO
         3. Cutoff must be at assistant message boundary (avoid mid-conversation splits)
         4. Summarize messages before cutoff, keep messages after
         """
@@ -356,27 +356,41 @@ class ContextWindow:
         if total <= available * COMPACTION_TRIGGER_RATIO or len(self.messages) <= 4:
             return
         
-        logger.info(f"Context compaction triggered: {total} tokens > {available * COMPACTION_TRIGGER_RATIO:.0f} threshold")
+        logger.info(f"Context compaction triggered: {total} tokens > {available * COMPACTION_TRIGGER_RATIO:.0f} threshold ({len(self.messages)} messages)")
         
-        # Calculate target: keep SLIDING_WINDOW_KEEP_RATIO of messages
-        target_keep = int(len(self.messages) * SLIDING_WINDOW_KEEP_RATIO)
-        target_keep = max(target_keep, 2)  # Keep at least 2 messages
+        # Target: keep enough messages to fit within KEEP_RATIO of available tokens
+        target_tokens = int(available * SLIDING_WINDOW_KEEP_RATIO)
         
-        # Find cutoff point - must end on assistant message for clean break
-        cutoff = len(self.messages) - target_keep
+        # Walk backwards from end, accumulating tokens, to find how many messages to keep
+        kept_tokens = 0
+        keep_from = len(self.messages)  # Start from end
+        for i in range(len(self.messages) - 1, -1, -1):
+            msg_tokens = self.count_tokens(self.messages[i].get_text_content())
+            if kept_tokens + msg_tokens > target_tokens:
+                keep_from = i + 1
+                break
+            kept_tokens += msg_tokens
+        else:
+            keep_from = 0
         
-        # Adjust cutoff to end on assistant message boundary
+        # Ensure we keep at least 2 messages
+        keep_from = min(keep_from, len(self.messages) - 2)
+        
+        # Adjust cutoff to assistant message boundary (clean conversation break)
+        cutoff = keep_from
         while cutoff > 0 and cutoff < len(self.messages):
             if self.messages[cutoff - 1].role == "assistant":
                 break
             cutoff -= 1
         
         if cutoff <= 0:
-            # Can't find good cutoff, use simple split
-            cutoff = len(self.messages) - target_keep
+            cutoff = keep_from  # Fallback if no clean boundary found
         
         to_summarize = self.messages[:cutoff]
         self.messages = self.messages[cutoff:]
+        
+        kept_tokens_actual = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
+        logger.info(f"Compaction: {total} → {kept_tokens_actual} tokens (removed {len(to_summarize)} messages, kept {len(self.messages)})")
         
         logger.info(f"Compacting: summarizing {len(to_summarize)} messages, keeping {len(self.messages)}")
         
@@ -1180,6 +1194,8 @@ class AsyncLLMClient:
     
     async def _call_api(self) -> Dict:
         """Make API call via litellm."""
+        # Pre-flight: force compaction if context is too large
+        self.context._compress_if_needed()
         messages = self.context.build_messages()
         
         kwargs = await self._get_api_kwargs()
