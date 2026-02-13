@@ -150,10 +150,13 @@ class LLMConfig:
             if prefix and not self.model_aux.startswith(prefix):
                 self.model_aux = prefix + self.model_aux
         
-        # Verify API key exists
+        # Verify API key exists (ANTHROPIC_AUTH_TOKEN is an alternative for Anthropic)
         env_key = provider_config.get("env_key")
         if env_key and not os.environ.get(env_key):
-            raise ValueError(f"{env_key} not set")
+            if self.provider == "anthropic" and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+                pass  # Bearer auth via ANTHROPIC_AUTH_TOKEN
+            else:
+                raise ValueError(f"{env_key} not set")
         
         logger.info(f"LLM config: provider={self.provider}, model={self.model}, aux={self.model_aux}")
     
@@ -170,6 +173,11 @@ class LLMConfig:
             if env_key and os.environ.get(env_key):
                 logger.info(f"Auto-detected provider: {name}")
                 return name
+        
+        # ANTHROPIC_AUTH_TOKEN as fallback for Anthropic (Bearer auth)
+        if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            logger.info("Auto-detected provider: anthropic (via ANTHROPIC_AUTH_TOKEN)")
+            return "anthropic"
         
         # Default
         return DEFAULT_PROVIDER
@@ -1151,6 +1159,14 @@ class AsyncLLMClient:
         # Custom API base for local/compatible providers
         if self.config.api_base:
             kwargs["api_base"] = self.config.api_base
+        # Anthropic Bearer auth via ANTHROPIC_AUTH_TOKEN (instead of x-api-key)
+        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if auth_token and "anthropic" in self.config.provider:
+            kwargs["api_key"] = "placeholder"  # prevent litellm from erroring on missing key
+            kwargs["extra_headers"] = {
+                "Authorization": f"Bearer {auth_token}",
+                "x-api-key": "",  # suppress default header
+            }
         return kwargs
     
     async def _call_with_retry(self, kwargs: Dict, log_type: str, max_retries: int = 5) -> Dict:
