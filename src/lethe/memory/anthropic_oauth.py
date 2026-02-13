@@ -473,7 +473,7 @@ class AnthropicOAuth:
         url = f"{MESSAGES_URL}?beta=true"
         client = await self._get_client()
         
-        logger.debug(f"OAuth API call: model={model}, tools={len(api_tools)}, messages={len(api_messages)}")
+        logger.info(f"OAuth API call: model={model}, messages={len(api_messages)}, tools={len(api_tools)}")
         
         response = await client.post(url, headers=headers, json=body)
         
@@ -485,6 +485,14 @@ class AnthropicOAuth:
             )
         
         data = response.json()
+        usage = data.get("usage", {})
+        in_tok = usage.get("input_tokens", 0)
+        out_tok = usage.get("output_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_write = usage.get("cache_creation_input_tokens", 0)
+        cache_str = f", cache r/w={cache_read}/{cache_write}" if cache_read or cache_write else ""
+        logger.info(f"OAuth API response: {in_tok} in + {out_tok} out tokens{cache_str}")
+        
         return self._parse_response(data)
     
     async def close(self):
