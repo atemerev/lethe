@@ -220,7 +220,13 @@ class AnthropicOAuth:
         return headers
     
     def _normalize_model(self, model: str) -> str:
-        """Map model to full dated ID if needed."""
+        """Map model to full dated ID if needed.
+        
+        Also strips litellm provider prefixes (e.g., 'anthropic/claude-...' → 'claude-...').
+        """
+        # Strip litellm provider prefix (anthropic/, openrouter/, etc.)
+        if "/" in model:
+            model = model.split("/", 1)[-1]
         return MODEL_ID_MAP.get(model, model)
     
     def _normalize_tools(self, tools: List[Dict]) -> List[Dict]:
