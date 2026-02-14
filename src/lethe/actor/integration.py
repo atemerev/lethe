@@ -33,7 +33,7 @@ CORTEX_TOOL_NAMES = {
     'memory_read', 'memory_update', 'memory_append',
     'archival_search', 'archival_insert', 'conversation_search',
     # Telegram tools (cortex talks to user)
-    'telegram_send_message', 'telegram_send_file',
+    'telegram_send_message', 'telegram_send_file', 'telegram_react',
     # Local image inspection/sending
     'view_image', 'send_image',
 }
