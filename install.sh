@@ -10,7 +10,7 @@
 # Supports multiple LLM providers: OpenRouter, Anthropic, OpenAI
 #
 
-set -e
+set -euo pipefail
 
 # Require bash 4+ for associative arrays
 if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
@@ -101,6 +101,14 @@ detect_os() {
 
 check_command() { command -v "$1" >/dev/null 2>&1; }
 
+get_env_value() {
+    # Parse KEY=value from env files without executing them.
+    local key="$1"
+    local file="$2"
+    [ -f "$file" ] || return 1
+    grep -E "^${key}=" "$file" 2>/dev/null | head -n1 | cut -d= -f2-
+}
+
 maybe_sudo() {
     if [[ "$(id -u)" -eq 0 ]]; then
         "$@"
@@ -123,16 +131,21 @@ detect_api_keys() {
         DETECTED_PROVIDERS+=("openai")
     fi
     
-    # Also check .env file if it exists
+    # Also check .env file if it exists (parse only, never source)
     if [ -f "$CONFIG_DIR/.env" ]; then
-        source "$CONFIG_DIR/.env" 2>/dev/null || true
-        if [ -n "${OPENROUTER_API_KEY:-}" ] && [[ ! " ${DETECTED_PROVIDERS[*]} " =~ " openrouter " ]]; then
+        local cfg_or_key
+        local cfg_an_key
+        local cfg_oa_key
+        cfg_or_key="$(get_env_value "OPENROUTER_API_KEY" "$CONFIG_DIR/.env" || true)"
+        cfg_an_key="$(get_env_value "ANTHROPIC_API_KEY" "$CONFIG_DIR/.env" || true)"
+        cfg_oa_key="$(get_env_value "OPENAI_API_KEY" "$CONFIG_DIR/.env" || true)"
+        if [ -n "${cfg_or_key:-}" ] && [[ ! " ${DETECTED_PROVIDERS[*]} " =~ " openrouter " ]]; then
             DETECTED_PROVIDERS+=("openrouter")
         fi
-        if [ -n "${ANTHROPIC_API_KEY:-}" ] && [[ ! " ${DETECTED_PROVIDERS[*]} " =~ " anthropic " ]]; then
+        if [ -n "${cfg_an_key:-}" ] && [[ ! " ${DETECTED_PROVIDERS[*]} " =~ " anthropic " ]]; then
             DETECTED_PROVIDERS+=("anthropic")
         fi
-        if [ -n "${OPENAI_API_KEY:-}" ] && [[ ! " ${DETECTED_PROVIDERS[*]} " =~ " openai " ]]; then
+        if [ -n "${cfg_oa_key:-}" ] && [[ ! " ${DETECTED_PROVIDERS[*]} " =~ " openai " ]]; then
             DETECTED_PROVIDERS+=("openai")
         fi
     fi
@@ -242,11 +255,11 @@ prompt_api_key() {
     
     # Then check existing config files
     if [ -z "$existing_key" ] && [ -f "$CONFIG_DIR/container.env" ]; then
-        existing_key=$(grep "^$key_name=" "$CONFIG_DIR/container.env" 2>/dev/null | cut -d= -f2-)
+        existing_key="$(grep "^$key_name=" "$CONFIG_DIR/container.env" 2>/dev/null | cut -d= -f2- || true)"
         [ -n "$existing_key" ] && key_source="$CONFIG_DIR/container.env"
     fi
     if [ -z "$existing_key" ] && [ -f "$CONFIG_DIR/.env" ]; then
-        existing_key=$(grep "^$key_name=" "$CONFIG_DIR/.env" 2>/dev/null | cut -d= -f2-)
+        existing_key="$(grep "^$key_name=" "$CONFIG_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
         [ -n "$existing_key" ] && key_source="$CONFIG_DIR/.env"
     fi
     
@@ -291,8 +304,8 @@ prompt_telegram() {
     
     for config_file in "$CONFIG_DIR/container.env" "$CONFIG_DIR/.env" ".env"; do
         if [ -f "$config_file" ]; then
-            [ -z "$existing_token" ] && existing_token=$(grep "^TELEGRAM_BOT_TOKEN=" "$config_file" 2>/dev/null | cut -d= -f2-)
-            [ -z "$existing_user_id" ] && existing_user_id=$(grep "^TELEGRAM_ALLOWED_USER_IDS=" "$config_file" 2>/dev/null | cut -d= -f2-)
+            [ -z "$existing_token" ] && existing_token="$(grep "^TELEGRAM_BOT_TOKEN=" "$config_file" 2>/dev/null | cut -d= -f2- || true)"
+            [ -z "$existing_user_id" ] && existing_user_id="$(grep "^TELEGRAM_ALLOWED_USER_IDS=" "$config_file" 2>/dev/null | cut -d= -f2- || true)"
             [ -n "$existing_token" ] && [ -z "$config_source" ] && config_source="$config_file"
         fi
     done
@@ -342,6 +355,9 @@ install_dependencies() {
     if ! check_command curl; then
         info "Installing curl..."
         if [[ "$OS" == "mac" ]]; then
+            if ! check_command brew; then
+                error "Homebrew not found. Install Homebrew first: https://brew.sh"
+            fi
             brew install curl
         elif check_command apt-get; then
             maybe_sudo apt-get update -y && maybe_sudo apt-get install -y curl
@@ -355,6 +371,9 @@ install_dependencies() {
     if ! check_command git; then
         info "Installing git..."
         if [[ "$OS" == "mac" ]]; then
+            if ! check_command brew; then
+                error "Homebrew not found. Install Homebrew first: https://brew.sh"
+            fi
             brew install git
         elif check_command apt-get; then
             maybe_sudo apt-get install -y git
@@ -368,6 +387,9 @@ install_dependencies() {
     if ! check_command npm; then
         info "Installing Node.js..."
         if [[ "$OS" == "mac" ]]; then
+            if ! check_command brew; then
+                error "Homebrew not found. Install Homebrew first: https://brew.sh"
+            fi
             brew install node
         elif check_command apt-get; then
             maybe_sudo apt-get install -y nodejs npm
@@ -400,11 +422,19 @@ install_dependencies() {
         uv python install 3.12
     fi
     success "Python 3.11+ available"
+
+    # Capture uv path for service setup (works for both root and non-root installs)
+    UV_BIN="$(command -v uv || true)"
+    if [ -z "${UV_BIN:-}" ]; then
+        error "uv is not in PATH after installation"
+    fi
+    UV_BIN_DIR="$(dirname "$UV_BIN")"
 }
 
 get_latest_release() {
     # Fetch latest release tag from GitHub API
-    local latest=$(curl -fsSL "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    local latest
+    latest="$(curl -fsSL "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)"
     if [ -z "$latest" ]; then
         # Fallback to main if no releases
         echo "main"
@@ -527,10 +557,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$HOME/.local/bin/uv run lethe
+ExecStart=$UV_BIN run lethe
 Restart=always
 RestartSec=10
-Environment="PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$UV_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 
 [Install]
 WantedBy=default.target
@@ -574,10 +604,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/root/.local/bin/uv run lethe
+ExecStart=$UV_BIN run lethe
 Restart=always
 RestartSec=10
-Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$UV_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/root"
 
 [Install]
@@ -604,7 +634,7 @@ setup_launchd() {
     <string>com.lethe.agent</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$HOME/.local/bin/uv</string>
+        <string>$UV_BIN</string>
         <string>run</string>
         <string>lethe</string>
     </array>
@@ -621,12 +651,13 @@ setup_launchd() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>$UV_BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 </dict>
 </plist>
 EOF
 
+    launchctl unload "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null || true
     launchctl load "$HOME/Library/LaunchAgents/com.lethe.agent.plist"
     
     success "Launchd service installed and started"
@@ -736,7 +767,7 @@ setup_container() {
     mkdir -p "$WORKSPACE_DIR"
     mkdir -p "$WORKSPACE_DIR/skills"
     mkdir -p "$WORKSPACE_DIR/projects"
-    chmod 777 "$WORKSPACE_DIR"
+    chmod 700 "$WORKSPACE_DIR"
     
     # Build image (--load required for Docker buildx to load into local daemon)
     cd "$INSTALL_DIR"

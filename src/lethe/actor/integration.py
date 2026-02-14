@@ -204,6 +204,7 @@ class ActorSystem:
         client = AsyncLLMClient(
             config=config,
             system_prompt=actor.build_system_prompt(),
+            usage_scope=f"actor:{actor.config.name}",
         )
         
         return client
@@ -267,17 +268,27 @@ class ActorSystem:
     async def _handle_principal_message(self, message: ActorMessage):
         """Process child->principal updates when cortex isn't explicitly waiting."""
         content = (message.content or "").strip()
+        sender = self.registry.get(message.sender)
+        sender_name = sender.config.name if sender else ""
         # DMN has a direct callback path already; avoid duplicate user sends.
         if content.startswith("[USER_NOTIFY]"):
             return
 
-        should_notify = False
-        if content.startswith("[FAILED]"):
-            should_notify = True
-        elif content.startswith("[DONE]"):
-            should_notify = True
-        elif content.startswith("[PROGRESS]"):
+        # Routine DMN round completion/progress should NOT be pushed to the user.
+        # DMN can still escalate via [USER_NOTIFY], and failures are forwarded.
+        if sender_name == "dmn":
+            if content.startswith("[FAILED]"):
+                should_notify = True
+            else:
+                return
+        else:
             should_notify = False
+            if content.startswith("[FAILED]"):
+                should_notify = True
+            elif content.startswith("[DONE]"):
+                should_notify = True
+            elif content.startswith("[PROGRESS]"):
+                should_notify = False
 
         if should_notify and self._send_to_user:
             try:
@@ -338,20 +349,30 @@ class ActorSystem:
 
     @property
     def status(self) -> dict:
-        recent_events = self.registry.events.query(limit=10)
+        all_events = self.registry.events.query(limit=500)
+        recent_events = all_events[-10:]
+        dmn_status = self.dmn.status if self.dmn else {}
+        actor_last_event_at: dict[str, str] = {}
+        for e in all_events:
+            actor_last_event_at[e.actor_id] = e.created_at.isoformat()
         return {
             "active_actors": self.registry.active_count,
             "background_tasks": len(self._background_tasks),
+            "principal_monitor_running": bool(
+                self._principal_monitor_task and not self._principal_monitor_task.done()
+            ),
             "actors": [
                 {
                     "id": a.id,
                     "name": a.name,
                     "group": a.group,
                     "state": a.state.value,
+                    "task_state": a.task_state.value,
                     "goals": a.goals[:80],
                 }
                 for a in self.registry.all_actors
             ],
+            "actor_last_event_at": actor_last_event_at,
             "recent_events": [
                 {
                     "type": e.event_type,
@@ -362,4 +383,5 @@ class ActorSystem:
                 }
                 for e in recent_events
             ],
+            "dmn": dmn_status,
         }

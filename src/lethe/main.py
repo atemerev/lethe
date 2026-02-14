@@ -115,7 +115,7 @@ async def run():
             on_context_build=lambda ctx, tokens: lethe_console.update_context(ctx, tokens),
             on_status_change=lambda status, tool: lethe_console.update_status(status, tool),
             on_memory_change=lambda blocks: lethe_console.update_memory_blocks(blocks),
-            on_token_usage=lambda tokens: lethe_console.track_tokens(tokens),
+            on_token_usage=None,
         )
 
     # Initialize conversation manager
@@ -256,6 +256,33 @@ async def run():
             get_reminders=get_active_reminders,
         )
 
+    # Console monitoring pump for dynamic runtime subsystems.
+    console_monitor_task = None
+    if console_enabled:
+        async def monitor_console_state():
+            while True:
+                try:
+                    stats = agent.get_stats()
+                    lethe_console.update_stats(stats['total_messages'], stats['archival_memories'])
+                    lethe_console.update_messages(agent.llm.context.messages)
+                    lethe_console.update_summary(agent.llm.context.summary or "")
+                    lethe_console.update_hippocampus(agent.hippocampus.get_stats())
+                    lethe_console.update_hippocampus_context(agent.hippocampus.get_context_view())
+                    if actor_system:
+                        lethe_console.update_actor_status(actor_system.status)
+                        if actor_system.dmn:
+                            lethe_console.update_dmn_context(actor_system.dmn.get_context_view())
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Console monitor update failed: {e}")
+                await asyncio.sleep(2.0)
+
+        console_monitor_task = asyncio.create_task(
+            monitor_console_state(),
+            name="console-monitor",
+        )
+
     # Set up shutdown handling
     shutdown_event = asyncio.Event()
 
@@ -292,6 +319,12 @@ async def run():
         # Shutdown with timeout to avoid hanging on native threads
         try:
             async with asyncio.timeout(5):
+                if console_monitor_task:
+                    console_monitor_task.cancel()
+                    try:
+                        await console_monitor_task
+                    except asyncio.CancelledError:
+                        pass
                 if actor_system:
                     await actor_system.shutdown()
                 await heartbeat.stop()

@@ -810,6 +810,7 @@ class AsyncLLMClient:
         system_prompt: str = "",
         memory_context: str = "",
         on_message_persist: Optional[Callable] = None,  # Callback to persist messages
+        usage_scope: str = "agent",
     ):
         self.config = config or LLMConfig()
         self.context = ContextWindow(
@@ -823,6 +824,7 @@ class AsyncLLMClient:
         
         # Persistence callback: (role, content, metadata) -> None
         self._on_message_persist = on_message_persist
+        self._usage_scope = usage_scope or "agent"
         
         # Stop flag: set by terminate() tool to prevent extra API calls
         self._stop_after_tool = False
@@ -966,17 +968,28 @@ class AsyncLLMClient:
         if hasattr(self, "_on_context_build") and self._on_context_build:
             self._on_context_build(context, tokens)
     
-    def _track_usage(self, result: Dict):
+    def _track_usage(self, result: Dict, source: str = "", model: str = ""):
         """Track token usage and cache stats from API response."""
         usage = result.get("usage", {})
         total = usage.get("total_tokens", 0)
+        source_name = source or self._usage_scope
+        model_name = model or result.get("model", "") or self.config.model
         if total and hasattr(self, "_on_token_usage") and self._on_token_usage:
-            self._on_token_usage(total)
+            payload = {
+                "source": source_name,
+                "model": model_name,
+                "usage": usage,
+            }
+            try:
+                self._on_token_usage(payload)
+            except TypeError:
+                self._on_token_usage(total)
         
         # Track cache stats in console
         if usage:
             try:
-                from lethe.console import track_cache_usage
+                from lethe.console import track_cache_usage, track_usage
+                track_usage(usage, source=source_name, model=model_name)
                 track_cache_usage(usage)
             except ImportError:
                 pass
@@ -1378,7 +1391,7 @@ class AsyncLLMClient:
         logger.error(f"OAuth call failed after {max_retries} attempts: {last_error}")
         raise last_error
     
-    async def _call_api(self) -> Dict:
+    async def _call_api(self, source: str = "") -> Dict:
         """Make API call via litellm (or OAuth if enabled)."""
         # Pre-flight: force compaction if context is too large
         self.context._compress_if_needed()
@@ -1415,7 +1428,7 @@ class AsyncLLMClient:
                 logger.warning(f"Failed to write debug request log: {e}")
         
         result = await self._call_with_retry(kwargs, "chat")
-        self._track_usage(result)
+        self._track_usage(result, source=source or self._usage_scope, model=kwargs.get("model", self.config.model))
 
         if LLM_DEBUG and debug_ts:
             try:
@@ -1428,7 +1441,7 @@ class AsyncLLMClient:
         
         return result
     
-    async def _call_api_no_tools(self) -> Dict:
+    async def _call_api_no_tools(self, source: str = "") -> Dict:
         """Make API call without tools (for final response after hitting limit)."""
         messages = self.context.build_messages()
         
@@ -1438,10 +1451,10 @@ class AsyncLLMClient:
         kwargs["messages"] = messages
         
         result = await self._call_with_retry(kwargs, "chat_no_tools")
-        self._track_usage(result)
+        self._track_usage(result, source=source or f"{self._usage_scope}:no_tools", model=kwargs.get("model", self.config.model))
         return result
     
-    async def complete(self, prompt: str, use_aux: bool = False) -> str:
+    async def complete(self, prompt: str, use_aux: bool = False, usage_tag: str = "") -> str:
         """Simple completion without tools or context management.
         
         Used for summarization and other utility tasks.
@@ -1464,6 +1477,8 @@ class AsyncLLMClient:
         
         log_type = "complete" if not use_aux else "complete_aux"
         result = await self._call_with_retry(kwargs, log_type)
+        source = usage_tag or (f"{self._usage_scope}:aux" if use_aux else f"{self._usage_scope}:complete")
+        self._track_usage(result, source=source, model=kwargs.get("model", self.config.model))
         
         return result["choices"][0]["message"].get("content") or ""
     
@@ -1505,6 +1520,7 @@ class AsyncLLMClient:
         # Simple loop for tool calls (max 5 iterations — read + write + reflect)
         for _ in range(5):
             result = await self._call_with_retry(kwargs, "heartbeat")
+            self._track_usage(result, source=f"{self._usage_scope}:heartbeat", model=kwargs.get("model", self.config.model_aux))
             
             choice = result["choices"][0]
             message = choice["message"]

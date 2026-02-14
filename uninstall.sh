@@ -4,7 +4,7 @@
 # Removes Lethe and all associated files
 #
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'

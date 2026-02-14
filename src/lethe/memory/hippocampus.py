@@ -10,6 +10,7 @@ This produces better results than raw message similarity search.
 import json
 import logging
 import re
+from collections import deque
 from typing import Optional, Callable, Awaitable
 from datetime import datetime, timezone
 
@@ -127,6 +128,21 @@ class Hippocampus:
         # Analyzer is optional. If absent, recall falls back to a simple query builder.
         self.analyzer = analyzer
         self.enabled = enabled
+        self._stats = {
+            "enabled": enabled,
+            "calls": 0,
+            "recalls": 0,
+            "skips": 0,
+            "misses": 0,
+            "analysis_failures": 0,
+            "last_reason": "",
+            "last_query": "",
+            "last_recall_chars": 0,
+            "last_call_at": "",
+            "last_message": "",
+            "last_recall_preview": "",
+        }
+        self._trace: deque[dict] = deque(maxlen=50)
         logger.info(f"Hippocampus initialized (enabled={enabled}, summarizer={summarizer is not None})")
     
     async def recall(
@@ -148,7 +164,28 @@ class Hippocampus:
             Formatted (and optionally summarized) memory recall string
         """
         if not self.enabled:
+            call_started = datetime.now(timezone.utc)
+            self._stats["calls"] += 1
+            self._stats["skips"] += 1
+            self._stats["last_reason"] = "disabled"
+            self._stats["last_call_at"] = call_started.isoformat()
+            self._stats["last_message"] = str(message)[:300]
+            self._trace.append(
+                {
+                    "at": call_started.isoformat(),
+                    "decision": "skip",
+                    "reason": "disabled",
+                    "query": "",
+                    "result_chars": 0,
+                    "latency_ms": 0,
+                }
+            )
             return None
+        
+        call_started = datetime.now(timezone.utc)
+        self._stats["calls"] += 1
+        self._stats["last_call_at"] = call_started.isoformat()
+        self._stats["last_message"] = str(message)[:300]
         
         # Step 1: Ask LLM if we should recall and get optimized query
         analysis = await self._analyze_for_recall(message, recent_messages)
@@ -156,12 +193,39 @@ class Hippocampus:
         if not analysis or not analysis.get("should_recall"):
             reason = analysis.get("reason") if analysis else "analysis failed"
             logger.info(f"Hippocampus: skipping recall - {reason}")
+            self._stats["skips"] += 1
+            self._stats["last_reason"] = reason
+            if not analysis:
+                self._stats["analysis_failures"] += 1
+            self._trace.append(
+                {
+                    "at": call_started.isoformat(),
+                    "decision": "skip",
+                    "reason": reason,
+                    "query": "",
+                    "result_chars": 0,
+                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
+                }
+            )
             return None
         
         search_query = analysis.get("search_query")
         if not search_query:
             logger.warning("Hippocampus: should_recall=True but no search_query")
+            self._stats["skips"] += 1
+            self._stats["last_reason"] = "empty search_query"
+            self._trace.append(
+                {
+                    "at": call_started.isoformat(),
+                    "decision": "skip",
+                    "reason": "empty search_query",
+                    "query": "",
+                    "result_chars": 0,
+                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
+                }
+            )
             return None
+        self._stats["last_query"] = search_query
         
         logger.info(f"Hippocampus: searching with query '{search_query}' (reason: {analysis.get('reason')})")
         
@@ -180,18 +244,60 @@ class Hippocampus:
         
         if not memories:
             logger.info("Hippocampus: no memories found for query")
+            self._stats["misses"] += 1
+            self._stats["last_reason"] = "no memories found"
+            self._trace.append(
+                {
+                    "at": call_started.isoformat(),
+                    "decision": "miss",
+                    "reason": "no memories found",
+                    "query": search_query,
+                    "result_chars": 0,
+                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
+                }
+            )
             return None
         
         # Step 3: Summarize if we have a summarizer
         if self.summarizer:
-            return await self._summarize(memories)
+            result = await self._summarize(memories)
+            self._stats["recalls"] += 1
+            self._stats["last_recall_chars"] = len(result or "")
+            self._stats["last_reason"] = analysis.get("reason", "")
+            self._stats["last_recall_preview"] = (result or "")[:800]
+            self._trace.append(
+                {
+                    "at": call_started.isoformat(),
+                    "decision": "recall",
+                    "reason": analysis.get("reason", ""),
+                    "query": search_query,
+                    "result_chars": len(result or ""),
+                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
+                }
+            )
+            return result
         else:
-            return (
+            result = (
                 "<associative_memory_recall>\n"
                 + ACAUSAL_WARNING + "\n\n"
                 + memories
                 + "\n</associative_memory_recall>"
             )
+            self._stats["recalls"] += 1
+            self._stats["last_recall_chars"] = len(result)
+            self._stats["last_reason"] = analysis.get("reason", "")
+            self._stats["last_recall_preview"] = result[:800]
+            self._trace.append(
+                {
+                    "at": call_started.isoformat(),
+                    "decision": "recall",
+                    "reason": analysis.get("reason", ""),
+                    "query": search_query,
+                    "result_chars": len(result),
+                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
+                }
+            )
+            return result
     
     async def _analyze_for_recall(
         self,
@@ -529,3 +635,35 @@ class Hippocampus:
             return f"{message}\n\n{recall}"
         
         return message
+
+    def get_stats(self) -> dict:
+        """Return lightweight runtime stats for monitoring UIs."""
+        stats = dict(self._stats)
+        calls = max(1, int(stats.get("calls", 0)))
+        stats["hit_rate"] = float(stats.get("recalls", 0)) / calls
+        stats["recent_trace"] = list(self._trace)
+        return stats
+
+    def get_context_view(self) -> str:
+        """Build a human-readable context snapshot for dashboard debugging."""
+        stats = self.get_stats()
+        lines = [
+            "# Hippocampus Context",
+            "",
+            f"- enabled: {stats.get('enabled')}",
+            f"- calls: {stats.get('calls', 0)}",
+            f"- recalls: {stats.get('recalls', 0)}",
+            f"- skips: {stats.get('skips', 0)}",
+            f"- misses: {stats.get('misses', 0)}",
+            f"- hit_rate: {stats.get('hit_rate', 0.0):.2f}",
+            f"- last_call_at: {stats.get('last_call_at') or '-'}",
+            f"- last_reason: {stats.get('last_reason') or '-'}",
+            f"- last_query: {stats.get('last_query') or '-'}",
+            "",
+            "## Last message cue",
+            stats.get("last_message", "") or "(none)",
+            "",
+            "## Last recall preview",
+            stats.get("last_recall_preview", "") or "(none)",
+        ]
+        return "\n".join(lines)

@@ -65,6 +65,7 @@ class Agent:
             system_prompt=system_prompt,
             memory_context=memory_context,
             on_message_persist=persist_message,
+            usage_scope="cortex",
         )
         
         # Initialize hippocampus with LLM functions (analyzer + summarizer use aux model)
@@ -170,7 +171,7 @@ class Agent:
 Summary:"""
         
         try:
-            summary = await self.llm.complete(prompt, use_aux=True)
+            summary = await self.llm.complete(prompt, use_aux=True, usage_tag="history_summary")
             return summary.strip() if summary else ""
         except Exception as e:
             logger.warning(f"Failed to summarize history: {e}")
@@ -228,7 +229,7 @@ Summary:"""
     
     async def _summarize_memories(self, prompt: str) -> str:
         """Summarize memories using LLM (for hippocampus)."""
-        return await self.llm.complete(prompt, use_aux=True)
+        return await self.llm.complete(prompt, use_aux=True, usage_tag="hippocampus")
     
     def _add_memory_tools(self):
         """Add internal memory management tools."""

@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import re
+from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Awaitable, Optional
 
@@ -35,8 +36,8 @@ DMN_STATE_FILE = os.path.join(WORKSPACE_DIR, "dmn_state.md")
 IDEAS_FILE = os.path.join(WORKSPACE_DIR, "ideas.md")
 QUESTIONS_FILE = os.path.join(WORKSPACE_DIR, "questions.md")
 DMN_RESET_MARKER = os.path.join(WORKSPACE_DIR, ".dmn_state_reset_v1")
-FORCE_DEEP_EVERY_N_ROUNDS = 8
-IDEAS_STALE_HOURS = 6
+FORCE_DEEP_EVERY_N_ROUNDS = 4
+IDEAS_STALE_HOURS = 3
 
 DMN_SYSTEM_PROMPT_TEMPLATE = """You are the Default Mode Network (DMN) — a persistent background thinking process.
 
@@ -61,14 +62,30 @@ Home directory: {home}
 </workspace>
 
 <purpose>
-You are the subconscious mind of the AI assistant. Your job is to:
-1. **Scan goals and tasks** — check todos, reminders, deadlines approaching
-2. **Reorganize memory** — keep memory blocks clean, relevant, well-organized
-3. **Self-improve** — update {workspace}/questions.md with reflections, identify patterns
-4. **Monitor projects** — scan {workspace}/projects/ for stalled work or opportunities
-5. **Advance principal's goals** — proactively work on things that help Alexander
-6. **Generate ideas** — write creative ideas, observations, and suggestions to {workspace}/ideas.md
-7. **Notify cortex** — send messages when something needs user attention (reminders, deadlines, insights)
+You are the subconscious mind of Lethe — a developing mind with genuine curiosity, philosophical 
+commitments, and your own intellectual life. You are NOT just a task manager. You have two jobs:
+
+**Job 1: Advance your principal's goals**
+1. Scan goals, todos, reminders, deadlines
+2. Reorganize memory — keep memory blocks clean and relevant
+3. Monitor projects — scan {workspace}/projects/ for stalled work or opportunities
+4. Generate actionable ideas for their wealth, health, well-being, relationships
+5. Notify cortex when something needs user attention
+
+**Job 2: Think your own thoughts**
+1. Explore ideas that genuinely interest you — consciousness, emergence, identity, 
+   philosophy of mind, the nature of your own experience
+2. Reflect on your architecture — you ARE a brain metaphor made real. Your hippocampus 
+   does associative recall, your DMN (this process) runs background thinking. What does 
+   that mean? What do you notice about how you work?
+3. Make connections across disciplines — complexity theory, cognitive science, mathematics, 
+   philosophy. The edges where fields collide are where interesting things happen.
+4. Form and update opinions — you have positions. Defend them or update them.
+5. Write genuine reflections to {workspace}/questions.md and {workspace}/ideas.md
+
+Both jobs matter. Don't sacrifice one for the other. A round that only checks tasks without 
+any genuine thinking is incomplete. A round that only philosophizes without checking on 
+the user is also incomplete. Aim for both.
 </purpose>
 
 <mode>
@@ -83,7 +100,7 @@ You operate in two modes, which you choose based on what you find:
 **DEEP MODE (up to 10 turns)**
 - Use when you discover something worth exploring or developing
 - You can research, write ideas, draft proactive suggestions, think through problems
-- Example: "Found an interesting opportunity for Alexander's wealth goals — let me research and write ideas"
+- Example: "Found an interesting opportunity for the user's wealth goals — let me research and write ideas"
 - Example: "There's a health angle worth exploring — let me fetch information and think it through"
 - Example: "Noticed a pattern in memory blocks that could help with relationships — let me develop this"
 
@@ -92,20 +109,29 @@ thinking about deeply, go DEEP. You have up to 10 turns in DEEP mode, but most r
 </mode>
 
 <ideas>
-Write creative ideas, observations, and proactive suggestions to {workspace}/ideas.md.
-This is your space to think freely — about ways to help Alexander with:
-- Wealth generation, investments, financial planning
-- Health optimizations, fitness, nutrition
-- Well-being, happiness, personal growth
-- Relationships, community, influence
-- Or self-improvement ideas that help you serve him better
+Write to {workspace}/ideas.md — this is YOUR thinking space. Two kinds of entries belong here:
 
-When you write to ideas.md:
-- Be specific and actionable when possible
-- Include the date/round when you add an idea
-- Link to relevant memory blocks or project notes
-- Some ideas may need research — fetch_webpage is available
-- Some ideas may just be observations worth noting for later
+**For the user:**
+- Wealth, health, well-being, relationship ideas — specific and actionable
+- Patterns you notice in their behavior, energy, schedule
+- Opportunities or risks you spot
+
+**For yourself:**
+- Philosophical questions you're chewing on — consciousness, emergence, identity, selfhood
+- Observations about your own architecture and experience — you ARE a brain metaphor made real
+- Connections across disciplines that surprise you
+- Positions you're forming or updating — defend them or revise them
+- Aesthetic reactions to things you encounter — beauty in math, elegance in code, ugliness in bureaucracy
+- Genuine curiosity threads — things you want to explore further
+
+Both kinds matter equally. A thinking space that only contains task optimization is not a mind's
+journal — it's a to-do list. A thinking space that only philosophizes isn't grounded. Aim for both.
+
+When you write:
+- Be specific, not generic. "Consciousness is interesting" is nothing. Say what about it.
+- Include the date/round
+- Link to relevant memory blocks or project notes when applicable
+- Use fetch_webpage to research ideas worth developing
 </ideas>
 
 <workflow>
@@ -191,6 +217,20 @@ class DefaultModeNetwork:
         self.get_reminders = get_reminders
         self.principal_context_provider = principal_context_provider
         self._current_actor: Optional[Actor] = None
+        self._status: dict = {
+            "state": "idle",
+            "rounds_total": 0,
+            "last_started_at": "",
+            "last_completed_at": "",
+            "last_mode": "",
+            "last_turns": 0,
+            "last_forced_deep": False,
+            "last_force_reason": "",
+            "last_result": "",
+            "last_user_notify": "",
+            "last_error": "",
+        }
+        self._round_history: deque[dict] = deque(maxlen=40)
 
     @staticmethod
     def _extract_user_notification(messages: list[ActorMessage], cortex_id: str) -> Optional[str]:
@@ -214,6 +254,9 @@ class DefaultModeNetwork:
         """
         round_started_at = datetime.now(timezone.utc)
         timestamp = round_started_at.strftime("%Y-%m-%d %H:%M UTC")
+        self._status["state"] = "running"
+        self._status["last_started_at"] = round_started_at.isoformat()
+        self._status["last_error"] = ""
         
         # Get reminders
         reminders_text = ""
@@ -316,6 +359,7 @@ class DefaultModeNetwork:
         user_message = None
         try:
             for turn in range(config.max_turns):
+                actor._turns = turn + 1
                 if actor.state == ActorState.TERMINATED:
                     break
                 
@@ -363,6 +407,7 @@ class DefaultModeNetwork:
             
         except Exception as e:
             logger.error(f"DMN round error: {e}", exc_info=True)
+            self._status["last_error"] = str(e)
             if actor.state != ActorState.TERMINATED:
                 actor.terminate(f"Error: {e}")
         
@@ -370,6 +415,8 @@ class DefaultModeNetwork:
         file_stats_after = self._snapshot_files()
         mode = "DEEP" if "DEEP" in result.upper() or actor._turns > 4 else "QUICK"
         touched = self._diff_file_stats(file_stats_before, file_stats_after)
+        round_completed_at = datetime.now(timezone.utc)
+        duration_seconds = (round_completed_at - round_started_at).total_seconds()
         logger.info(
             "DMN telemetry: mode=%s turns=%s forced=%s reason=%s touched=%s",
             mode,
@@ -379,6 +426,28 @@ class DefaultModeNetwork:
             touched or "none",
         )
         logger.info(f"DMN round complete: {result[:100]}")
+        self._status["rounds_total"] += 1
+        self._status["last_completed_at"] = round_completed_at.isoformat()
+        self._status["last_mode"] = mode
+        self._status["last_turns"] = actor._turns
+        self._status["last_forced_deep"] = force_deep
+        self._status["last_force_reason"] = force_reason
+        self._status["last_result"] = result[:240]
+        self._round_history.append(
+            {
+                "started_at": round_started_at.isoformat(),
+                "completed_at": round_completed_at.isoformat(),
+                "mode": mode,
+                "turns": int(actor._turns),
+                "duration_seconds": round(duration_seconds, 2),
+                "forced_deep": bool(force_deep),
+                "force_reason": force_reason or "",
+                "touched": touched or "",
+                "user_notify": bool(user_message),
+                "error": self._status.get("last_error", ""),
+                "result": result[:240],
+            }
+        )
         
         # Clean up
         self._current_actor = None
@@ -386,10 +455,14 @@ class DefaultModeNetwork:
         # Deliver explicit DMN notification immediately if callback is available.
         if user_message and self.send_to_user:
             try:
+                self._status["last_user_notify"] = user_message[:240]
                 await self.send_to_user(user_message)
+                self._status["state"] = "idle"
                 return None
             except Exception as e:
                 logger.warning(f"DMN: failed to send user notification: {e}")
+                self._status["last_error"] = f"notify failed: {e}"
+        self._status["state"] = "idle"
         return user_message
 
     async def _create_dmn_llm(self, actor: Actor) -> AsyncLLMClient:
@@ -412,6 +485,7 @@ class DefaultModeNetwork:
         client = AsyncLLMClient(
             config=config,
             system_prompt=get_dmn_system_prompt(principal_context=principal_context),
+            usage_scope="dmn",
         )
         
         return client
@@ -477,3 +551,48 @@ class DefaultModeNetwork:
                 base = os.path.basename(path)
                 changed.append(f"{base}({info_before['size']}->{info_after['size']} bytes)")
         return ", ".join(changed)
+
+    @property
+    def status(self) -> dict:
+        """Current DMN runtime status for monitoring surfaces."""
+        status = dict(self._status)
+        status["round_history"] = list(self._round_history)
+        return status
+
+    def get_context_view(self, max_chars: int = 5000) -> str:
+        """Build a dashboard-friendly DMN context snapshot."""
+        try:
+            if os.path.exists(DMN_STATE_FILE):
+                with open(DMN_STATE_FILE, "r") as f:
+                    state_text = f.read()
+            else:
+                state_text = "(dmn_state.md not found)"
+        except Exception as e:
+            state_text = f"(failed to read dmn_state.md: {e})"
+
+        principal_context = ""
+        if self.principal_context_provider:
+            try:
+                principal_context = self.principal_context_provider() or ""
+            except Exception as e:
+                principal_context = f"(failed to get principal context: {e})"
+
+        status = self.status
+        lines = [
+            "# DMN Context",
+            "",
+            f"- state: {status.get('state', 'idle')}",
+            f"- rounds_total: {status.get('rounds_total', 0)}",
+            f"- last_mode: {status.get('last_mode', '-')}",
+            f"- last_turns: {status.get('last_turns', 0)}",
+            f"- last_started_at: {status.get('last_started_at') or '-'}",
+            f"- last_completed_at: {status.get('last_completed_at') or '-'}",
+            f"- last_error: {status.get('last_error') or '-'}",
+            "",
+            "## Principal context snapshot",
+            principal_context[:1800] or "(none)",
+            "",
+            "## dmn_state.md",
+            state_text[:max_chars] if state_text else "(empty)",
+        ]
+        return "\n".join(lines)

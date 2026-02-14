@@ -9,7 +9,7 @@
 # Native mode: updates install dir, restarts service
 #
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -39,7 +39,8 @@ print_header() {
 }
 
 get_latest_release() {
-    local latest=$(curl -fsSL "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    local latest
+    latest="$(curl -fsSL "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)"
     if [ -z "$latest" ]; then
         echo "main"
     else
@@ -118,7 +119,8 @@ detect_install_dir() {
     
     # 3. Check systemd system service for WorkingDirectory (root installs)
     if [ -f "/etc/systemd/system/lethe.service" ]; then
-        local wd=$(grep "WorkingDirectory=" "/etc/systemd/system/lethe.service" 2>/dev/null | cut -d= -f2)
+        local wd
+        wd="$(grep "WorkingDirectory=" "/etc/systemd/system/lethe.service" 2>/dev/null | cut -d= -f2 || true)"
         if [ -n "$wd" ] && [ -d "$wd/.git" ]; then
             echo "$wd"
             return
@@ -127,7 +129,8 @@ detect_install_dir() {
     
     # 4. Check systemd user service for WorkingDirectory
     if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
-        local wd=$(grep "WorkingDirectory=" "$HOME/.config/systemd/user/lethe.service" 2>/dev/null | cut -d= -f2)
+        local wd
+        wd="$(grep "WorkingDirectory=" "$HOME/.config/systemd/user/lethe.service" 2>/dev/null | cut -d= -f2 || true)"
         if [ -n "$wd" ] && [ -d "$wd/.git" ]; then
             echo "$wd"
             return
@@ -136,7 +139,8 @@ detect_install_dir() {
     
     # 4. Check launchd plist for WorkingDirectory
     if [ -f "$HOME/Library/LaunchAgents/com.lethe.agent.plist" ]; then
-        local wd=$(grep -A1 "WorkingDirectory" "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/')
+        local wd
+        wd="$(grep -A1 "WorkingDirectory" "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/' || true)"
         if [ -n "$wd" ] && [ -d "$wd/.git" ]; then
             echo "$wd"
             return
@@ -176,7 +180,6 @@ update_container() {
     
     # Check if container runtime is reachable
     if ! $container_cmd info &>/dev/null; then
-        error "$container_cmd daemon not reachable"
         if [[ "$container_cmd" == "docker" ]] && [[ -n "$DOCKER_HOST" ]]; then
             echo ""
             echo "  DOCKER_HOST is set to: $DOCKER_HOST"
@@ -189,16 +192,21 @@ update_container() {
             echo "    4. Run: sudo systemctl start docker"
             echo ""
         fi
-        exit 1
+        error "$container_cmd daemon not reachable"
     fi
     
     # Clone to temp directory
-    local tmp_dir=$(mktemp -d)
-    trap "rm -rf $tmp_dir" EXIT
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf -- "$tmp_dir"' EXIT
     
     info "Cloning latest version..."
-    git clone --depth 1 --branch "$latest_version" "$REPO_URL" "$tmp_dir" 2>/dev/null || \
+    if ! git clone --depth 1 --branch "$latest_version" "$REPO_URL" "$tmp_dir" 2>/dev/null; then
         git clone --depth 1 "$REPO_URL" "$tmp_dir"
+        cd "$tmp_dir"
+        git fetch --tags origin
+        git checkout "$latest_version"
+    fi
     
     info "Stopping container..."
     $container_cmd stop lethe 2>/dev/null || true
@@ -336,6 +344,13 @@ main() {
                 echo "  View logs: journalctl -u lethe -f"
             elif [[ "$install_mode" == "native-systemd-system-new" ]]; then
                 info "Creating systemd system service..."
+                local uv_bin
+                local uv_bin_dir
+                uv_bin="$(command -v uv || true)"
+                if [ -z "${uv_bin:-}" ]; then
+                    error "uv not found in PATH; cannot create systemd service"
+                fi
+                uv_bin_dir="$(dirname "$uv_bin")"
                 cat > "/etc/systemd/system/lethe.service" << EOF
 [Unit]
 Description=Lethe Autonomous AI Agent
@@ -344,10 +359,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$install_dir
-ExecStart=/root/.local/bin/uv run lethe
+ExecStart=$uv_bin run lethe
 Restart=always
 RestartSec=10
-Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$uv_bin_dir:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/root"
 
 [Install]
