@@ -292,7 +292,12 @@ Summary:"""
             
             output = []
             for i, r in enumerate(results, 1):
-                output.append(f"{i}. [{r['score']:.2f}] {r['text']}")
+                text = r['text']
+                if isinstance(text, str):
+                    lines = text.split("\n")
+                    if len(lines) > 50:
+                        text = "\n".join(lines[:50]) + f"\n[... {len(lines) - 50} more lines]"
+                output.append(f"{i}. [{r['score']:.2f}] {text}")
             return "\n".join(output)
         
         def archival_insert(text: str) -> str:
@@ -324,6 +329,11 @@ Summary:"""
             for r in results:
                 timestamp = r['created_at'][:16].replace('T', ' ')
                 content = r['content']
+                # Trim oversized entries (tool results can contain nested conversation dumps)
+                if isinstance(content, str):
+                    lines = content.split("\n")
+                    if len(lines) > 50:
+                        content = "\n".join(lines[:50]) + f"\n[... {len(lines) - 50} more lines]"
                 output.append(f"[{timestamp}] {r['role']}: {content}")
             
             return f"Found {len(results)} messages:\n\n" + "\n\n".join(output)

@@ -318,6 +318,64 @@ class MessageHistory:
         table.delete(f"id = '{message_id}'")
         return True
     
+    def cleanup_search_results(self, tool_names: set = None) -> int:
+        """Remove stored tool results for search tools that cause recursive bloat.
+        
+        Identifies tool results by matching tool_call_id to the assistant message's
+        tool_calls metadata, then checking the function name.
+        
+        Args:
+            tool_names: Tool names to clean up (default: conversation_search, archival_search)
+        
+        Returns:
+            Number of messages deleted
+        """
+        if tool_names is None:
+            tool_names = {"conversation_search", "archival_search"}
+        
+        table = self._get_table()
+        arrow = table.to_arrow()
+        
+        roles = arrow.column("role").to_pylist()
+        metadata_list = arrow.column("metadata").to_pylist()
+        ids = arrow.column("id").to_pylist()
+        
+        # Build tool_call_id → tool_name lookup from assistant messages
+        id_to_name = {}
+        for role, meta_str in zip(roles, metadata_list):
+            if role != "assistant":
+                continue
+            try:
+                meta = json.loads(meta_str) if meta_str else {}
+                for tc in meta.get("tool_calls", []):
+                    tc_id = tc.get("id", "")
+                    fn_name = tc.get("function", {}).get("name", "")
+                    if tc_id and fn_name:
+                        id_to_name[tc_id] = fn_name
+            except (json.JSONDecodeError, TypeError):
+                continue
+        
+        # Find tool messages whose tool_call_id maps to a search tool
+        to_delete = []
+        for msg_id, role, meta_str in zip(ids, roles, metadata_list):
+            if role != "tool":
+                continue
+            try:
+                meta = json.loads(meta_str) if meta_str else {}
+                tc_id = meta.get("tool_call_id", "")
+                tool_name = id_to_name.get(tc_id, "")
+                if tool_name in tool_names:
+                    to_delete.append(msg_id)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        
+        if to_delete:
+            for msg_id in to_delete:
+                table.delete(f"id = '{msg_id}'")
+            logger.info(f"Cleaned up {len(to_delete)} search result messages from history")
+        
+        return len(to_delete)
+    
     def count(self) -> int:
         """Get total message count."""
         table = self._get_table()

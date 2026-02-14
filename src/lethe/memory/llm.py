@@ -823,11 +823,19 @@ class AsyncLLMClient:
         
         logger.info(f"AsyncLLMClient initialized with model {self.config.model}")
     
+    # Tool results that should NOT be persisted to message history
+    # (conversation_search results contain previous search results, creating recursive bloat)
+    _SKIP_PERSIST_TOOLS = {"conversation_search", "archival_search"}
+    
     def _add_and_persist(self, message: "Message"):
         """Add message to context and persist to storage."""
         self.context.add_message(message)
         
         if self._on_message_persist:
+            # Skip persisting tool results from search tools (recursive bloat)
+            if message.role == "tool" and message.name in self._SKIP_PERSIST_TOOLS:
+                return
+            
             metadata = {}
             if message.tool_call_id:
                 metadata["tool_call_id"] = message.tool_call_id
@@ -1041,6 +1049,7 @@ class AsyncLLMClient:
                             role="tool",
                             content=f"Error: malformed tool arguments - {e}",
                             tool_call_id=tool_id,
+                            name=tool_name,
                         ))
                         continue
                     
@@ -1094,6 +1103,7 @@ class AsyncLLMClient:
                         role="tool",
                         content=str(result),
                         tool_call_id=tool_id,
+                        name=tool_name,
                     ))
                 
                 # Inject images AFTER all tool results (Anthropic requires tool_result immediately after tool_use)
