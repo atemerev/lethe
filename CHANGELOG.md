@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.10.1 - 2026-02-15
+
+### Changed
+- Inter-actor signaling migrated from in-band text tags to structured metadata channels (`channel` / `kind`).
+- Actor tool `send_message(...)` extended with explicit signaling fields for channel-based routing.
+- Background insight delivery flow tightened to `DMN/Amygdala -> Cortex -> User`, with policy enforcement in cortex.
+
+### Fixed
+- Subagent completion and failure results no longer bypass cortex and go directly to user output.
+- Background user notifications now use throttled, de-duplicated forwarding to reduce notification spam.
+- DMN direct-to-user callback path removed; background actors now escalate through cortex only.
+
 ## v0.10.0 - 2026-02-15
 
 ### Added
