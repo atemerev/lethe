@@ -43,16 +43,6 @@ SUMMARIZE_PROMPT = load_prompt_template(
 # Warning added to recall block
 ACAUSAL_WARNING = """WARNING: This recall is acausal - these memories may be from the past and do not reflect current state. Do NOT use recalled memories to determine what is done or pending. Use conversation history, todo tools, and memory blocks for current state."""
 
-# Stale capability disclaimers from historical chats that should not be re-injected
-# as current behavior constraints.
-_CAPABILITY_DISCLAIMER_PATTERNS = [
-    re.compile(r"\bi don'?t have (recalled )?memories\b", re.IGNORECASE),
-    re.compile(r"\bi have no access to previous (exchanges|conversations)\b", re.IGNORECASE),
-    re.compile(r"\beach conversation .* starts fresh\b", re.IGNORECASE),
-    re.compile(r"\bi can'?t access previous (exchanges|conversations)\b", re.IGNORECASE),
-]
-
-
 class Hippocampus:
     """Pattern completion memory retrieval with LLM-guided search.
     
@@ -231,7 +221,6 @@ class Hippocampus:
             )
             return result
         else:
-            memories = self._strip_stale_disclaimers(memories)
             result = (
                 "<associative_memory_recall>\n"
                 + ACAUSAL_WARNING + "\n\n"
@@ -542,7 +531,6 @@ class Hippocampus:
     
     async def _summarize(self, memories: str) -> str:
         """Summarize memories using the configured summarizer."""
-        memories = self._strip_stale_disclaimers(memories)
         try:
             prompt = SUMMARIZE_PROMPT.format(memories=memories)
             summary = await self.summarizer(prompt)
@@ -566,23 +554,6 @@ class Hippocampus:
             + "\n</associative_memory_recall>"
         )
 
-    @staticmethod
-    def _strip_stale_disclaimers(text: str) -> str:
-        """Remove stale self-capability disclaimers from historical recall text."""
-        if not text:
-            return text
-        kept = []
-        removed = 0
-        for line in str(text).splitlines():
-            normalized = line.strip()
-            if any(p.search(normalized) for p in _CAPABILITY_DISCLAIMER_PATTERNS):
-                removed += 1
-                continue
-            kept.append(line)
-        if removed > 0:
-            logger.info("Hippocampus: stripped %s stale capability disclaimer lines", removed)
-        return "\n".join(kept)
-    
     async def augment_message(
         self,
         message,  # Can be str or list (multimodal)

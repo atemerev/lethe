@@ -1,11 +1,13 @@
 # Lethe
 
-[![Release](https://img.shields.io/badge/release-v0.9.0-blue?style=flat-square)](https://github.com/atemerev/lethe/releases/tag/v0.9.0)
+[![Release](https://img.shields.io/badge/release-v0.10.0-blue?style=flat-square)](https://github.com/atemerev/lethe/releases/tag/v0.10.0)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Telegram](https://img.shields.io/badge/Telegram-bot-blue?style=flat-square&logo=telegram)](https://telegram.org)
 
 Autonomous executive assistant with persistent memory and a multi-agent architecture.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release notes.
 
 Lethe is a 24/7 AI assistant that you communicate with via Telegram. It remembers everything — your preferences, your projects, conversations from months ago. The more you use it, the more useful it becomes.
 
