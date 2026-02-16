@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.10.5 - 2026-02-16
+
+### Changed
+- Installer shell compatibility improved for macOS defaults: removed Bash 4 requirement and replaced associative-array usage with Bash 3.x compatible provider mapping helpers.
+- Container-mode installer now skips local Node/agent-browser/uv/Python setup and focuses on host prerequisites + container runtime.
+- macOS container runtime selection now prefers Docker when both Docker and Podman are available; Podman auto-install remains supported.
+
+### Fixed
+- Docker image dependency resolution on macOS/container installs now uses runtime-only sync (`uv sync --frozen --no-dev`) and no longer forces a broad extra index, avoiding false unsatisfiable `pillow`/`lethe[dev]` resolution failures.
+- Installer provider detection no longer triggers `DETECTED_PROVIDERS[*] unbound variable` under Bash `set -u`.
+- Container runtime env now sets cache paths under `/workspace/.cache` to prevent uv cache permission errors at `/app/.cache/uv`.
+
 ## v0.10.4 - 2026-02-16
 
 ### Changed

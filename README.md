@@ -1,6 +1,6 @@
 # Lethe
 
-[![Release](https://img.shields.io/badge/release-v0.10.4-blue?style=flat-square)](https://github.com/atemerev/lethe/releases/tag/v0.10.4)
+[![Release](https://img.shields.io/badge/release-v0.10.5-blue?style=flat-square)](https://github.com/atemerev/lethe/releases/tag/v0.10.5)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Telegram](https://img.shields.io/badge/Telegram-bot-blue?style=flat-square&logo=telegram)](https://telegram.org)
