@@ -439,6 +439,13 @@ install_dependencies() {
         fi
     fi
     success "git found"
+
+    # Container mode only needs host-side git/curl + container runtime.
+    # Keep local machine clean: skip Node/agent-browser/uv/Python installs.
+    if [[ "$INSTALL_MODE" == "container" ]]; then
+        info "Container mode: skipping local Node.js, agent-browser, uv, and Python setup"
+        return 0
+    fi
     
     # Install Node.js/npm if missing (needed for agent-browser)
     if ! check_command npm; then
@@ -729,6 +736,7 @@ install_deps_and_run() {
 }
 
 detect_container_runtime() {
+    local OS=$(detect_os)
     local has_podman=false
     local has_docker=false
     
@@ -759,20 +767,35 @@ detect_container_runtime() {
         # Both available - offer selection
         echo ""
         echo -e "${YELLOW}Multiple container runtimes detected:${NC}"
-        echo "  1) Podman (recommended for rootless)"
-        echo "  2) Docker"
-        echo ""
-        prompt_read "Select container runtime [1]: " choice
-        choice=${choice:-1}
-        
-        if [[ "$choice" == "2" ]]; then
-            CONTAINER_CMD="docker"
+        if [[ "$OS" == "mac" ]]; then
+            echo "  1) Docker (recommended on macOS)"
+            echo "  2) Podman"
+            echo ""
+            prompt_read "Select container runtime [1]: " choice
+            choice=${choice:-1}
+            if [[ "$choice" == "2" ]]; then
+                CONTAINER_CMD="podman"
+            else
+                CONTAINER_CMD="docker"
+            fi
         else
-            CONTAINER_CMD="podman"
+            echo "  1) Podman (recommended for rootless)"
+            echo "  2) Docker"
+            echo ""
+            prompt_read "Select container runtime [1]: " choice
+            choice=${choice:-1}
+            if [[ "$choice" == "2" ]]; then
+                CONTAINER_CMD="docker"
+            else
+                CONTAINER_CMD="podman"
+            fi
         fi
         success "Using $CONTAINER_CMD"
     elif $has_podman; then
         CONTAINER_CMD="podman"
+        if [[ "$OS" == "mac" ]]; then
+            warn "Using Podman on macOS. Depending on machine settings, Podman may request Rosetta."
+        fi
     elif $has_docker; then
         CONTAINER_CMD="docker"
     else
@@ -792,12 +815,19 @@ install_container_runtime() {
     
     if [[ "$OS" == "mac" ]]; then
         if check_command brew; then
+            info "Installing Podman via Homebrew..."
             brew install podman
-            podman machine init
-            podman machine start
+            info "Initializing Podman machine..."
+            podman machine init 2>/dev/null || true
+            info "Starting Podman machine..."
+            if ! podman machine start; then
+                warn "Podman machine failed to start automatically."
+                warn "On Apple Silicon, Podman may require Rosetta depending on VM/image settings."
+                error "Run 'podman machine start' manually and rerun installer."
+            fi
             CONTAINER_CMD="podman"
         else
-            error "Please install Docker Desktop or Podman manually"
+            error "Homebrew not found. Install Homebrew first: https://brew.sh"
         fi
     elif [[ "$OS" == "linux" || "$OS" == "wsl" ]]; then
         if check_command apt-get; then
@@ -824,6 +854,7 @@ setup_container() {
     mkdir -p "$WORKSPACE_DIR"
     mkdir -p "$WORKSPACE_DIR/skills"
     mkdir -p "$WORKSPACE_DIR/projects"
+    mkdir -p "$WORKSPACE_DIR/.cache/uv"
     chmod 700 "$WORKSPACE_DIR"
     
     # Build image (--load required for Docker buildx to load into local daemon)
@@ -862,6 +893,8 @@ EOF
             --name lethe \
             --restart unless-stopped \
             --userns=keep-id \
+            -e UV_CACHE_DIR=/workspace/.cache/uv \
+            -e XDG_CACHE_HOME=/workspace/.cache \
             --env-file "$CONFIG_DIR/container.env" \
             -v "$WORKSPACE_DIR:/workspace:Z" \
             lethe:latest
@@ -870,6 +903,8 @@ EOF
         $CONTAINER_CMD run -d \
             --name lethe \
             --restart unless-stopped \
+            -e UV_CACHE_DIR=/workspace/.cache/uv \
+            -e XDG_CACHE_HOME=/workspace/.cache \
             --env-file "$CONFIG_DIR/container.env" \
             -v "$WORKSPACE_DIR:/workspace:z" \
             lethe:latest
@@ -881,6 +916,8 @@ EOF
             --restart unless-stopped \
             -e HOST_UID=$(id -u) \
             -e HOST_GID=$(id -g) \
+            -e UV_CACHE_DIR=/workspace/.cache/uv \
+            -e XDG_CACHE_HOME=/workspace/.cache \
             --env-file "$CONFIG_DIR/container.env" \
             -v "$WORKSPACE_DIR:/workspace" \
             lethe:latest

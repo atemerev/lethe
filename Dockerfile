@@ -52,6 +52,8 @@ RUN chmod +x /entrypoint.sh
 ENV WORKSPACE_DIR=/workspace
 ENV MEMORY_DIR=/workspace/data/memory
 ENV LETHE_CONFIG_DIR=/app/config
+ENV XDG_CACHE_HOME=/workspace/.cache
+ENV UV_CACHE_DIR=/workspace/.cache/uv
 
 # Entrypoint handles user creation based on HOST_UID
 ENTRYPOINT ["/entrypoint.sh"]
