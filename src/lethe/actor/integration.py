@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from typing import Callable, Dict, List, Optional
 
 from lethe.actor import Actor, ActorConfig, ActorMessage, ActorRegistry, ActorState
@@ -26,8 +25,6 @@ from lethe.config import Settings, get_settings
 from lethe.memory.llm import AsyncLLMClient, LLMConfig
 
 logger = logging.getLogger(__name__)
-
-BACKGROUND_NOTIFY_COOLDOWN_SECONDS = int(os.environ.get("BACKGROUND_NOTIFY_COOLDOWN_SECONDS", "1800"))
 
 # Tools the cortex keeps (hybrid mode: actor + quick CLI/file + memory + telegram)
 CORTEX_TOOL_NAMES = {
@@ -72,8 +69,6 @@ class ActorSystem:
         self._principal_monitor_task: Optional[asyncio.Task] = None
         self._processed_principal_message_ids: set[str] = set()
         self._last_principal_message_idx = 0
-        self._last_background_notify_at = 0.0
-        self._last_background_notify_text = ""
         
         # Tools from the agent that subagents can use (not the cortex)
         self._available_tools: Dict[str, tuple] = {}
@@ -331,51 +326,22 @@ class ActorSystem:
         )
 
         # Background processes can ask cortex to notify the user.
-        # Forward explicit metadata channel with cooldown/de-dupe to avoid spam.
+        # System actors never bypass cortex: relay decision is always cortex-owned.
         if metadata.get("channel") != "user_notify":
             return
         if sender_name not in {"brainstem", "dmn", "amygdala"}:
             return
-
-        notify_text = content
-        if not notify_text:
-            return
-
-        now = time.time()
-        seconds_since_last = now - self._last_background_notify_at
-        is_duplicate = notify_text == self._last_background_notify_text
-        if seconds_since_last < BACKGROUND_NOTIFY_COOLDOWN_SECONDS or is_duplicate:
-            if self.principal:
-                self.registry.emit_event(
-                    "background_notify_suppressed",
-                    self.principal,
-                    {
-                        "from_actor_id": message.sender,
-                        "from_actor_name": sender_name,
-                        "seconds_since_last": int(seconds_since_last),
-                        "is_duplicate": is_duplicate,
-                        "message_preview": notify_text[:240],
-                    },
-                )
-            return
-
-        if self._send_to_user:
-            try:
-                await self._send_to_user(notify_text)
-                self._last_background_notify_at = now
-                self._last_background_notify_text = notify_text
-                if self.principal:
-                    self.registry.emit_event(
-                        "background_notify_forwarded",
-                        self.principal,
-                        {
-                            "from_actor_id": message.sender,
-                            "from_actor_name": sender_name,
-                            "message_preview": notify_text[:240],
-                        },
-                    )
-            except Exception as e:
-                logger.warning("Failed to forward background notify to user: %s", e)
+        if self.principal:
+            self.registry.emit_event(
+                "background_notify_deferred_to_cortex",
+                self.principal,
+                {
+                    "from_actor_id": message.sender,
+                    "from_actor_name": sender_name,
+                    "message_preview": content[:240],
+                },
+            )
+        return
 
     def set_callbacks(
         self,

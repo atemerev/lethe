@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.10.4 - 2026-02-16
+
+### Changed
+- System actor `user_notify` routing is now strictly cortex-mediated: `brainstem`, `dmn`, and `amygdala` notifications are deferred to cortex instead of being auto-forwarded to the user.
+
+### Fixed
+- DMN urgent notifications no longer bypass cortex; cortex remains the only conversational agent deciding if/how to relay.
+
 ## v0.10.3 - 2026-02-16
 
 ### Changed

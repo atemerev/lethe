@@ -10,7 +10,6 @@ from lethe.actor.brainstem import Brainstem
 from lethe.actor.integration import ActorSystem
 from lethe.config import Settings
 from lethe.memory.llm import AsyncLLMClient, LLMConfig
-import lethe.actor.integration as actor_integration
 
 
 @pytest.mark.asyncio
@@ -135,9 +134,62 @@ async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_background_user_notify_is_throttled(monkeypatch):
+async def test_brainstem_user_notify_is_deferred_to_cortex(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr(actor_integration, "BACKGROUND_NOTIFY_COOLDOWN_SECONDS", 3600)
+
+    class DummyLLM:
+        def __init__(self):
+            self._tools = {}
+            self.tools = []
+            self.context = type("Ctx", (), {"_tool_reference": "", "_build_tool_reference": lambda self, tools: ""})()
+        def add_tool(self, func, schema=None):
+            self._tools[func.__name__] = (func, schema or {})
+        def _update_tool_budget(self):
+            return None
+
+    class DummyAgent:
+        def __init__(self):
+            self.llm = DummyLLM()
+        def add_tool(self, func):
+            self.llm.add_tool(func)
+
+    agent = DummyAgent()
+    actor_system = ActorSystem(agent)
+    await actor_system.setup()
+    send_to_user = AsyncMock()
+    actor_system.set_callbacks(send_to_user=send_to_user)
+
+    principal = actor_system.principal
+    brainstem_actor = actor_system.registry.spawn(
+        ActorConfig(name="brainstem", group="main", goals="background notify"),
+        spawned_by=principal.id,
+    )
+
+    await brainstem_actor.send_to(
+        principal.id,
+        "Important insight",
+        metadata={"channel": "user_notify", "kind": "insight"},
+    )
+    await asyncio.sleep(1.2)
+    send_to_user.assert_not_awaited()
+    events = actor_system.registry.events.query(event_type="background_notify_deferred_to_cortex", actor_id=principal.id)
+    assert events
+    assert events[-1].payload.get("from_actor_name") == "brainstem"
+
+    await brainstem_actor.send_to(
+        principal.id,
+        "Important insight",
+        metadata={"channel": "user_notify", "kind": "insight"},
+    )
+    await asyncio.sleep(1.2)
+    send_to_user.assert_not_awaited()
+
+    await actor_system.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dmn_user_notify_is_deferred_to_cortex(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
     class DummyLLM:
         def __init__(self):
@@ -169,19 +221,15 @@ async def test_background_user_notify_is_throttled(monkeypatch):
 
     await dmn_actor.send_to(
         principal.id,
-        "Important insight",
-        metadata={"channel": "user_notify", "kind": "insight"},
+        "Urgent deadline tomorrow",
+        metadata={"channel": "user_notify", "kind": "deadline"},
     )
     await asyncio.sleep(1.2)
-    send_to_user.assert_awaited_once_with("Important insight")
 
-    await dmn_actor.send_to(
-        principal.id,
-        "Important insight",
-        metadata={"channel": "user_notify", "kind": "insight"},
-    )
-    await asyncio.sleep(1.2)
-    assert send_to_user.await_count == 1
+    send_to_user.assert_not_awaited()
+    events = actor_system.registry.events.query(event_type="background_notify_deferred_to_cortex", actor_id=principal.id)
+    assert events
+    assert events[-1].payload.get("from_actor_name") == "dmn"
 
     await actor_system.shutdown()
 
