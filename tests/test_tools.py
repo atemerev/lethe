@@ -734,6 +734,49 @@ class TestWebSearch:
         # Clear module so future tests get correct state
         if "lethe.tools.web_search" in sys.modules:
             del sys.modules["lethe.tools.web_search"]
+
+    def test_web_search_reads_api_key_at_runtime(self, monkeypatch):
+        """Should pick up EXA_API_KEY changes without reloading the module."""
+        import json
+        import sys
+        import types
+        from lethe.tools.web_search import web_search
+
+        captured = {}
+
+        class DummyResponse:
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"results": []}
+
+        class DummyClient:
+            def __init__(self, timeout=30.0):
+                self.timeout = timeout
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, headers=None, json=None):
+                captured["url"] = url
+                captured["api_key"] = (headers or {}).get("x-api-key")
+                return DummyResponse()
+
+        dummy_httpx = types.SimpleNamespace(Client=DummyClient, HTTPStatusError=Exception)
+        monkeypatch.setitem(sys.modules, "httpx", dummy_httpx)
+        monkeypatch.setenv("EXA_API_KEY", "runtime-test-key")
+
+        result = web_search("runtime key test")
+        data = json.loads(result)
+
+        assert data.get("status") == "OK"
+        assert captured.get("api_key") == "runtime-test-key"
     
     def test_fetch_webpage(self):
         """Should fetch webpage content."""

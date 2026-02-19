@@ -11,9 +11,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Check if Exa is available
-EXA_API_KEY = os.environ.get("EXA_API_KEY")
-EXA_AVAILABLE = bool(EXA_API_KEY)
+
+def _get_exa_api_key() -> Optional[str]:
+    """Resolve Exa API key at call time (supports runtime env updates)."""
+    key = os.environ.get("EXA_API_KEY", "").strip()
+    return key or None
 
 
 def _is_tool(func):
@@ -43,7 +45,8 @@ def web_search(
     Returns:
         JSON with search results including title, url, summary, and optionally full text
     """
-    if not EXA_AVAILABLE:
+    exa_api_key = _get_exa_api_key()
+    if not exa_api_key:
         return json.dumps({
             "status": "error",
             "message": "Exa API not configured. Set EXA_API_KEY environment variable.",
@@ -63,7 +66,7 @@ def web_search(
     # Build request
     url = "https://api.exa.ai/search"
     headers = {
-        "x-api-key": EXA_API_KEY,
+        "x-api-key": exa_api_key,
         "Content-Type": "application/json",
     }
     
@@ -143,7 +146,8 @@ def fetch_webpage(url: str, max_chars: int = 5000) -> str:
     Returns:
         Extracted text content from the page
     """
-    if not EXA_AVAILABLE:
+    exa_api_key = _get_exa_api_key()
+    if not exa_api_key:
         return json.dumps({
             "status": "error", 
             "message": "Exa API not configured. Set EXA_API_KEY environment variable.",
@@ -160,7 +164,7 @@ def fetch_webpage(url: str, max_chars: int = 5000) -> str:
     # Use Exa's contents endpoint
     api_url = "https://api.exa.ai/contents"
     headers = {
-        "x-api-key": EXA_API_KEY,
+        "x-api-key": exa_api_key,
         "Content-Type": "application/json",
     }
     
@@ -204,4 +208,4 @@ def fetch_webpage(url: str, max_chars: int = 5000) -> str:
 
 def is_available() -> bool:
     """Check if web search is available (API key configured)."""
-    return EXA_AVAILABLE
+    return bool(_get_exa_api_key())
