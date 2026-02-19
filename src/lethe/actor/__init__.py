@@ -35,7 +35,7 @@ PRINCIPAL_PROMPT_BLOCK = load_prompt_template(
         "- Anything completable in under a minute\n\n"
         "Spawn a subagent ONLY when:\n"
         "- The task will take more than ~1 minute (multi-step, research, long builds)\n"
-        "- It needs tools you don't have (web_search, fetch_webpage, browser)\n"
+        "- It benefits from isolation or parallel execution (long crawling, multi-source research, independent subtasks)\n"
         "- You want parallel execution (multiple independent tasks)\n"
         "Be specific in subagent goals - they only know what you tell them.\n"
         "Monitor subagents with ping_actor(). Kill stuck ones with kill_actor().\n\n"

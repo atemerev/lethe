@@ -269,6 +269,8 @@ async def test_brainstem_starts_first_and_is_online(monkeypatch):
 @pytest.mark.asyncio
 async def test_view_image_tool_registered_and_available_to_cortex(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
 
     class DummyBlocks:
         def get(self, label):
@@ -324,9 +326,19 @@ async def test_view_image_tool_registered_and_available_to_cortex(monkeypatch):
     with patch("lethe.agent.get_settings", return_value=DummySettings()), patch("lethe.agent.MemoryStore", return_value=DummyMemory()):
         agent = Agent()
         assert "view_image" in agent.llm._tools
+        assert "web_search" in agent.llm._tools
+        assert "browser_open" in agent.llm._tools
+        assert "browser_snapshot" in agent.llm._tools
+        assert "browser_click" in agent.llm._tools
+        assert "browser_fill" in agent.llm._tools
         actor_system = ActorSystem(agent)
         await actor_system.setup()
     assert "view_image" in agent.llm._tools  # Kept on cortex in hybrid mode.
+    assert "web_search" in agent.llm._tools
+    assert "browser_open" in agent.llm._tools
+    assert "browser_snapshot" in agent.llm._tools
+    assert "browser_click" in agent.llm._tools
+    assert "browser_fill" in agent.llm._tools
 
 
 def test_extract_anthropic_unified_ratelimit_headers():

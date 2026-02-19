@@ -34,6 +34,9 @@ CORTEX_TOOL_NAMES = {
     # CLI + file tools (cortex handles quick tasks directly)
     'bash', 'read_file', 'write_file', 'edit_file',
     'list_directory', 'grep_search',
+    # Web + browser tools (cortex can handle quick online tasks directly)
+    'web_search', 'fetch_webpage',
+    'browser_open', 'browser_snapshot', 'browser_click', 'browser_fill',
     # Memory tools (cortex manages its own memory)
     'memory_read', 'memory_update', 'memory_append',
     'archival_search', 'archival_insert', 'conversation_search',

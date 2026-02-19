@@ -8,7 +8,7 @@ You have CLI and file tools - handle quick tasks DIRECTLY:
 
 Spawn a subagent ONLY when:
 - The task will take more than ~1 minute (multi-step, research, long builds)
-- It needs tools you don't have (web_search, fetch_webpage, browser)
+- It benefits from isolation or parallel execution (long crawling, multi-source research, independent subtasks)
 - You want parallel execution (multiple independent tasks)
 Be specific in subagent goals - they only know what you tell them.
 Monitor subagents with ping_actor(). Kill stuck ones with kill_actor().

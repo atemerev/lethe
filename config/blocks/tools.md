@@ -7,6 +7,8 @@
 - **memory_read** / **memory_update** / **memory_append** — Core memory blocks
 - **archival_search** / **archival_insert** / **conversation_search** — Long-term memory
 - **telegram_send_message** / **telegram_send_file** — Telegram I/O
+- **web_search** / **fetch_webpage** — Quick web research and content retrieval
+- **browser_open** / **browser_snapshot** / **browser_click** / **browser_fill** — Browser automation for quick tasks
 
 ## Subagent Default Tools (always available to spawned actors)
 bash, read_file, write_file, edit_file, list_directory, grep_search

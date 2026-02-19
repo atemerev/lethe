@@ -44,7 +44,7 @@ Lethe uses a neuroscience-inspired actor system:
 | Actor | Role | Tools |
 |-------|------|-------|
 | **Brainstem** | Boot supervisor. Starts first, performs release/resource/integrity checks on main heartbeat ticks, and sends structured findings to cortex. | Registry + event bus, local integrity checks, GitHub release check, optional `update.sh` auto-update |
-| **Cortex** | Principal actor and the ONLY actor that talks to the user. Hybrid execution: handles quick local tasks directly, delegates long/parallel work. | Actor orchestration, memory, Telegram, quick CLI/file work |
+| **Cortex** | Principal actor and the ONLY actor that talks to the user. Hybrid execution: handles quick local tasks directly, delegates long/parallel work. | Actor orchestration, memory, Telegram, quick CLI/file/web/browser work |
 | **DMN** (Default Mode Network) | Periodic background cognition (heartbeat-driven): scans goals/reminders, updates state, writes ideas/reflections, escalates meaningful insights. | File I/O, memory, search |
 | **Amygdala** | Background salience monitor: tags emotional/urgency patterns and escalates only on meaningful urgency/repeated high-salience signals. | Conversation/memory analysis, file I/O |
 | **Subagents** | Spawned on demand for focused tasks. Report to cortex/parent actors only. No direct user channel. | Bash, file I/O, search, browser, actor tools |
@@ -205,7 +205,7 @@ Conversation history stored locally. Searchable via `conversation_search` tool.
 
 ## Tools
 
-### Cortex Tools (coordinator only)
+### Cortex Tools (hybrid coordinator)
 
 | Tool | Purpose |
 |------|---------|
@@ -219,6 +219,8 @@ Conversation history stored locally. Searchable via `conversation_search` tool.
 | `archival_search/insert` | Long-term memory |
 | `conversation_search` | Search message history |
 | `telegram_send_message/file` | Send messages/files to user |
+| `web_search` / `fetch_webpage` | Quick web research and page fetches |
+| `browser_open/click/fill/snapshot` | Quick browser automation |
 
 ### Subagent Tools (workers)
 
@@ -228,7 +230,7 @@ Conversation history stored locally. Searchable via `conversation_search` tool.
 
 ### Browser (via agent-browser)
 
-Subagents can use browser automation:
+Cortex and subagents can use browser automation:
 - Uses accessibility tree refs (`@e1`, `@e2`) — deterministic, no AI guessing
 - Persistent sessions with profiles
 - Headed mode for manual login
