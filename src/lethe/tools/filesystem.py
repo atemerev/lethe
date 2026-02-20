@@ -128,13 +128,13 @@ def write_file(file_path: str, content: str) -> str:
 
 
 @_is_tool
-def edit_file(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-    """Edit a file by replacing text.
+def edit_file(file_path: str, old_string: str, new_string: str = "", replace_all: bool = False) -> str:
+    """Edit a file by replacing text. Omit new_string to delete the matched text.
 
     Args:
         file_path: Absolute path to the file to edit
         old_string: Text to find and replace
-        new_string: Text to replace with
+        new_string: Text to replace with (empty string = delete)
         replace_all: If True, replace all occurrences; otherwise replace only the first
 
     Returns:
