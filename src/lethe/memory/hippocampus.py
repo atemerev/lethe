@@ -429,7 +429,7 @@ class Hippocampus:
         
         for mem in archival:
             text = mem.get("text", "")
-            created = mem.get("created_at", "")[:16].replace("T", " ")
+            created = self._format_created_at(mem.get("created_at", ""))
             # Show trimmed preview for LLM to judge
             preview = self._trim_entry(text, max_lines=10)
             candidates.append(f"[{len(candidates)}] [{created}] archival: {preview}")
@@ -438,7 +438,7 @@ class Hippocampus:
         for msg in conversations:
             role = msg.get("role", "?")
             content = msg.get("content", "")
-            created = msg.get("created_at", "")[:16].replace("T", " ")
+            created = self._format_created_at(msg.get("created_at", ""))
             preview = self._trim_entry(str(content), max_lines=10)
             candidates.append(f"[{len(candidates)}] [{created}] {role}: {preview}")
             sources.append(("conversation", msg))
@@ -507,6 +507,27 @@ class Hippocampus:
             return f"[large entry: {len(lines)} lines, {len(text):,} chars — {first_line}]"
         
         return text
+
+    @staticmethod
+    def _parse_created_at(value: str) -> Optional[datetime]:
+        """Parse a created_at value to datetime."""
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    @classmethod
+    def _format_created_at(cls, value: str) -> str:
+        """Format created_at with weekday and UTC marker."""
+        dt = cls._parse_created_at(value)
+        if not dt:
+            return "unknown-time"
+        return dt.astimezone(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
     
     def _format_memories(
         self,
@@ -520,6 +541,16 @@ class Hippocampus:
         
         sections = []
         total_lines = 0
+
+        # Preserve timeline semantics inside each recall section.
+        archival = sorted(
+            archival,
+            key=lambda m: self._parse_created_at(m.get("created_at", "")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        )
+        conversations = sorted(
+            conversations,
+            key=lambda m: self._parse_created_at(m.get("created_at", "")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        )
         
         # Format archival memories
         if archival:
@@ -529,7 +560,7 @@ class Hippocampus:
                     break
                     
                 text = self._trim_entry(mem.get("text", ""))
-                created = mem.get("created_at", "")[:16].replace("T", " ")  # YYYY-MM-DD HH:MM
+                created = self._format_created_at(mem.get("created_at", ""))
                 
                 entry = f"- [{created}] {text}"
                 entry_lines = entry.count("\n") + 1
@@ -548,7 +579,7 @@ class Hippocampus:
                     
                 role = msg.get("role", "?")
                 content = self._trim_entry(msg.get("content", ""))
-                created = msg.get("created_at", "")[:16].replace("T", " ")  # YYYY-MM-DD HH:MM
+                created = self._format_created_at(msg.get("created_at", ""))
                 
                 entry = f"- [{created}] {role}: {content}"
                 entry_lines = entry.count("\n") + 1

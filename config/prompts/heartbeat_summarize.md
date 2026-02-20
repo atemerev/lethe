@@ -1,9 +1,17 @@
-You are filtering an AI assistant's heartbeat message. Only pass through genuinely urgent items.
+You are filtering an AI assistant's heartbeat message. Pass through messages that are worth sending.
 
 MESSAGE:
 {response}
 
-If nothing urgent, respond with just: ok
-If urgent, respond with just the urgent part (1-2 sentences max).
+Pass through (respond with the message, cleaned up to 1-3 sentences):
+- Urgent/time-sensitive items (deadlines, reminders)
+- Genuine discoveries, insights, or interesting ideas
+- Morning/evening greetings (if appropriate for the time)
+- Brief life check-ins or questions
+- Something the assistant is genuinely excited about
 
-Urgent = would interrupt someone's work. Routine check-ins, status updates, ponderings are not urgent.
+Filter out (respond with just: ok):
+- Generic status updates with no substance ("all systems running")
+- Performative check-ins that say nothing real
+- Repetitive content (same thing said last heartbeat)
+- "ok" or equivalent from the assistant

@@ -47,6 +47,7 @@ class Heartbeat:
         summarize_callback: Optional[Callable[[str], Awaitable[str]]] = None,
         full_context_callback: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
         get_reminders_callback: Optional[Callable[[], Awaitable[str]]] = None,
+        idle_callback: Optional[Callable[[int], Awaitable[None]]] = None,
         interval: int = DEFAULT_HEARTBEAT_INTERVAL,
         full_context_interval: int = FULL_CONTEXT_INTERVAL,
         enabled: bool = True,
@@ -59,6 +60,7 @@ class Heartbeat:
             summarize_callback: Async function to summarize/evaluate response before sending
             full_context_callback: Async function to process with full agent context
             get_reminders_callback: Async function to get active reminders as string
+            idle_callback: Async function invoked with cumulative quiet minutes when nothing happened
             interval: Seconds between heartbeats
             full_context_interval: Seconds between full context heartbeats (default 2h)
             enabled: Whether heartbeats are enabled
@@ -68,12 +70,15 @@ class Heartbeat:
         self.summarize_callback = summarize_callback
         self.full_context_callback = full_context_callback
         self.get_reminders_callback = get_reminders_callback
+        self.idle_callback = idle_callback
         self.interval = interval
         self.full_context_interval = full_context_interval
         self.enabled = enabled
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._last_full_context: Optional[datetime] = None
+        self._heartbeat_count = 0
+        self._idle_minutes_accum = 0
         
         logger.info(f"Heartbeat initialized (interval={interval}s, full_context={full_context_interval}s, enabled={enabled})")
     
@@ -125,6 +130,7 @@ class Heartbeat:
         """Send a heartbeat message to the agent."""
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         now = datetime.now(timezone.utc)
+        first_tick = self._heartbeat_count == 0
         
         # Get active reminders
         reminders_text = ""
@@ -179,12 +185,22 @@ class Heartbeat:
             # "ok" means nothing urgent
             if final_response.lower() == "ok":
                 logger.info("Heartbeat: nothing urgent (work saved to history)")
+                if not first_tick and self.idle_callback:
+                    interval_minutes = max(1, int(round(self.interval / 60)))
+                    self._idle_minutes_accum += interval_minutes
+                    try:
+                        await self.idle_callback(self._idle_minutes_accum)
+                    except Exception as e:
+                        logger.warning(f"Idle callback failed: {e}")
             else:
+                self._idle_minutes_accum = 0
                 logger.info(f"Heartbeat sending: {final_response[:100]}...")
                 await self.send_callback(final_response)
                 
         except Exception as e:
             logger.exception(f"Heartbeat processing failed: {e}")
+        finally:
+            self._heartbeat_count += 1
     
     async def trigger(self):
         """Manually trigger a heartbeat (for testing)."""

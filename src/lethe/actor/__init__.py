@@ -115,7 +115,10 @@ class ActorMessage:
 
     def format(self) -> str:
         """Format for inclusion in actor context."""
-        ts = self.created_at.strftime("%H:%M:%S")
+        dt = self.created_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        ts = dt.astimezone(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
         reply = f" (reply to {self.reply_to})" if self.reply_to else ""
         return f"[{ts}] {self.sender}{reply}: {self.content}"
 
@@ -489,19 +492,23 @@ class Actor:
         inbox_messages = all_inbox_messages[-limits["inbox_messages"]:]
         omitted_inbox = max(0, len(all_inbox_messages) - len(inbox_messages))
         if inbox_messages:
-            parts.append("\n<inbox>")
-            parts.append("Recent messages from other actors:")
+            parts.append("\n<inbox_block>")
             for m in inbox_messages:
                 sender = self.registry.get(m.sender)
                 sender_name = sender.config.name if sender else m.sender
-                ts = m.created_at.strftime("%H:%M:%S")
+                dt = m.created_at
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.astimezone(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
                 content = m.content[:limits["content_chars"]]
                 if len(m.content) > limits["content_chars"]:
                     content += "...[truncated]"
-                parts.append(f"[{ts}] {sender_name}: {content}")
+                parts.append(
+                    f'<actor_message_block from="{sender_name}" timestamp="{ts}">{content}</actor_message_block>'
+                )
             if omitted_inbox:
-                parts.append(f"[... {omitted_inbox} older inbox messages omitted ...]")
-            parts.append("</inbox>")
+                parts.append(f"<inbox_omitted count=\"{omitted_inbox}\" />")
+            parts.append("</inbox_block>")
         
         parts.append("\n<rules>")
         if self.is_principal:

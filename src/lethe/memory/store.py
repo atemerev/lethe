@@ -134,12 +134,36 @@ class MemoryStore:
     # Blocks that rarely change — eligible for long-lived cache (1h)
     STABLE_BLOCKS = {"human", "tools"}
 
+    @staticmethod
+    def _parse_iso_timestamp(raw: str):
+        """Parse ISO timestamp safely."""
+        from datetime import datetime
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_timestamp(dt) -> str:
+        """Format timestamps with weekday and UTC marker."""
+        from datetime import timezone
+        if not dt:
+            return ""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+
     def _format_block(self, block: dict) -> str:
         """Format a single block for context."""
         label = block["label"]
         value = block["value"] or ""
         description = block.get("description") or ""
         limit = block.get("limit") or 20000
+        created_at = self._parse_iso_timestamp(block.get("created_at", ""))
+        updated_at = self._parse_iso_timestamp(block.get("updated_at", ""))
         
         lines = [
             f"<{label}>",
@@ -148,12 +172,18 @@ class MemoryStore:
             "</description>",
             "<metadata>",
             f"- chars={len(value)}/{limit}",
+        ]
+        if created_at:
+            lines.append(f"- created_at={self._format_timestamp(created_at)}")
+        if updated_at:
+            lines.append(f"- updated_at={self._format_timestamp(updated_at)}")
+        lines.extend([
             "</metadata>",
             "<value>",
             value,
             "</value>",
             f"</{label}>",
-        ]
+        ])
         return "\n".join(lines)
 
     def get_context_for_prompt(self, max_tokens: int = 8000) -> str:
@@ -216,17 +246,19 @@ class MemoryStore:
         message_count = self.messages.count()
         archival_count = self.archival.count()
         
-        last_modified = now
+        last_modified = None
         for block in blocks:
             if block.get("updated_at"):
-                block_time = datetime.fromisoformat(block["updated_at"].replace("Z", "+00:00"))
-                if block_time > last_modified:
+                block_time = self._parse_iso_timestamp(block["updated_at"])
+                if block_time and (last_modified is None or block_time > last_modified):
                     last_modified = block_time
+        if last_modified is None:
+            last_modified = now
         
         metadata_lines = [
             "<memory_metadata>",
-            f"- The current system date is: {now.strftime('%B %d, %Y')}",
-            f"- Memory blocks were last modified: {last_modified.strftime('%Y-%m-%d %I:%M:%S %p')} UTC{last_modified.strftime('%z')}",
+            f"- now={self._format_timestamp(now)}",
+            f"- memory_blocks_last_modified={self._format_timestamp(last_modified)}",
             f"- {message_count} previous messages between you and the user are stored in recall memory (use tools to access them)",
         ]
         if archival_count > 0:

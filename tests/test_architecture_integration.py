@@ -1,6 +1,7 @@
 """Architecture-level integration tests for actor/runtime behavior."""
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock
@@ -9,7 +10,7 @@ from lethe.actor import ActorConfig, ActorRegistry
 from lethe.actor.brainstem import Brainstem
 from lethe.actor.integration import ActorSystem
 from lethe.config import Settings
-from lethe.memory.llm import AsyncLLMClient, LLMConfig
+from lethe.memory.llm import AsyncLLMClient, ContextWindow, LLMConfig, Message
 
 
 @pytest.mark.asyncio
@@ -27,6 +28,121 @@ async def test_user_notify_event_emitted():
     events = registry.events.query(event_type="user_notify", actor_id=worker.id)
     assert events
     assert events[-1].payload["message"] == "Check the deadline now"
+
+
+def test_transient_system_context_is_injected_only_in_system_role(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config = LLMConfig(model="openrouter/moonshotai/kimi-k2.5-0127")
+    context = ContextWindow(
+        system_prompt="You are test system",
+        memory_context="<memory_blocks>...</memory_blocks>",
+        config=config,
+    )
+    context.transient_system_context = (
+        "<runtime_context source=\"hippocampus\">\n"
+        "<associative_memory_recall>recalled fact</associative_memory_recall>\n"
+        "</runtime_context>"
+    )
+    context.add_message(Message(role="user", content="hello"))
+
+    built = context.build_messages()
+    assert built[0]["role"] == "system"
+    # Non-Anthropic now uses structured content blocks (same as Anthropic)
+    system_content = built[0]["content"]
+    assert isinstance(system_content, list)
+    system_text = " ".join(b.get("text", "") for b in system_content)
+    assert "<runtime_context source=\"hippocampus\">" in system_text
+    # Runtime block should NOT have cache_control
+    runtime_blocks = [b for b in system_content if "runtime_context" in b.get("text", "")]
+    assert runtime_blocks
+    assert "cache_control" not in runtime_blocks[0]
+    assert not any(
+        m.get("role") == "assistant" and "runtime_context" in str(m.get("content", ""))
+        for m in built[1:]
+    )
+
+
+def test_non_anthropic_uses_structured_cache_control(monkeypatch):
+    """Non-Anthropic path should use structured content blocks with cache_control
+    so LiteLLM can translate caching directives per provider."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config = LLMConfig(model="openrouter/moonshotai/kimi-k2.5-0127")
+    context = ContextWindow(
+        system_prompt="You are a test system",
+        memory_context="<memory_blocks>test</memory_blocks>",
+        config=config,
+    )
+    context.add_message(Message(role="user", content="hello"))
+
+    built = context.build_messages()
+    system_content = built[0]["content"]
+
+    # Should be structured blocks, not a plain string
+    assert isinstance(system_content, list), "Non-Anthropic should use structured content blocks"
+    assert len(system_content) >= 2, "Should have at least identity + memory blocks"
+
+    # Identity block should have cache_control
+    identity = system_content[0]
+    assert "cache_control" in identity
+    assert identity["cache_control"]["type"] == "ephemeral"
+
+    # Memory block should have cache_control
+    memory = system_content[1]
+    assert "cache_control" in memory
+    assert memory["cache_control"]["type"] == "ephemeral"
+
+
+def test_anthropic_transient_system_context_block_is_uncached(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config = LLMConfig(model="anthropic/claude-sonnet-4-20250514")
+    context = ContextWindow(system_prompt="sys", memory_context="", config=config)
+    context.transient_system_context = "<runtime_context>volatile</runtime_context>"
+    context.add_message(Message(role="user", content="hello"))
+
+    built = context.build_messages()
+    system_content = built[0]["content"]
+    assert isinstance(system_content, list)
+    transient = system_content[-1]
+    assert "<runtime_context>volatile</runtime_context>" in transient.get("text", "")
+    assert "<runtime_context_block " in transient.get("text", "")
+    assert "cache_control" not in transient
+
+
+def test_conversation_blocks_are_timestamped_and_marked(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config = LLMConfig(model="openrouter/moonshotai/kimi-k2.5-0127")
+    context = ContextWindow(system_prompt="sys", memory_context="", config=config)
+    ts = datetime(2026, 2, 19, 12, 30, tzinfo=timezone.utc)
+
+    context.add_message(Message(role="user", content="hello", created_at=ts))
+    context.add_message(Message(
+        role="assistant",
+        content="hi",
+        created_at=ts,
+        tool_calls=[{"id": "call-1", "function": {"name": "bash", "arguments": "{}"}}],
+    ))
+    context.add_message(Message(role="tool", content="ok", name="bash", tool_call_id="call-1", created_at=ts))
+
+    built = context.build_messages()
+    assert '<user_block timestamp="Thu 2026-02-19 12:30:00 UTC">' in built[1]["content"]
+    assert '<assistant_block timestamp="Thu 2026-02-19 12:30:00 UTC">' in built[2]["content"]
+    assert '<tool_block timestamp="Thu 2026-02-19 12:30:00 UTC"' in built[3]["content"]
+
+
+def test_idle_time_passed_marker_is_single_upsert(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config = LLMConfig(model="openrouter/moonshotai/kimi-k2.5-0127")
+    context = ContextWindow(system_prompt="sys", memory_context="", config=config)
+
+    context.upsert_time_passed_block(15)
+    context.upsert_time_passed_block(30)
+
+    markers = [
+        m for m in context.messages
+        if m.role == "user" and isinstance(m.content, str) and "<time_passed_block " in m.content
+    ]
+    assert len(markers) == 1
+    assert 'minutes="30"' in markers[0].content
 
 
 @pytest.mark.asyncio

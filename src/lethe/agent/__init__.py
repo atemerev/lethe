@@ -7,6 +7,7 @@ Tools are just Python functions - no complex registration or approval loops.
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Callable, Optional, Any
 
 from lethe.config import Settings, get_settings
@@ -519,17 +520,22 @@ class Agent:
             recent = self.memory.messages.get_recent(10)
             recall_context = await self.hippocampus.recall(message, recent)
         
-        # Inject recall as an assistant message before the user message.
-        # The model sees it as "I recalled this" — background context, not the user's request.
+        # Inject recall as transient system context for this turn.
+        # Recall is synthetic context, not an assistant utterance.
         if recall_context:
-            from lethe.memory.llm import Message
-            self.llm.context.add_message(Message(
-                role="assistant",
-                content=f"[Memory recall — potentially relevant context for the next message]\n{recall_context}",
-            ))
+            recall_ts = datetime.now(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+            self.llm.context.transient_system_context = (
+                f"<recall_block source=\"hippocampus\" timestamp=\"{recall_ts}\">\n"
+                f"{recall_context}\n"
+                "</recall_block>"
+            )
         
-        # Get response from LLM (handles tool calls internally)
-        response = await self.llm.chat(message, on_message=on_message, on_image=on_image)
+        try:
+            # Get response from LLM (handles tool calls internally)
+            response = await self.llm.chat(message, on_message=on_message, on_image=on_image)
+        finally:
+            # Never carry transient per-turn context into subsequent turns.
+            self.llm.context.transient_system_context = ""
         
         # Store assistant response in history
         self.memory.messages.add("assistant", response)

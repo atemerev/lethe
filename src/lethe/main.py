@@ -215,6 +215,10 @@ async def run():
     async def heartbeat_summarize(prompt: str) -> str:
         """Summarize/evaluate heartbeat response before sending (uses aux model)."""
         return await agent.llm.complete(prompt, use_aux=True)
+
+    async def heartbeat_idle(minutes_passed: int):
+        """Record idle passage-of-time as a single user-role timeline block."""
+        agent.llm.note_idle_interval(minutes_passed)
     
     async def get_active_reminders() -> str:
         """Get active reminders as formatted string."""
@@ -240,6 +244,7 @@ async def run():
         summarize_callback=heartbeat_summarize,
         full_context_callback=heartbeat_full_context,
         get_reminders_callback=get_active_reminders,
+        idle_callback=heartbeat_idle,
         interval=heartbeat_interval,
         enabled=heartbeat_enabled and heartbeat_chat_id is not None,
     )

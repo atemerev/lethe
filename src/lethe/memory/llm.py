@@ -8,6 +8,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape as html_escape
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Union
 import logging
@@ -212,7 +213,11 @@ class Message:
     def format_timestamp(self) -> str:
         """Format timestamp for context display."""
         if self.created_at:
-            return self.created_at.strftime("%Y-%m-%d %H:%M")
+            dt = self.created_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(timezone.utc)
+            return dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")
         return ""
 
 
@@ -232,6 +237,9 @@ class ContextWindow:
     config: LLMConfig = field(default_factory=LLMConfig)
     summary: str = ""  # Summary of older messages
     total_messages_db: int = 0  # Total messages in database (set by caller)
+    system_prompt_loaded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    memory_context_updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    transient_system_context: str = ""  # Per-turn synthetic context (e.g. recall), injected in system role
     _summarizer: Optional[Callable] = None  # Set by LLMClient
     _tool_reference: str = ""  # Compact tool list for system prompt (non-Anthropic models)
     _tool_schemas_text: str = ""  # Serialized tool schemas for token budget accounting
@@ -251,6 +259,7 @@ class ContextWindow:
             self.count_tokens(self.system_prompt) +
             self.count_tokens(self.memory_context) +
             self.count_tokens(self.summary) +
+            self.count_tokens(self.transient_system_context) +
             self.count_tokens(self._tool_reference) +
             self.count_tokens(self._tool_schemas_text)
         )
@@ -266,6 +275,97 @@ class ContextWindow:
         """Add a message, summarizing old ones if needed."""
         self.messages.append(message)
         self._compress_if_needed()
+
+    @staticmethod
+    def _format_block_timestamp(value: Optional[datetime]) -> str:
+        """Format block timestamps with weekday and explicit UTC marker."""
+        if not value:
+            return ""
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+
+    @staticmethod
+    def _xml_attr(value: Any) -> str:
+        """Escape XML attribute values."""
+        return html_escape(str(value), quote=True)
+
+    @classmethod
+    def _render_system_block(
+        cls,
+        tag: str,
+        content: str,
+        timestamp: Optional[datetime] = None,
+        extra_attrs: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Render a cleanly marked system block."""
+        attrs = dict(extra_attrs or {})
+        ts = cls._format_block_timestamp(timestamp)
+        if ts:
+            attrs["timestamp"] = ts
+        attr_str = "".join(f' {k}="{cls._xml_attr(v)}"' for k, v in attrs.items())
+        return f"<{tag}{attr_str}>\n{content}\n</{tag}>"
+
+    def _wrap_conversation_text_block(self, msg: Message, content: str) -> str:
+        """Wrap assistant/user/tool content in clean markup with timestamps."""
+        role_map = {
+            "assistant": "assistant_block",
+            "user": "user_block",
+            "tool": "tool_block",
+        }
+        tag = role_map.get(msg.role, "message_block")
+        attrs: Dict[str, Any] = {}
+        ts = msg.format_timestamp()
+        if ts:
+            attrs["timestamp"] = ts
+        if msg.role == "tool":
+            if msg.name:
+                attrs["tool"] = msg.name
+            if msg.tool_call_id:
+                attrs["tool_call_id"] = msg.tool_call_id
+        return self._render_system_block(tag, content, None, attrs)
+
+    def _wrap_conversation_multimodal_block(self, msg: Message, content: List[Dict]) -> List[Dict]:
+        """Wrap multimodal user/assistant messages with timestamped text delimiters."""
+        role_map = {
+            "assistant": "assistant_block",
+            "user": "user_block",
+        }
+        tag = role_map.get(msg.role, "message_block")
+        attrs: Dict[str, Any] = {"multimodal": "true"}
+        ts = msg.format_timestamp()
+        if ts:
+            attrs["timestamp"] = ts
+        attr_str = "".join(f' {k}="{self._xml_attr(v)}"' for k, v in attrs.items())
+        open_part = {"type": "text", "text": f"<{tag}{attr_str}>"}
+        close_part = {"type": "text", "text": f"</{tag}>"}
+        return [open_part] + list(content) + [close_part]
+
+    def upsert_time_passed_block(self, minutes_passed: int):
+        """Append or update a single idle-time marker in user role."""
+        minutes = max(1, int(minutes_passed))
+        now = datetime.now(timezone.utc)
+        ts = self._format_block_timestamp(now)
+        content = (
+            f'<time_passed_block timestamp="{self._xml_attr(ts)}" minutes="{minutes}">\n'
+            f"{minutes} minutes passed with no new user-visible events.\n"
+            "</time_passed_block>"
+        )
+
+        if self.messages:
+            last = self.messages[-1]
+            if (
+                last.role == "user"
+                and isinstance(last.content, str)
+                and "<time_passed_block " in last.content
+            ):
+                last.content = content
+                last.created_at = now
+                return
+
+        self.add_message(Message(role="user", content=content, created_at=now))
     
     def load_messages(self, messages: List[dict]):
         """Load existing messages from history (e.g., from database).
@@ -569,60 +669,130 @@ class ContextWindow:
         # Clean orphaned tool messages before building
         self._clean_orphaned_tool_messages()
         
-        # Build system prompt
-        # Anthropic: 3 content blocks for optimal caching
-        #   1. System prompt (+ tool ref for non-Anthropic) — rarely changes → cached
-        #   2. Memory blocks — changes on memory_update → cached separately
-        #   3. Summary — changes on compaction → not cached
+        # Build system prompt blocks with explicit markup.
+        # Anthropic: separate blocks for cache-friendly behavior
+        #   1. Identity/system (rarely changes) — cached 1h
+        #   2. Memory context (changes on memory updates) — cached 5m
+        #   3. Tool reference (non-Anthropic models only)
+        #   4. Summary + runtime context (volatile) — uncached
         # Cache order: tools → system blocks (prefix-matched)
         # Each cache_control creates a breakpoint: content before it is cached independently
         
         is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
-        
+
+        identity_block = self._render_system_block(
+            "identity_block",
+            self.system_prompt,
+            self.system_prompt_loaded_at,
+        )
+        memory_block = self._render_system_block(
+            "memory_context_block",
+            self.memory_context,
+            self.memory_context_updated_at,
+            {"kind": "core_memory"},
+        ) if self.memory_context else ""
+        summary_block = self._render_system_block(
+            "conversation_summary_block",
+            self.summary,
+            datetime.now(timezone.utc),
+        ) if self.summary else ""
+        runtime_block = self._render_system_block(
+            "runtime_context_block",
+            self.transient_system_context,
+            datetime.now(timezone.utc),
+            {"source": "runtime"},
+        ) if self.transient_system_context else ""
+
         if is_anthropic:
             system_content = []
             
-            # Block 1: System prompt (truly static — only changes on restart)
-            # 1-hour TTL: survives gaps between messages (Telegram bot pattern)
-            # 2x write cost but only once; then $0.10/MTok reads for an hour
+            # Block 1: identity/system instructions (stable)
             system_content.append({
                 "type": "text",
-                "text": self.system_prompt,
+                "text": identity_block,
                 "cache_control": {"type": "ephemeral", "ttl": "1h"}
             })
             
-            # Block 2: Memory blocks (changes when agent edits memory)
-            # 5-minute TTL: refreshed on each message, re-cached on memory edit
-            # Must come AFTER 1h blocks (Anthropic requirement: longer TTL first)
-            if self.memory_context:
+            # Block 2: memory context (volatile but cacheable)
+            if memory_block:
                 system_content.append({
                     "type": "text",
-                    "text": self.memory_context,
+                    "text": memory_block,
                     "cache_control": {"type": "ephemeral"}
                 })
             
-            # Block 3: Summary (changes on compaction — NOT cached)
-            if self.summary:
+            # Block 3: conversation summary (uncached)
+            if summary_block:
                 system_content.append({
                     "type": "text",
-                    "text": f"\n<conversation_summary>\n{self.summary}\n</conversation_summary>"
+                    "text": summary_block
+                })
+
+            # Block 4: runtime/synthetic context (uncached)
+            if runtime_block:
+                system_content.append({
+                    "type": "text",
+                    "text": runtime_block,
                 })
             
             messages = [{"role": "system", "content": system_content}]
         else:
-            # Non-Anthropic: plain string, tool reference embedded in text
-            parts = [self.system_prompt]
-            if self.memory_context:
-                parts.append(self.memory_context)
-            if self._tool_reference:
-                parts.append(self._tool_reference)
-            if self.summary:
-                parts.append(f"<conversation_summary>\n{self.summary}\n</conversation_summary>")
-            messages = [{"role": "system", "content": "\n\n".join(parts)}]
-        
+            # Non-Anthropic: structured content blocks with cache_control.
+            # LiteLLM translates cache_control directives per provider
+            # (OpenAI/Deepseek: automatic prefix caching, Gemini: context caching).
+            system_content = []
+            
+            # Block 1: identity/system instructions (stable, cacheable)
+            system_content.append({
+                "type": "text",
+                "text": identity_block,
+                "cache_control": {"type": "ephemeral"},
+            })
+            
+            # Block 2: memory context (volatile but cacheable)
+            if memory_block:
+                tools_text = ""
+                if self._tool_reference:
+                    tools_text = "\n\n" + self._render_system_block(
+                        "available_tools_block",
+                        self._tool_reference,
+                        self.system_prompt_loaded_at,
+                    )
+                system_content.append({
+                    "type": "text",
+                    "text": memory_block + tools_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            
+            # Block 3: summary (uncached, changes frequently)
+            if summary_block:
+                system_content.append({
+                    "type": "text",
+                    "text": summary_block,
+                })
+            
+            # Block 4: runtime context (uncached, per-turn)
+            if runtime_block:
+                system_content.append({
+                    "type": "text",
+                    "text": runtime_block,
+                })
+            
+            messages = [{"role": "system", "content": system_content}]
+
+        # Ensure timeline order for all non-system messages.
+        epoch = datetime.fromtimestamp(0, tz=timezone.utc)
+        timeline_messages = sorted(
+            self.messages,
+            key=lambda m: (
+                (m.created_at.replace(tzinfo=timezone.utc) if m.created_at and m.created_at.tzinfo is None
+                 else (m.created_at.astimezone(timezone.utc) if m.created_at else epoch))
+            ),
+        )
+
         # Find indices of image messages (to keep only most recent)
         image_indices = []
-        for i, msg in enumerate(self.messages):
+        for i, msg in enumerate(timeline_messages):
             if isinstance(msg.content, list):
                 for part in msg.content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
@@ -634,31 +804,37 @@ class ContextWindow:
         
         # Find heartbeat messages (keep only the last one)
         heartbeat_indices = []
-        for i, msg in enumerate(self.messages):
+        for i, msg in enumerate(timeline_messages):
             if msg.role == "user" and isinstance(msg.content, str):
                 if msg.content.startswith("[System Heartbeat"):
                     heartbeat_indices.append(i)
         # Skip all but the last heartbeat (and its response)
         old_heartbeat_indices = set(heartbeat_indices[:-1]) if len(heartbeat_indices) > 1 else set()
+
+        # Keep only the latest synthetic idle marker.
+        time_passed_indices = []
+        for i, msg in enumerate(timeline_messages):
+            if msg.role == "user" and isinstance(msg.content, str) and "<time_passed_block " in msg.content:
+                time_passed_indices.append(i)
+        old_time_passed_indices = set(time_passed_indices[:-1]) if len(time_passed_indices) > 1 else set()
         
         # Find the last tool_call group (assistant with tool_calls + its tool results)
         # Only the last group gets full content; older tool results are truncated to metadata
         last_tool_assistant_idx = None
-        for i in range(len(self.messages) - 1, -1, -1):
-            if self.messages[i].role == "assistant" and self.messages[i].tool_calls:
+        for i in range(len(timeline_messages) - 1, -1, -1):
+            if timeline_messages[i].role == "assistant" and timeline_messages[i].tool_calls:
                 last_tool_assistant_idx = i
                 break
         
         # Collect tool_call_ids from the last tool group
         last_tool_ids = set()
         if last_tool_assistant_idx is not None:
-            for tc in self.messages[last_tool_assistant_idx].tool_calls:
+            for tc in timeline_messages[last_tool_assistant_idx].tool_calls:
                 last_tool_ids.add(tc.get("id", ""))
         
-        # Build message array with timestamps on user messages only
-        # (Assistant sees when user said things, but doesn't mimic timestamp format)
+        # Build role-separated timeline blocks.
         skip_next_assistant = False
-        for i, msg in enumerate(self.messages):
+        for i, msg in enumerate(timeline_messages):
             # Skip old heartbeats and their responses
             if i in old_heartbeat_indices:
                 skip_next_assistant = True
@@ -667,6 +843,10 @@ class ContextWindow:
                 skip_next_assistant = False
                 continue
             skip_next_assistant = False
+
+            # Keep only the latest "time passed" marker block.
+            if i in old_time_passed_indices:
+                continue
             
             content = msg.content
             
@@ -703,11 +883,15 @@ class ContextWindow:
                 tail = content_str[-(keep // 2):]
                 content = f"{head}\n\n[... {original_len - keep:,} chars truncated ...]\n\n{tail}"
                 logger.warning(f"Truncated oversized message ({original_len:,} → {MAX_MESSAGE_CHARS:,} chars)")
-            
-            if msg.role == "user" and not msg.tool_calls and isinstance(content, str):
-                timestamp = msg.format_timestamp()
-                if timestamp:
-                    content = f"[{timestamp}] {content}"
+
+            # Wrap conversation content in clean role/timestamp markup.
+            if isinstance(content, str):
+                if msg.role == "assistant" and msg.tool_calls and not content.strip():
+                    content = self._wrap_conversation_text_block(msg, "<tool_call_scaffold />")
+                else:
+                    content = self._wrap_conversation_text_block(msg, content)
+            elif isinstance(content, list) and msg.role in ("user", "assistant"):
+                content = self._wrap_conversation_multimodal_block(msg, content)
             
             m = {"role": msg.role, "content": content}
             if msg.name:
@@ -935,6 +1119,11 @@ class AsyncLLMClient:
     def update_memory_context(self, memory_context: str):
         """Update the memory context."""
         self.context.memory_context = memory_context
+        self.context.memory_context_updated_at = datetime.now(timezone.utc)
+
+    def note_idle_interval(self, minutes_passed: int):
+        """Record idle passage of time as a single synthetic user block."""
+        self.context.upsert_time_passed_block(minutes_passed)
     
     def set_console_hooks(
         self,
