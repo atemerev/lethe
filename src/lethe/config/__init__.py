@@ -36,6 +36,10 @@ class Settings(BaseSettings):
         default=None,
         description="OpenRouter API key (reads from OPENROUTER_API_KEY env var)",
     )
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Gemini API key (reads from GEMINI_API_KEY env var)",
+    )
     llm_model: str = Field(
         default="",
         description="Main LLM model (empty = use provider default)",
