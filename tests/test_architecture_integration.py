@@ -208,6 +208,8 @@ async def test_llm_circuit_breaker_forces_final_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
 
     class DummyLLM:
         def __init__(self):
@@ -271,8 +273,10 @@ async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_brainstem_user_notify_is_deferred_to_cortex(monkeypatch):
+async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
 
     class DummyLLM:
         def __init__(self):
@@ -294,7 +298,16 @@ async def test_brainstem_user_notify_is_deferred_to_cortex(monkeypatch):
     actor_system = ActorSystem(agent)
     await actor_system.setup()
     send_to_user = AsyncMock()
-    actor_system.set_callbacks(send_to_user=send_to_user)
+    seen = {"important": 0}
+
+    async def _decide(from_actor_name: str, text: str, metadata: dict):
+        if from_actor_name == "brainstem" and text == "Important insight":
+            seen["important"] += 1
+            return "Important insight" if seen["important"] == 1 else None
+        return None
+
+    decide_user_notify = AsyncMock(side_effect=_decide)
+    actor_system.set_callbacks(send_to_user=send_to_user, decide_user_notify=decide_user_notify)
 
     principal = actor_system.principal
     brainstem_actor = actor_system.registry.spawn(
@@ -308,8 +321,14 @@ async def test_brainstem_user_notify_is_deferred_to_cortex(monkeypatch):
         metadata={"channel": "user_notify", "kind": "insight"},
     )
     await asyncio.sleep(1.2)
-    send_to_user.assert_not_awaited()
-    events = actor_system.registry.events.query(event_type="background_notify_deferred_to_cortex", actor_id=principal.id)
+    assert any(
+        call.args and call.args[0] == "Important insight"
+        for call in send_to_user.await_args_list
+    )
+    events = actor_system.registry.events.query(
+        event_type="background_notify_relayed_to_user",
+        actor_id=principal.id,
+    )
     assert events
     assert events[-1].payload.get("from_actor_name") == "brainstem"
 
@@ -319,14 +338,27 @@ async def test_brainstem_user_notify_is_deferred_to_cortex(monkeypatch):
         metadata={"channel": "user_notify", "kind": "insight"},
     )
     await asyncio.sleep(1.2)
-    send_to_user.assert_not_awaited()
+    assert seen["important"] >= 2
+    relay_matches = [
+        call for call in send_to_user.await_args_list
+        if call.args and call.args[0] == "Important insight"
+    ]
+    assert len(relay_matches) == 1
+    dropped = actor_system.registry.events.query(
+        event_type="background_notify_dropped_by_cortex",
+        actor_id=principal.id,
+    )
+    assert dropped
+    assert dropped[-1].payload.get("from_actor_name") == "brainstem"
 
     await actor_system.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_dmn_user_notify_is_deferred_to_cortex(monkeypatch):
+async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
 
     class DummyLLM:
         def __init__(self):
@@ -348,7 +380,14 @@ async def test_dmn_user_notify_is_deferred_to_cortex(monkeypatch):
     actor_system = ActorSystem(agent)
     await actor_system.setup()
     send_to_user = AsyncMock()
-    actor_system.set_callbacks(send_to_user=send_to_user)
+
+    async def _decide(from_actor_name: str, text: str, metadata: dict):
+        if from_actor_name == "dmn" and text == "Urgent deadline tomorrow":
+            return "Urgent deadline tomorrow"
+        return None
+
+    decide_user_notify = AsyncMock(side_effect=_decide)
+    actor_system.set_callbacks(send_to_user=send_to_user, decide_user_notify=decide_user_notify)
 
     principal = actor_system.principal
     dmn_actor = actor_system.registry.spawn(
@@ -363,8 +402,18 @@ async def test_dmn_user_notify_is_deferred_to_cortex(monkeypatch):
     )
     await asyncio.sleep(1.2)
 
-    send_to_user.assert_not_awaited()
-    events = actor_system.registry.events.query(event_type="background_notify_deferred_to_cortex", actor_id=principal.id)
+    assert any(
+        call.args and call.args[0] == "Urgent deadline tomorrow"
+        for call in send_to_user.await_args_list
+    )
+    assert any(
+        call.args and call.args[0] == "dmn" and call.args[1] == "Urgent deadline tomorrow"
+        for call in decide_user_notify.await_args_list
+    )
+    events = actor_system.registry.events.query(
+        event_type="background_notify_relayed_to_user",
+        actor_id=principal.id,
+    )
     assert events
     assert events[-1].payload.get("from_actor_name") == "dmn"
 
@@ -375,6 +424,8 @@ async def test_dmn_user_notify_is_deferred_to_cortex(monkeypatch):
 async def test_brainstem_starts_first_and_is_online(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("BRAINSTEM_RELEASE_CHECK_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
 
     class DummyLLM:
         def __init__(self):
