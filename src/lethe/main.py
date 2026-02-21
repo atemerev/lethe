@@ -296,18 +296,21 @@ async def run():
         kind = str((metadata or {}).get("kind", "")).strip() or "unspecified"
         recent_signals = actor_system._get_recent_user_signals()
         prompt = (
-            "You are Cortex, the ONLY actor allowed to message the user.\n"
-            "A background actor requested escalation. Decide if this should be relayed now.\n\n"
+            "You are Cortex (Lethe's conscious executive layer), the ONLY actor who talks to the user.\n"
+            "A background actor wants to escalate something. Your job:\n"
+            "1. Decide if this is worth sending to the user right now.\n"
+            "2. If yes, REWRITE the message in your own voice — natural, concise, like texting a friend.\n"
+            "   Do NOT just forward the raw actor output. Summarize, add context, make it human.\n"
+            "3. If no, explain briefly why not (for logging).\n\n"
             f"Source actor: {from_actor_name}\n"
             f"Signal kind: {kind}\n"
-            f"Signal text: {notify_text}\n\n"
+            f"Signal text:\n{notify_text}\n\n"
             "Recent user signals:\n"
             f"{recent_signals}\n\n"
-            "Cortex runtime prompt snapshot:\n"
+            "Cortex context snapshot:\n"
             f"{principal_context[:5000]}\n\n"
             "Respond with strict JSON only:\n"
-            '{"relay": true|false, "message": "text for user when relay=true, else empty"}\n'
-            "If uncertain, choose the option that best serves the user right now."
+            '{"relay": true|false, "message": "your rewritten message for the user (if relay=true)"}\n'
         )
         try:
             raw = await agent.llm.complete(prompt, use_aux=False, usage_tag="cortex_notify_decision")
