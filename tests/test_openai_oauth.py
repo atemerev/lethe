@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from lethe.memory import openai_oauth
 from lethe.memory.llm import AsyncLLMClient, LLMConfig
 from lethe.memory.openai_oauth import OpenAIOAuth, is_oauth_available_openai
@@ -67,6 +69,87 @@ def test_openai_oauth_parse_response_maps_tools_and_usage():
     assert parsed["usage"]["prompt_tokens"] == 12
     assert parsed["usage"]["completion_tokens"] == 7
     assert parsed["usage"]["prompt_tokens_details"]["cached_tokens"] == 3
+
+
+def test_openai_oauth_normalize_model_maps_unsupported_mini_variant():
+    oauth = OpenAIOAuth(access_token="access-token")
+    assert oauth._normalize_model("gpt-5.2-mini") == "gpt-5.2"
+    assert oauth._normalize_model("gpt-5.1-codex-mini") == "gpt-5.1-codex-mini"
+
+
+def test_openai_oauth_extract_instructions_from_system_messages():
+    oauth = OpenAIOAuth(access_token="access-token")
+    instructions, non_system = oauth._extract_instructions(
+        [
+            {"role": "system", "content": "System A"},
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": [{"type": "text", "text": "System B"}]},
+        ]
+    )
+    assert instructions == "System A\n\nSystem B"
+    assert non_system == [{"role": "user", "content": "hello"}]
+
+
+def test_openai_oauth_parse_streamed_response_prefers_completed_event():
+    oauth = OpenAIOAuth(access_token="access-token")
+    sse = (
+        'event: response.created\n'
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.2","output":[]}}\n\n'
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.2","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+    )
+    parsed = oauth._parse_streamed_response(sse)
+    assert parsed["id"] == "resp_1"
+    assert parsed["output"][0]["type"] == "message"
+
+
+@pytest.mark.asyncio
+async def test_openai_oauth_call_messages_uses_stream_and_instructions(monkeypatch):
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        text = (
+            'event: response.completed\n'
+            'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.2","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, url, headers=None, json=None):
+            self.calls.append({"url": url, "headers": headers, "json": json})
+            return _Resp()
+
+    oauth = OpenAIOAuth(access_token="access-token")
+    fake_client = _Client()
+
+    async def _noop():
+        return None
+
+    async def _get_client():
+        return fake_client
+
+    monkeypatch.setattr(oauth, "ensure_access", _noop)
+    monkeypatch.setattr(oauth, "_get_client", _get_client)
+
+    await oauth.call_messages(
+        model="gpt-5.2-mini",
+        messages=[
+            {"role": "system", "content": "sys prompt"},
+            {"role": "user", "content": "hello"},
+        ],
+    )
+
+    payload = fake_client.calls[0]["json"]
+    assert payload["model"] == "gpt-5.2"
+    assert payload["instructions"] == "sys prompt"
+    assert payload["stream"] is True
+    assert "max_output_tokens" not in payload
 
 
 def test_llm_config_accepts_openai_oauth_without_api_key(monkeypatch):

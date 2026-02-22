@@ -27,6 +27,7 @@ TOKEN_URL = f"{ISSUER}/oauth/token"
 DEVICE_USERCODE_URL = f"{ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_TOKEN_URL = f"{ISSUER}/api/accounts/deviceauth/token"
 RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+DEFAULT_INSTRUCTIONS = "You are Lethe, a helpful and precise assistant."
 
 # Token file location
 TOKEN_FILE = Path(
@@ -258,9 +259,19 @@ class OpenAIOAuth:
         """Normalize model id and strip provider prefixes."""
         if "/" in model:
             model = model.split("/", 1)[-1]
+        unsupported_chatgpt_codex_models = {"gpt-5.2-mini", "gpt-5-mini"}
+        if model in unsupported_chatgpt_codex_models:
+            logger.warning(
+                "OpenAI OAuth/Codex model %s is unsupported for ChatGPT accounts; "
+                "falling back to gpt-5.2",
+                model,
+            )
         model_map = {
             "gpt-5-codex": "gpt-5.3-codex",
             "gpt-5": "gpt-5.2",
+            # ChatGPT-account Codex OAuth does not currently accept mini variants.
+            "gpt-5.2-mini": "gpt-5.2",
+            "gpt-5-mini": "gpt-5.2",
         }
         return model_map.get(model, model)
 
@@ -365,6 +376,26 @@ class OpenAIOAuth:
 
         return input_items
 
+    def _extract_instructions(self, messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
+        """Extract system prompt text for Responses.instructions.
+
+        Returns instructions text and messages with system-role entries removed.
+        """
+        instructions_parts: List[str] = []
+        non_system_messages: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            if msg.get("role") == "system":
+                text = self._text_from_system_content(msg.get("content", ""))
+                if text:
+                    text = text.strip()
+                    if text:
+                        instructions_parts.append(text)
+                continue
+            non_system_messages.append(msg)
+
+        return "\n\n".join(instructions_parts).strip(), non_system_messages
+
     def _normalize_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert litellm-style tools into OpenAI Responses tool schema."""
         normalized: List[Dict[str, Any]] = []
@@ -387,6 +418,55 @@ class OpenAIOAuth:
                 item["strict"] = func["strict"]
             normalized.append(item)
         return normalized
+
+    @staticmethod
+    def _iter_sse_events(raw: str) -> List[tuple[str, str]]:
+        """Parse SSE event/data blocks from a non-streamed response body."""
+        events: List[tuple[str, str]] = []
+        event_name: Optional[str] = None
+        data_lines: List[str] = []
+
+        for line in raw.splitlines():
+            if line.startswith("event: "):
+                if event_name is not None:
+                    events.append((event_name, "\n".join(data_lines)))
+                event_name = line[len("event: ") :].strip()
+                data_lines = []
+                continue
+            if line.startswith("data: "):
+                data_lines.append(line[len("data: ") :])
+                continue
+            if not line.strip() and event_name is not None:
+                events.append((event_name, "\n".join(data_lines)))
+                event_name = None
+                data_lines = []
+
+        if event_name is not None:
+            events.append((event_name, "\n".join(data_lines)))
+        return events
+
+    def _parse_streamed_response(self, raw: str) -> Dict[str, Any]:
+        """Parse Codex SSE response text and return a response object payload."""
+        latest_response: Optional[Dict[str, Any]] = None
+        for event_name, data in self._iter_sse_events(raw):
+            if not data:
+                continue
+            try:
+                payload = json.loads(data)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            response = payload.get("response")
+            if isinstance(response, dict):
+                latest_response = response
+                if event_name == "response.completed":
+                    return response
+
+        if latest_response is not None:
+            return latest_response
+        raise RuntimeError("OpenAI OAuth API error: could not parse streamed response payload")
 
     def _parse_response(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Convert OpenAI Responses payload to chat.completion-like shape."""
@@ -491,7 +571,16 @@ class OpenAIOAuth:
         await self.ensure_access()
 
         model_id = self._normalize_model(model)
-        input_items = self._normalize_messages(messages)
+        explicit_instructions = kwargs.get("instructions")
+        system_instructions, non_system_messages = self._extract_instructions(messages)
+        if isinstance(explicit_instructions, str) and explicit_instructions.strip():
+            instructions = explicit_instructions.strip()
+        elif system_instructions:
+            instructions = system_instructions
+        else:
+            instructions = DEFAULT_INSTRUCTIONS
+
+        input_items = self._normalize_messages(non_system_messages)
         if not input_items:
             input_items = [
                 {
@@ -502,11 +591,17 @@ class OpenAIOAuth:
 
         payload: Dict[str, Any] = {
             "model": model_id,
+            "instructions": instructions,
             "input": input_items,
-            "max_output_tokens": max_tokens,
             "store": False,
-            "stream": False,
+            "stream": True,
         }
+        if max_tokens and max_tokens != 8000:
+            # chatgpt.com/backend-api/codex/responses currently rejects max token params.
+            logger.debug(
+                "OpenAI OAuth/Codex endpoint ignores max token controls; requested max_tokens=%s",
+                max_tokens,
+            )
         if tools:
             payload["tools"] = self._normalize_tools(tools)
 
@@ -527,7 +622,11 @@ class OpenAIOAuth:
                 f"OpenAI OAuth API error: {response.status_code} - {error_text}"
             )
 
-        data = response.json()
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            data = response.json()
+        else:
+            data = self._parse_streamed_response(response.text)
         parsed = self._parse_response(data)
         parsed["_response_headers"] = {k.lower(): v for k, v in response.headers.items()}
         return parsed
