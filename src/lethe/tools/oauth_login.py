@@ -40,6 +40,7 @@ ANTHROPIC_SCOPES = "org:create_api_key user:profile user:inference user:sessions
 # OpenAI device flow constants
 OPENAI_DEVICE_REDIRECT_URI = f"{OPENAI_ISSUER}/deviceauth/callback"
 OPENAI_POLL_SAFETY_MARGIN_SECONDS = 3
+OPENAI_DEVICE_AUTH_TIMEOUT_SECONDS = 900
 
 
 def _generate_pkce() -> tuple[str, str]:
@@ -165,9 +166,12 @@ async def _openai_poll_for_authorization_code(
     device_auth_id: str,
     user_code: str,
     interval_seconds: int,
+    timeout_seconds: float = OPENAI_DEVICE_AUTH_TIMEOUT_SECONDS,
 ) -> dict:
     """Poll OpenAI device endpoint until authorization code is available."""
     wait_seconds = max(interval_seconds, 1) + OPENAI_POLL_SAFETY_MARGIN_SECONDS
+    timeout_seconds = max(float(timeout_seconds), 1.0)
+    deadline = time.monotonic() + timeout_seconds
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
@@ -191,12 +195,20 @@ async def _openai_poll_for_authorization_code(
 
             # Pending auth in current OpenAI device endpoint behavior.
             if response.status_code in (403, 404):
-                await asyncio.sleep(wait_seconds)
+                now = time.monotonic()
+                if now >= deadline:
+                    break
+                sleep_seconds = min(wait_seconds, max(deadline - now, 0.0))
+                if sleep_seconds > 0:
+                    await asyncio.sleep(sleep_seconds)
                 continue
 
             raise RuntimeError(
                 f"Device authorization polling failed: {response.status_code} {response.text}"
             )
+    raise RuntimeError(
+        f"Timed out waiting for OpenAI device authorization after {int(timeout_seconds)}s"
+    )
 
 
 async def _openai_exchange_authorization_code(authorization_code: str, code_verifier: str) -> dict:

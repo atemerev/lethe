@@ -1,11 +1,18 @@
-"""Lethe Memory Layer - local memory and LLM utilities.
+"""Lethe Memory Layer - Local memory management with LanceDB.
 
-The package lazily resolves exported symbols so importing ``lethe.memory`` does
-not force native LanceDB imports unless those symbols are actually used.
+Replaces Letta Cloud with a local, reliable memory backend.
+- Memory blocks (core memory)
+- Archival memory with hybrid search (vector + FTS)
+- Message history
+- Direct LLM client with context management
 """
 
-from importlib import import_module
-from typing import Any
+from lethe.memory.store import MemoryStore
+from lethe.memory.blocks import BlockManager
+from lethe.memory.archival import ArchivalMemory
+from lethe.memory.messages import MessageHistory
+from lethe.memory.llm import AsyncLLMClient, LLMConfig
+from lethe.memory.hippocampus import Hippocampus
 
 __all__ = [
     "MemoryStore",
@@ -16,27 +23,3 @@ __all__ = [
     "LLMConfig",
     "Hippocampus",
 ]
-
-_SYMBOL_TO_MODULE = {
-    "MemoryStore": "lethe.memory.store",
-    "BlockManager": "lethe.memory.blocks",
-    "ArchivalMemory": "lethe.memory.archival",
-    "MessageHistory": "lethe.memory.messages",
-    "AsyncLLMClient": "lethe.memory.llm",
-    "LLMConfig": "lethe.memory.llm",
-    "Hippocampus": "lethe.memory.hippocampus",
-}
-
-
-def __getattr__(name: str) -> Any:
-    module_name = _SYMBOL_TO_MODULE.get(name)
-    if not module_name:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module = import_module(module_name)
-    value = getattr(module, name)
-    globals()[name] = value
-    return value
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__))

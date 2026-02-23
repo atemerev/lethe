@@ -325,8 +325,13 @@ prompt_api_key() {
         echo "  1) API key (pay-per-token)"
         echo "  2) ChatGPT subscription OAuth (Codex)"
         echo ""
-        prompt_read "Choose [1-2, default=2]: " auth_choice
-        auth_choice=${auth_choice:-2}
+        local default_auth_choice=2
+        if [[ "$INSTALL_MODE" == "container" ]]; then
+            # Container mode has no host uv/python bootstrap, so API key is safer as default.
+            default_auth_choice=1
+        fi
+        prompt_read "Choose [1-2, default=$default_auth_choice]: " auth_choice
+        auth_choice=${auth_choice:-$default_auth_choice}
         if [[ "$auth_choice" == "1" ]]; then
             key_name="OPENAI_API_KEY"
             key_url="https://platform.openai.com/api-keys"
@@ -401,6 +406,9 @@ prompt_api_key() {
         echo ""
         prompt_read "   OPENAI_AUTH_TOKEN (optional now): " API_KEY
         if [ -z "$API_KEY" ]; then
+            if [[ "$INSTALL_MODE" == "container" ]]; then
+                error "OPENAI_AUTH_TOKEN is required in container mode. Use OpenAI API key auth, or run installer in native mode for deferred OAuth login."
+            fi
             DEFERRED_OPENAI_OAUTH_LOGIN=1
             SELECTED_AUTH_KEY_NAME="$key_name"
             return
@@ -1121,12 +1129,6 @@ main() {
         echo "  Workspace: $WORKSPACE_DIR (agent can only access this directory)"
         echo ""
         echo "  Message your bot on Telegram to get started!"
-        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
-            echo ""
-            echo -e "${YELLOW}  OpenAI OAuth pending:${NC}"
-            echo "    Run: cd $INSTALL_DIR && $UV_BIN run lethe oauth-login openai"
-            echo "    Then restart: $CONTAINER_CMD restart lethe"
-        fi
         echo ""
         echo "  Useful commands:"
         echo "    View logs:     $CONTAINER_CMD logs -f lethe"
@@ -1138,7 +1140,12 @@ main() {
         # Native mode (unsafe)
         install_deps_and_run
         setup_config
-        setup_service
+        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
+            warn "Skipping service start until OpenAI OAuth is configured."
+            warn "Run OAuth login, then start Lethe manually."
+        else
+            setup_service
+        fi
         
         echo ""
         echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
@@ -1154,7 +1161,7 @@ main() {
             echo ""
             echo -e "${YELLOW}  OpenAI OAuth pending:${NC}"
             echo "    Run: cd $INSTALL_DIR && $UV_BIN run lethe oauth-login openai"
-            echo "    Then restart: systemctl --user restart lethe"
+            echo "    Then start:   cd $INSTALL_DIR && $UV_BIN run lethe"
         fi
         echo ""
         echo "  Useful commands:"
