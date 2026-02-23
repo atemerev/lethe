@@ -3,7 +3,7 @@ import json
 import pytest
 
 from lethe.memory import openai_oauth
-from lethe.memory.llm import AsyncLLMClient, LLMConfig
+from lethe.memory.llm import AsyncLLMClient, LLMConfig, Message
 from lethe.memory.openai_oauth import OpenAIOAuth, is_oauth_available_openai
 from lethe.tools import oauth_login_openai
 
@@ -251,3 +251,33 @@ def test_async_llm_client_prefers_openai_oauth_over_api_key(monkeypatch):
     config = LLMConfig(provider="openai", model="gpt-5.3-codex")
     client = AsyncLLMClient(config=config, system_prompt="test")
     assert isinstance(client._oauth, OpenAIOAuth)
+
+
+def test_context_build_messages_preserves_large_multimodal_image_payload(monkeypatch):
+    monkeypatch.setenv("OPENAI_AUTH_TOKEN", "test-openai-oauth-token")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    config = LLMConfig(provider="openai", model="gpt-5.2")
+    client = AsyncLLMClient(config=config, system_prompt="test")
+
+    large_b64 = "A" * 60000
+    client.context.add_message(
+        Message(
+            role="user",
+            content=[
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{large_b64}"},
+                },
+            ],
+        )
+    )
+
+    messages = client.context.build_messages()
+    user_messages = [m for m in messages if m.get("role") == "user"]
+    assert user_messages, "Expected at least one user message in built context"
+    latest_user = user_messages[-1]
+    assert isinstance(latest_user.get("content"), list)
+    assert latest_user["content"][1]["type"] == "image_url"
+    assert latest_user["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
