@@ -302,7 +302,7 @@ Enable with `LETHE_CONSOLE=true`. Web dashboard on port 8777.
 | `ANTHROPIC_AUTH_TOKEN` | Anthropic OAuth token (subscription) | (alternative) |
 | `OPENAI_API_KEY` | OpenAI API key | (one required) |
 | `OPENAI_AUTH_TOKEN` | OpenAI OAuth token (Codex subscription) | (alternative) |
-| `LETHE_OAUTH_TOKENS` | Anthropic OAuth token file path override | `~/.lethe/oauth_tokens.json` |
+| `LETHE_ANTHROPIC_OAUTH_TOKENS` | Anthropic OAuth token file path override | `~/.lethe/oauth_tokens.json` |
 | `LETHE_OPENAI_OAUTH_TOKENS` | OpenAI OAuth token file path override | `~/.lethe/openai_oauth_tokens.json` |
 | `LLM_MODEL` | Main model | (provider default) |
 | `LLM_MODEL_AUX` | Aux model for summarization | (provider default) |
@@ -326,6 +326,7 @@ Enable with `LETHE_CONSOLE=true`. Web dashboard on port 8777.
 | `BRAINSTEM_ANTHROPIC_7D_UTIL_WARN` | Anthropic 7d utilization warning threshold (0-1) | `0.80` |
 
 Note: `.env` file takes precedence over shell environment variables.
+Legacy compatibility: `LETHE_OAUTH_TOKENS` is still accepted as an Anthropic token file override.
 
 ### Identity Configuration
 

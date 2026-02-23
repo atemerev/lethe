@@ -55,7 +55,11 @@ MODEL_ID_MAP = {
 MODEL_ID_REVERSE = {v: k for k, v in MODEL_ID_MAP.items()}
 
 # Token file location
-TOKEN_FILE = Path(os.environ.get("LETHE_OAUTH_TOKENS", "~/.lethe/oauth_tokens.json")).expanduser()
+# Prefer explicit provider-scoped override; keep legacy env var for compatibility.
+TOKEN_FILE = Path(
+    os.environ.get("LETHE_ANTHROPIC_OAUTH_TOKENS")
+    or os.environ.get("LETHE_OAUTH_TOKENS", "~/.lethe/oauth_tokens.json")
+).expanduser()
 
 
 def _to_pascal_case(name: str) -> str:
