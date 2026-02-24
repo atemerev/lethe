@@ -212,14 +212,19 @@ class TelegramBot:
                             'gif': 'image/gif', 'webp': 'image/webp'}
                 mime_type = mime_map.get(ext, 'image/jpeg')
                 
-                # Build multimodal content
-                caption = message.caption or "What is this?"
-                multimodal_content = [
-                    {"type": "text", "text": caption},
+                # Build multimodal content (image-only if no caption provided).
+                caption = (message.caption or "").strip()
+                multimodal_content = []
+                if caption:
+                    multimodal_content.append({"type": "text", "text": caption})
+                multimodal_content.append(
                     {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}
-                ]
-                
-                logger.info(f"Received photo ({photo.width}x{photo.height}) with caption: {caption[:50]}...")
+                )
+
+                caption_preview = caption[:50] if caption else "(no caption)"
+                logger.info(
+                    f"Received photo ({photo.width}x{photo.height}) with caption: {caption_preview}..."
+                )
                 
                 # Add message to conversation manager with multimodal content
                 await self.conversation_manager.add_message(

@@ -119,11 +119,12 @@ curl -fsSL https://lethe.gg/update | bash
 | Provider | Env Variable | Default Model |
 |----------|--------------|---------------|
 | OpenRouter | `OPENROUTER_API_KEY` | `moonshotai/kimi-k2.5-0127` |
-| Anthropic (API key) | `ANTHROPIC_API_KEY` | `claude-opus-4-6` |
-| Anthropic (subscription) | `ANTHROPIC_AUTH_TOKEN` | `claude-opus-4-6` |
+| Anthropic (API key) | `ANTHROPIC_API_KEY` | `claude-opus-4-5-20251101` |
+| Anthropic (subscription) | `ANTHROPIC_AUTH_TOKEN` | `claude-opus-4-5-20251101` |
 | OpenAI | `OPENAI_API_KEY` | `gpt-5.2` |
+| OpenAI Codex (subscription) | `OPENAI_AUTH_TOKEN` | `gpt-5.2` |
 
-Set `LLM_PROVIDER` to force a specific provider, or let it auto-detect from available API keys.
+Set `LLM_PROVIDER` to force a specific provider, or let it auto-detect from available API keys and OAuth tokens.
 
 **Multi-model support**: Set `LLM_MODEL_AUX` for a cheaper model used in summarization (e.g., `claude-haiku-4-5-20251001`).
 
@@ -134,7 +135,7 @@ Use your Claude Pro ($20/mo) or Max ($100-200/mo) subscription instead of pay-pe
 **Option A: Interactive login (recommended)**
 
 ```bash
-uv run lethe oauth-login
+uv run lethe oauth-login anthropic
 ```
 
 Opens your browser to sign in with your Anthropic account. Tokens are saved to `~/.lethe/oauth_tokens.json` with automatic refresh.
@@ -148,9 +149,34 @@ If you already have an OAuth access token (e.g. from `claude setup-token`):
 ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...
 ```
 
-Note: tokens from `ANTHROPIC_AUTH_TOKEN` cannot be refreshed automatically. Use `oauth-login` for persistent sessions.
+Note: tokens from `ANTHROPIC_AUTH_TOKEN` cannot be refreshed automatically. Use `oauth-login anthropic` for persistent sessions.
 
 **Priority**: If both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are set, OAuth takes priority (logged on startup).
+
+### OpenAI OAuth (ChatGPT Plus/Pro Codex)
+
+Use ChatGPT Plus/Pro OAuth tokens for Codex access without `OPENAI_API_KEY`.
+
+**Option A: Device flow login (recommended)**
+
+```bash
+uv run lethe oauth-login openai
+```
+
+Shows a verification URL + code. Tokens are saved to `~/.lethe/openai_oauth_tokens.json` with automatic refresh.
+
+**Option B: Manual token**
+
+If you already have an OpenAI OAuth access token:
+
+```bash
+# In your .env
+OPENAI_AUTH_TOKEN=eyJ...
+```
+
+Note: tokens from `OPENAI_AUTH_TOKEN` alone cannot be refreshed automatically. Use `oauth-login openai` for persistent sessions.
+
+**Priority**: If both `OPENAI_AUTH_TOKEN` and `OPENAI_API_KEY` are set, OAuth takes priority.
 
 ### Run as Service
 
@@ -275,6 +301,9 @@ Enable with `LETHE_CONSOLE=true`. Web dashboard on port 8777.
 | `ANTHROPIC_API_KEY` | Anthropic API key | (one required) |
 | `ANTHROPIC_AUTH_TOKEN` | Anthropic OAuth token (subscription) | (alternative) |
 | `OPENAI_API_KEY` | OpenAI API key | (one required) |
+| `OPENAI_AUTH_TOKEN` | OpenAI OAuth token (Codex subscription) | (alternative) |
+| `LETHE_ANTHROPIC_OAUTH_TOKENS` | Anthropic OAuth token file path override | `~/.lethe/oauth_tokens.json` |
+| `LETHE_OPENAI_OAUTH_TOKENS` | OpenAI OAuth token file path override | `~/.lethe/openai_oauth_tokens.json` |
 | `LLM_MODEL` | Main model | (provider default) |
 | `LLM_MODEL_AUX` | Aux model for summarization | (provider default) |
 | `LLM_MODEL_DMN` | DMN model override (empty = use aux model) | (empty) |
@@ -297,6 +326,7 @@ Enable with `LETHE_CONSOLE=true`. Web dashboard on port 8777.
 | `BRAINSTEM_ANTHROPIC_7D_UTIL_WARN` | Anthropic 7d utilization warning threshold (0-1) | `0.80` |
 
 Note: `.env` file takes precedence over shell environment variables.
+Legacy compatibility: `LETHE_OAUTH_TOKENS` is still accepted as an Anthropic token file override.
 
 ### Identity Configuration
 
@@ -351,6 +381,7 @@ src/lethe/
 ├── memory/         # LanceDB-based memory backend
 │   ├── llm.py      # LLM client with context budget management
 │   ├── anthropic_oauth.py  # Direct Anthropic API for OAuth (subscription auth)
+│   ├── openai_oauth.py  # Direct OpenAI Codex API for OAuth (subscription auth)
 │   ├── store.py    # Unified memory coordinator
 │   ├── blocks.py   # Core memory blocks
 │   └── context.py  # Context assembly and caching

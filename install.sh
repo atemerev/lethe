@@ -38,6 +38,7 @@ INSTALL_DIR="${LETHE_INSTALL_DIR:-$HOME/.lethe}"
 CONFIG_DIR="${LETHE_CONFIG_DIR:-$HOME/.config/lethe}"
 WORKSPACE_DIR="${LETHE_WORKSPACE_DIR:-$HOME/lethe}"
 DETECTED_PROVIDERS=()
+DEFERRED_OPENAI_OAUTH_LOGIN=0
 
 # Install mode: "container" (safe, default) or "native" (unsafe)
 INSTALL_MODE="container"
@@ -48,7 +49,7 @@ provider_desc() {
     case "$1" in
         openrouter) echo "OpenRouter (recommended - access to all models)" ;;
         anthropic) echo "Anthropic (API key or Claude subscription token)" ;;
-        openai) echo "OpenAI (GPT models)" ;;
+        openai) echo "OpenAI (API key or ChatGPT subscription OAuth for Codex)" ;;
         *) echo "" ;;
     esac
 }
@@ -75,7 +76,7 @@ provider_model_aux_default() {
     case "$1" in
         openrouter) echo "openrouter/moonshotai/kimi-k2.5-0127" ;;
         anthropic) echo "claude-haiku-4-5-20251001" ;;
-        openai) echo "gpt-5.2-mini" ;;
+        openai) echo "gpt-5.2" ;;
         *) echo "" ;;
     esac
 }
@@ -175,16 +176,21 @@ detect_api_keys() {
     if [ -n "${OPENAI_API_KEY:-}" ]; then
         DETECTED_PROVIDERS+=("openai")
     fi
+    if [ -n "${OPENAI_AUTH_TOKEN:-}" ] && ! has_detected_provider "openai"; then
+        DETECTED_PROVIDERS+=("openai")
+    fi
     
     # Also check .env file if it exists (parse only, never source)
     if [ -f "$CONFIG_DIR/.env" ]; then
         local cfg_or_key
         local cfg_an_key
         local cfg_oa_key
+        local cfg_oa_auth
         cfg_or_key="$(get_env_value "OPENROUTER_API_KEY" "$CONFIG_DIR/.env" || true)"
         cfg_an_key="$(get_env_value "ANTHROPIC_API_KEY" "$CONFIG_DIR/.env" || true)"
         cfg_an_auth="$(get_env_value "ANTHROPIC_AUTH_TOKEN" "$CONFIG_DIR/.env" || true)"
         cfg_oa_key="$(get_env_value "OPENAI_API_KEY" "$CONFIG_DIR/.env" || true)"
+        cfg_oa_auth="$(get_env_value "OPENAI_AUTH_TOKEN" "$CONFIG_DIR/.env" || true)"
         if [ -n "${cfg_or_key:-}" ] && ! has_detected_provider "openrouter"; then
             DETECTED_PROVIDERS+=("openrouter")
         fi
@@ -195,6 +201,9 @@ detect_api_keys() {
             DETECTED_PROVIDERS+=("anthropic")
         fi
         if [ -n "${cfg_oa_key:-}" ] && ! has_detected_provider "openai"; then
+            DETECTED_PROVIDERS+=("openai")
+        fi
+        if [ -n "${cfg_oa_auth:-}" ] && ! has_detected_provider "openai"; then
             DETECTED_PROVIDERS+=("openai")
         fi
     fi
@@ -310,6 +319,26 @@ prompt_api_key() {
             key_name="ANTHROPIC_AUTH_TOKEN"
             key_url="Run: claude setup-token"
         fi
+    elif [[ "$SELECTED_PROVIDER" == "openai" ]]; then
+        echo ""
+        echo -e "${YELLOW}OpenAI auth mode:${NC}"
+        echo "  1) API key (pay-per-token)"
+        echo "  2) ChatGPT subscription OAuth (Codex)"
+        echo ""
+        local default_auth_choice=2
+        if [[ "$INSTALL_MODE" == "container" ]]; then
+            # Container mode has no host uv/python bootstrap, so API key is safer as default.
+            default_auth_choice=1
+        fi
+        prompt_read "Choose [1-2, default=$default_auth_choice]: " auth_choice
+        auth_choice=${auth_choice:-$default_auth_choice}
+        if [[ "$auth_choice" == "1" ]]; then
+            key_name="OPENAI_API_KEY"
+            key_url="https://platform.openai.com/api-keys"
+        else
+            key_name="OPENAI_AUTH_TOKEN"
+            key_url="Run: uv run lethe oauth-login openai"
+        fi
     fi
     
     # Check if already have key in environment or existing config
@@ -322,6 +351,7 @@ prompt_api_key() {
         ANTHROPIC_API_KEY) existing_key="${ANTHROPIC_API_KEY:-}" ;;
         ANTHROPIC_AUTH_TOKEN) existing_key="${ANTHROPIC_AUTH_TOKEN:-}" ;;
         OPENAI_API_KEY) existing_key="${OPENAI_API_KEY:-}" ;;
+        OPENAI_AUTH_TOKEN) existing_key="${OPENAI_AUTH_TOKEN:-}" ;;
     esac
     [ -n "$existing_key" ] && key_source="environment"
     
@@ -369,6 +399,22 @@ prompt_api_key() {
             echo "   Claude CLI not found. Install Claude Code CLI, run 'claude setup-token', then paste token below."
         fi
         echo "   Step 2: Paste your ANTHROPIC_AUTH_TOKEN."
+    elif [[ "$key_name" == "OPENAI_AUTH_TOKEN" ]]; then
+        echo "   Recommended: run OpenAI OAuth after install:"
+        echo "     cd $INSTALL_DIR && uv run lethe oauth-login openai"
+        echo "   You can paste OPENAI_AUTH_TOKEN now, or leave blank to configure after install."
+        echo ""
+        prompt_read "   OPENAI_AUTH_TOKEN (optional now): " API_KEY
+        if [ -z "$API_KEY" ]; then
+            if [[ "$INSTALL_MODE" == "container" ]]; then
+                error "OPENAI_AUTH_TOKEN is required in container mode. Use OpenAI API key auth, or run installer in native mode for deferred OAuth login."
+            fi
+            DEFERRED_OPENAI_OAUTH_LOGIN=1
+            SELECTED_AUTH_KEY_NAME="$key_name"
+            return
+        fi
+        SELECTED_AUTH_KEY_NAME="$key_name"
+        return
     else
         echo "   Get your key at: $key_url"
     fi
@@ -1094,7 +1140,12 @@ main() {
         # Native mode (unsafe)
         install_deps_and_run
         setup_config
-        setup_service
+        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
+            warn "Skipping service start until OpenAI OAuth is configured."
+            warn "Run OAuth login, then start Lethe manually."
+        else
+            setup_service
+        fi
         
         echo ""
         echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
@@ -1106,6 +1157,12 @@ main() {
         echo -e "  ${YELLOW}WARNING: Agent has full system access${NC}"
         echo ""
         echo "  Message your bot on Telegram to get started!"
+        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
+            echo ""
+            echo -e "${YELLOW}  OpenAI OAuth pending:${NC}"
+            echo "    Run: cd $INSTALL_DIR && $UV_BIN run lethe oauth-login openai"
+            echo "    Then start:   cd $INSTALL_DIR && $UV_BIN run lethe"
+        fi
         echo ""
         echo "  Useful commands:"
         echo "    View logs:     journalctl --user -u lethe -f"
