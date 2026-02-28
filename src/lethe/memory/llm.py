@@ -76,6 +76,12 @@ PROVIDERS = {
         "default_model": "gpt-5.2",
         "default_model_aux": "gpt-5.2",
     },
+    "gemini": {
+        "env_key": "GEMINI_API_KEY",
+        "model_prefix": "gemini/",  # litellm expects gemini/ prefix for Google AI Studio
+        "default_model": "gemini/gemini-3-flash-preview",
+        "default_model_aux": "gemini/gemini-3-flash-preview",
+    },
 }
 
 DEFAULT_PROVIDER = "openrouter"
@@ -152,8 +158,20 @@ class LLMConfig:
             else:
                 raise ValueError(f"{env_key} not set")
         
+        # Force high temperature for Gemini (it dislikes low/deterministic temperatures)
+        if self.provider == "gemini":
+            self.temperature = 1.0
+
         logger.info(f"LLM config: provider={self.provider}, model={self.model}, aux={self.model_aux}")
     
+    @property
+    def deterministic_temperature(self) -> float:
+        """Get appropriate temperature for deterministic tasks (summarization, heartbeat)."""
+        # Gemini requires 1.0; others use 0.3 for determinism
+        if self.provider == "gemini":
+            return 1.0
+        return 0.3
+
     def _detect_provider(self) -> str:
         """Auto-detect provider from available API keys."""
         # Check LLM_PROVIDER env var first
@@ -1088,7 +1106,7 @@ class AsyncLLMClient:
                     {"role": "system", "content": SUMMARIZE_PROMPT},
                     {"role": "user", "content": conversation},
                 ],
-                temperature=0.3,
+                temperature=self.config.deterministic_temperature,
                 max_tokens=500,
             )
             return response.choices[0].message.content or ""
@@ -1721,7 +1739,7 @@ class AsyncLLMClient:
         """
         kwargs = await self._get_api_kwargs()
         kwargs["messages"] = [{"role": "user", "content": prompt}]
-        kwargs["temperature"] = 0.3
+        kwargs["temperature"] = self.config.deterministic_temperature
         kwargs["max_tokens"] = 2000
         
         # Use aux model if requested (for OAuth: same provider, just different model)
@@ -1763,7 +1781,7 @@ class AsyncLLMClient:
         kwargs = {
             "model": self.config.model_aux,  # Use aux model
             "messages": messages,
-            "temperature": 0.3,
+            "temperature": self.config.deterministic_temperature,
             "max_tokens": 1000,
         }
         
