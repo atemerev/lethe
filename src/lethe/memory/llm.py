@@ -145,8 +145,8 @@ class LLMConfig:
         # Verify API key exists (OAuth tokens are alternatives for some providers).
         env_key = provider_config.get("env_key")
         if env_key and not os.environ.get(env_key):
-            if self.provider == "anthropic" and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-                pass  # Bearer auth via ANTHROPIC_AUTH_TOKEN
+            if self.provider == "anthropic" and (os.environ.get("ANTHROPIC_AUTH_TOKEN") or is_oauth_available()):
+                pass  # Bearer auth via ANTHROPIC_AUTH_TOKEN or OAuth token file
             elif self.provider == "openai" and is_oauth_available_openai():
                 pass  # OAuth token via OPENAI_AUTH_TOKEN or token file
             else:
