@@ -20,6 +20,7 @@ from lethe.config import get_settings
 from lethe.conversation import ConversationManager
 from lethe.telegram import TelegramBot
 from lethe.heartbeat import Heartbeat
+from lethe.memory.anthropic_oauth import OAuthClient
 from lethe import console as lethe_console
 
 console = Console()
@@ -124,6 +125,11 @@ async def run():
     # Initialize conversation manager
     conversation_manager = ConversationManager(debounce_seconds=settings.debounce_seconds)
     logger.info(f"Conversation manager initialized (debounce: {settings.debounce_seconds}s)")
+    
+    # Initialize OAuth manager for token recovery via Telegram
+    oauth_manager = OAuthClient()
+    logger.info("OAuth manager initialized for token recovery")
+    
     heartbeat: Optional[Heartbeat] = None
 
     def mark_user_visible_activity(reason: str) -> None:
@@ -197,6 +203,7 @@ async def run():
         settings,
         conversation_manager=conversation_manager,
         process_callback=process_message,
+        oauth_manager=oauth_manager,
     )
     # heartbeat_callback will be set below after Heartbeat is created
 

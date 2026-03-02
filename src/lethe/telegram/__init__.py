@@ -25,12 +25,14 @@ class TelegramBot:
         conversation_manager: Optional[ConversationManager] = None,
         process_callback: Optional[Callable] = None,
         heartbeat_callback: Optional[Callable] = None,
+        oauth_manager: Optional["OAuthTokenManager"] = None,
     ):
         self.settings = settings or get_settings()
         self.conversation_manager = conversation_manager
         self.process_callback = process_callback
         self.actor_system = None  # Set after ActorSystem.setup()
         self.heartbeat_callback = heartbeat_callback
+        self.oauth_manager = oauth_manager
 
         self.bot = Bot(
             token=self.settings.telegram_bot_token,
@@ -159,6 +161,20 @@ class TelegramBot:
             if not self._is_authorized(message.from_user.id):
                 await message.answer("Unauthorized.")
                 return
+
+            # Check if this is an OAuth auth code (long alphanumeric string, 40+ chars)
+            # Auth codes look like: ant-auth-... or similar long tokens
+            text = message.text.strip()
+            if self.oauth_manager and len(text) >= 40 and text.isalnum():
+                logger.info(f"Detected potential OAuth auth code: {text[:20]}...")
+                try:
+                    await self.oauth_manager.receive_auth_code(text)
+                    await message.answer("✓ OAuth code received and processing...")
+                    return
+                except Exception as e:
+                    logger.error(f"Error processing OAuth code: {e}")
+                    await message.answer(f"Error processing auth code: {e}")
+                    return
 
             if not self.conversation_manager or not self.process_callback:
                 await message.answer("Bot not fully initialized.")
