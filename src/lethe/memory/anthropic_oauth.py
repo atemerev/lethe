@@ -327,8 +327,33 @@ class AnthropicOAuth:
             
             # User messages
             if isinstance(content, list):
-                # Multimodal content — pass through
-                api_messages.append({"role": "user", "content": content})
+                # Multimodal content — convert image_url (OpenAI) to image (Anthropic)
+                converted = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image_url":
+                        img_data = block.get("image_url", {})
+                        url = img_data.get("url", "") if isinstance(img_data, dict) else str(img_data)
+                        if url.startswith("data:"):
+                            # data:image/png;base64,<data>
+                            try:
+                                header, b64data = url.split(",", 1)
+                                media_type = header.split(":")[1].split(";")[0]
+                            except (ValueError, IndexError):
+                                media_type = "image/png"
+                                b64data = url
+                            converted.append({
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": media_type, "data": b64data},
+                            })
+                        else:
+                            # URL-based image
+                            converted.append({
+                                "type": "image",
+                                "source": {"type": "url", "url": url},
+                            })
+                    else:
+                        converted.append(block)
+                api_messages.append({"role": "user", "content": converted})
             else:
                 api_messages.append({"role": "user", "content": str(content)})
         
