@@ -280,11 +280,10 @@ class AnthropicOAuth:
             if role == "system":
                 # Extract system prompt
                 if isinstance(content, list):
-                    # Structured system blocks — strip cache_control
+                    # Structured system blocks — preserve cache_control for prompt caching
                     for block in content:
                         if isinstance(block, dict):
-                            clean = {k: v for k, v in block.items() if k != "cache_control"}
-                            system_blocks.append(clean)
+                            system_blocks.append(block)
                         else:
                             system_blocks.append({"type": "text", "text": str(block)})
                 elif isinstance(content, str):
@@ -364,6 +363,10 @@ class AnthropicOAuth:
                     merged[-1]["content"] = prev_content + [{"type": "text", "text": new_content}]
             else:
                 merged.append(msg)
+        
+        # Anthropic requires the first message to be role=user
+        if merged and merged[0]["role"] != "user":
+            merged.insert(0, {"role": "user", "content": "[Continue]"})
         
         return system_blocks, merged
     
