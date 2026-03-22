@@ -198,7 +198,7 @@ class AnthropicOAuth:
             "accept": "application/json",
             "authorization": f"Bearer {self.access_token}",
             "anthropic-version": "2023-06-01",
-            "user-agent": "claude-cli/2.1.7 (external, cli)",
+            "user-agent": "claude-cli/2.1.81 (external, cli)",
             "x-app": "cli",
             "anthropic-dangerous-direct-browser-access": "true",
             # Stainless headers (Claude SDK metadata)
@@ -212,10 +212,8 @@ class AnthropicOAuth:
             "x-stainless-timeout": "600",
         }
         
-        # Beta headers
-        betas = ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"]
-        if has_tools:
-            betas.insert(0, "claude-code-20250219")
+        # Beta headers — claude-code-20250219 MUST always be present for OAuth to work
+        betas = ["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"]
         headers["anthropic-beta"] = ",".join(betas)
         
         if is_stream:
@@ -368,7 +366,58 @@ class AnthropicOAuth:
         if merged and merged[0]["role"] != "user":
             merged.insert(0, {"role": "user", "content": "[Continue]"})
         
+        # Validate tool_result/tool_use pairing (Anthropic rejects orphans with 400)
+        merged = self._clean_orphaned_tool_pairs(merged)
+        
         return system_blocks, merged
+    
+    @staticmethod
+    def _clean_orphaned_tool_pairs(messages: List[Dict]) -> List[Dict]:
+        """Remove tool_result blocks that have no matching tool_use in the previous message.
+        
+        Anthropic requires every tool_result to reference a tool_use ID from
+        the immediately preceding assistant message. Orphans cause 400 errors.
+        """
+        cleaned = []
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                cleaned.append(msg)
+                continue
+            
+            # Collect tool_use IDs from previous assistant message
+            prev_tool_ids = set()
+            if cleaned:
+                prev = cleaned[-1]
+                prev_content = prev.get("content")
+                if prev.get("role") == "assistant" and isinstance(prev_content, list):
+                    for block in prev_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            prev_tool_ids.add(block.get("id", ""))
+            
+            # Filter out orphaned tool_result blocks
+            has_tool_results = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+            if not has_tool_results:
+                cleaned.append(msg)
+                continue
+            
+            filtered_blocks = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tid = block.get("tool_use_id", "")
+                    if tid not in prev_tool_ids:
+                        logger.warning(f"Dropping orphaned tool_result (tool_use_id={tid[:20]})")
+                        continue
+                filtered_blocks.append(block)
+            
+            if filtered_blocks:
+                cleaned.append({**msg, "content": filtered_blocks})
+            # else: entire message was orphaned tool_results, drop it
+        
+        return cleaned
     
     def _parse_response(self, data: dict) -> dict:
         """Convert Anthropic native response to litellm-compatible format.
