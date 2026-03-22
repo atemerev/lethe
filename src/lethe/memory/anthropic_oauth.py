@@ -332,16 +332,11 @@ class AnthropicOAuth:
             else:
                 api_messages.append({"role": "user", "content": str(content)})
         
-        # Prepend Claude Code identifier to system prompt
+        # Prepend Claude Code identifier as its own system block.
+        # CRITICAL: OAuth tokens require this exact string as a standalone block.
+        # Merging it with other text causes Anthropic to return 400 "Error".
         claude_code_prefix = "You are Claude Code, Anthropic's official CLI for Claude."
-        if system_blocks:
-            first = system_blocks[0]
-            if first.get("type") == "text":
-                first["text"] = claude_code_prefix + "\n\n" + first["text"]
-            else:
-                system_blocks.insert(0, {"type": "text", "text": claude_code_prefix})
-        else:
-            system_blocks = [{"type": "text", "text": claude_code_prefix}]
+        system_blocks.insert(0, {"type": "text", "text": claude_code_prefix})
         
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
         merged = []
