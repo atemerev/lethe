@@ -569,13 +569,26 @@ class ContextWindow:
         
         - Remove tool_result without matching tool_use
         - Remove assistant tool_calls if no tool_results follow
+        
+        Tool IDs are compared using a normalized form (non-alnum replaced with -)
+        because Anthropic sanitization may have changed underscore-format IDs
+        (toolu_xxx) to dash-format (toolu-xxx) in previously persisted messages.
         """
         if not self.messages:
             return
         
+        import re
+        def _norm(tid: str) -> str:
+            """Normalize tool ID for comparison (handles mixed underscore/dash formats).
+            
+            Matches the Anthropic sanitization regex at build_messages() line ~933:
+            re.sub(r'[^a-zA-Z0-9-]', '-', tid)
+            """
+            return re.sub(r'[^a-zA-Z0-9-]', '-', tid) if tid else ""
+        
         # First pass: collect valid tool_call_id → result pairs
         # Walk forward to check which tool_uses have results
-        tool_use_to_results = {}  # assistant_idx → set of tool_call_ids that got results
+        tool_use_to_results = {}  # assistant_idx → set of normalized tool_call_ids that got results
         current_assistant_idx = None
         current_tool_ids = set()
         
@@ -587,7 +600,7 @@ class ContextWindow:
                 current_assistant_idx = i
                 current_tool_ids = set()
             elif msg.role == "tool" and msg.tool_call_id and current_assistant_idx is not None:
-                current_tool_ids.add(msg.tool_call_id)
+                current_tool_ids.add(_norm(msg.tool_call_id))
             elif msg.role in ("user", "assistant") and not (msg.role == "assistant" and msg.tool_calls):
                 if current_assistant_idx is not None:
                     tool_use_to_results[current_assistant_idx] = current_tool_ids.copy()
@@ -599,13 +612,13 @@ class ContextWindow:
         
         # Second pass: build clean message list
         clean_messages = []
-        expected_tool_ids = set()
+        expected_tool_ids = set()  # normalized IDs
         
         for i, msg in enumerate(self.messages):
             if msg.role == "assistant" and msg.tool_calls:
                 # Check if this assistant's tool_calls have results
                 result_ids = tool_use_to_results.get(i, set())
-                expected_ids = {tc["id"] for tc in msg.tool_calls}
+                expected_ids = {_norm(tc["id"]) for tc in msg.tool_calls}
                 
                 if not result_ids:
                     # No results at all — strip tool_calls, keep text if any
@@ -620,7 +633,7 @@ class ContextWindow:
                 else:
                     if result_ids != expected_ids:
                         # Partial results — filter tool_calls to matched ones only
-                        filtered_calls = [tc for tc in msg.tool_calls if tc["id"] in result_ids]
+                        filtered_calls = [tc for tc in msg.tool_calls if _norm(tc["id"]) in result_ids]
                         if filtered_calls:
                             clean_messages.append(Message(
                                 role="assistant",
@@ -640,9 +653,9 @@ class ContextWindow:
                         clean_messages.append(msg)
                         expected_tool_ids = expected_ids
             elif msg.role == "tool" and msg.tool_call_id:
-                if msg.tool_call_id in expected_tool_ids:
+                if _norm(msg.tool_call_id) in expected_tool_ids:
                     clean_messages.append(msg)
-                    expected_tool_ids.discard(msg.tool_call_id)
+                    expected_tool_ids.discard(_norm(msg.tool_call_id))
                 else:
                     logger.warning(f"Removing orphaned tool result: {msg.tool_call_id}")
             else:
