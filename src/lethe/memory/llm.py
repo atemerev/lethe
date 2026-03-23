@@ -1261,7 +1261,7 @@ class AsyncLLMClient:
         """
         import asyncio
         
-        MAX_CONTINUATION_DEPTH = 2  # Max auto-continues (total iterations = up to 3 * max_tool_iterations)
+        MAX_CONTINUATION_DEPTH = 4  # Max auto-continues (total iterations = up to 5 * max_tool_iterations)
         MAX_TOOL_ERRORS = 8
         MAX_REPEATED_TOOL_CALLS = 4
         MAX_NO_PROGRESS_TURNS = 4
