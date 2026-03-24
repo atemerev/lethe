@@ -329,6 +329,34 @@ class ActorSystem:
             content[:180],
         )
 
+        # Subagent task completions — relay to user via cortex decision.
+        _TERMINAL_KINDS = {"done", "failed", "error", "max_turns"}
+        if (
+            metadata.get("channel") == "task_update"
+            and metadata.get("kind") in _TERMINAL_KINDS
+            and sender_name not in {"brainstem", "dmn", "amygdala"}
+        ):
+            if self._decide_user_notify and self._send_to_user:
+                try:
+                    relay_message = await self._decide_user_notify(sender_name, content, metadata)
+                    relay_text = (relay_message or "").strip()
+                    if relay_text:
+                        await self._send_to_user(relay_text)
+                        if self.principal:
+                            self.registry.emit_event(
+                                "background_notify_relayed_to_user",
+                                self.principal,
+                                {
+                                    "from_actor_id": message.sender,
+                                    "from_actor_name": sender_name,
+                                    "message_preview": relay_text[:240],
+                                    "trigger": "task_update",
+                                },
+                            )
+                except Exception as e:
+                    logger.warning("Subagent notify decision failed: %s", e)
+            return
+
         # Background processes can ask cortex to notify the user.
         # System actors never bypass cortex: relay decision is always cortex-owned.
         if metadata.get("channel") != "user_notify":
