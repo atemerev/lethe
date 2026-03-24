@@ -340,10 +340,15 @@ class TelegramBot:
                     # Fallback to no parsing if markdown fails
                     await self.bot.send_message(chat_id, chunk, parse_mode=None)
                 await asyncio.sleep(0.1)
-            
-            # Pause between segments (natural typing feel)
+
+            # Human-like pause: think time + typing time + jitter
             if i < len(segments) - 1:
-                await asyncio.sleep(1.0 + len(segment) / 500)  # Longer pause for longer messages
+                import random
+                think = random.uniform(1.5, 3.0)
+                typing = len(segment) * 0.03  # ~33 chars/sec phone typing
+                pause = min(think + typing, 10.0)  # cap at 10s
+                pause *= random.uniform(0.8, 1.3)  # ±jitter
+                await asyncio.sleep(pause)
 
     async def send_photo(self, chat_id: int, photo_path: str, caption: str = ""):
         """Send a photo to chat."""

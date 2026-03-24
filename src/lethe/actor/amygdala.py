@@ -97,7 +97,7 @@ class Amygdala:
 
     async def run_round(self) -> Optional[str]:
         round_started_at = datetime.now(timezone.utc)
-        timestamp = round_started_at.strftime("%Y-%m-%d %H:%M UTC")
+        timestamp = round_started_at.astimezone().strftime("%Y-%m-%d %H:%M %Z")
         self._status["state"] = "running"
         self._status["last_started_at"] = round_started_at.isoformat()
         self._status["last_error"] = ""
@@ -382,7 +382,7 @@ class Amygdala:
 
             keep = lines[-TAG_LOG_KEEP_LINES:] if len(lines) > TAG_LOG_KEEP_LINES else lines
             pruned = max(0, len(lines) - len(keep))
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
             header = [
                 f"# Emotional tags (compacted at {now})",
                 f"- pruned_lines: {pruned}",

@@ -279,5 +279,7 @@ def test_context_build_messages_preserves_large_multimodal_image_payload(monkeyp
     assert user_messages, "Expected at least one user message in built context"
     latest_user = user_messages[-1]
     assert isinstance(latest_user.get("content"), list)
-    assert latest_user["content"][1]["type"] == "image_url"
-    assert latest_user["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    # Index 0 is the timestamp text part, 1 is "look", 2 is the image
+    assert latest_user["content"][0]["type"] == "text"  # timestamp
+    assert latest_user["content"][2]["type"] == "image_url"
+    assert latest_user["content"][2]["image_url"]["url"].startswith("data:image/jpeg;base64,")

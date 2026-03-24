@@ -560,7 +560,7 @@ class Agent:
         if captured_at:
             try:
                 dt = datetime.fromisoformat(captured_at)
-                ts_attr = f' timestamp="{dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")}"'
+                ts_attr = f' timestamp="{dt.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")}"'
             except Exception:
                 pass
 
@@ -602,7 +602,7 @@ class Agent:
             transient_parts.append(quota_block)
 
         if recall_context:
-            recall_ts = datetime.now(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+            recall_ts = datetime.now().astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
             transient_parts.append(
                 f"<recall_block source=\"hippocampus\" timestamp=\"{recall_ts}\">\n"
                 f"{recall_context}\n"

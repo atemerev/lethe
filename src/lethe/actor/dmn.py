@@ -140,7 +140,7 @@ class DefaultModeNetwork:
             Message to send to user, or None if nothing urgent
         """
         round_started_at = datetime.now(timezone.utc)
-        timestamp = round_started_at.strftime("%Y-%m-%d %H:%M UTC")
+        timestamp = round_started_at.astimezone().strftime("%Y-%m-%d %H:%M %Z")
         self._status["state"] = "running"
         self._status["last_started_at"] = round_started_at.isoformat()
         self._status["last_error"] = ""

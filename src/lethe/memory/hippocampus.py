@@ -527,7 +527,7 @@ class Hippocampus:
         dt = cls._parse_created_at(value)
         if not dt:
             return "unknown-time"
-        return dt.astimezone(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        return dt.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
     
     def _format_memories(
         self,

@@ -219,13 +219,13 @@ class Message:
         return " ".join(texts)
     
     def format_timestamp(self) -> str:
-        """Format timestamp for context display."""
+        """Format timestamp for context display (local timezone)."""
         if self.created_at:
             dt = self.created_at
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            dt = dt.astimezone(timezone.utc)
-            return dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+            dt = dt.astimezone()  # convert to system local tz
+            return dt.strftime("%a %Y-%m-%d %H:%M:%S %Z")
         return ""
 
 
@@ -289,14 +289,14 @@ class ContextWindow:
 
     @staticmethod
     def _format_block_timestamp(value: Optional[datetime]) -> str:
-        """Format block timestamps with weekday and explicit UTC marker."""
+        """Format block timestamps with weekday (local timezone)."""
         if not value:
             return ""
         dt = value
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(timezone.utc)
-        return dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        dt = dt.astimezone()  # convert to system local tz
+        return dt.strftime("%a %Y-%m-%d %H:%M:%S %Z")
 
     @staticmethod
     def _xml_attr(value: Any) -> str:
@@ -875,15 +875,31 @@ class ContextWindow:
                         f"Truncated oversized message ({original_len:,} → {MAX_MESSAGE_CHARS:,} chars)"
                     )
 
-            # Keep conversation turns plain to avoid response-style contamination.
-            # Timestamps remain available via memory/recall system blocks and created_at ordering.
+            # Stamp user messages with wall-clock time so the model knows
+            # exactly when each message arrived and how much time elapsed.
+            # Only real user turns — skip synthetic markers that carry their own timestamps.
+            if (
+                msg.role == "user"
+                and isinstance(content, str)
+                and not content.startswith("[System Heartbeat")
+                and "<time_passed_block " not in content
+            ):
+                ts = msg.format_timestamp()
+                if ts:
+                    content = f"[{ts}]\n{content}"
+
             if isinstance(content, str):
                 if msg.role == "assistant" and msg.tool_calls and not content.strip():
                     # Tool-calling assistant with no text content — keep as-is.
                     pass
             elif isinstance(content, list) and msg.role in ("user", "assistant"):
-                # Preserve multimodal payload as provided.
+                # Preserve multimodal payload; stamp user turns with time.
                 content = list(content)
+                if msg.role == "user":
+                    ts = msg.format_timestamp()
+                    if ts:
+                        # Prepend timestamp as a text part
+                        content.insert(0, {"type": "text", "text": f"[{ts}]"})
             
             m = {"role": msg.role, "content": content}
             if msg.name:

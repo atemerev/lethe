@@ -138,7 +138,7 @@ class Heartbeat:
     
     async def _send_heartbeat(self):
         """Send a heartbeat message to the agent."""
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
         now = datetime.now(timezone.utc)
         first_tick = self._heartbeat_count == 0
         

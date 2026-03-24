@@ -118,7 +118,7 @@ class ActorMessage:
         dt = self.created_at
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        ts = dt.astimezone(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        ts = dt.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
         reply = f" (reply to {self.reply_to})" if self.reply_to else ""
         return f"[{ts}] {self.sender}{reply}: {self.content}"
 
@@ -499,7 +499,7 @@ class Actor:
                 dt = m.created_at
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                ts = dt.astimezone(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+                ts = dt.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
                 content = m.content[:limits["content_chars"]]
                 if len(m.content) > limits["content_chars"]:
                     content += "...[truncated]"

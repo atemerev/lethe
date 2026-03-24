@@ -147,14 +147,14 @@ class MemoryStore:
 
     @staticmethod
     def _format_timestamp(dt) -> str:
-        """Format timestamps with weekday and UTC marker."""
+        """Format timestamps with weekday (local timezone)."""
         from datetime import timezone
         if not dt:
             return ""
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(timezone.utc)
-        return dt.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        dt = dt.astimezone()  # convert to system local tz
+        return dt.strftime("%a %Y-%m-%d %H:%M:%S %Z")
 
     def _format_block(self, block: dict) -> str:
         """Format a single block for context."""

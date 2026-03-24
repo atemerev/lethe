@@ -127,13 +127,14 @@ def test_conversation_messages_stay_plain(monkeypatch):
 
     built = context.build_messages()
     assert built[1]["role"] == "user"
-    assert built[1]["content"] == "hello"
+    # User messages get a wall-clock timestamp prefix for temporal awareness.
+    ts = ts.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
+    assert built[1]["content"] == f"[{ts}]\nhello"
     assert built[2]["role"] == "assistant"
     assert built[2]["content"] == "hi"
     assert built[3]["role"] == "tool"
     assert built[3]["content"] == "ok"
-    # No timestamp prefix or XML wrappers in conversation turns.
-    assert not built[1]["content"].startswith("[Thu 2026-02-19")
+    # No XML wrappers in conversation turns.
     assert "<user_block" not in built[1]["content"]
 
 
