@@ -1040,6 +1040,16 @@ class AsyncLLMClient:
     # (conversation_search results contain previous search results, creating recursive bloat)
     _SKIP_PERSIST_TOOLS = {"conversation_search", "archival_search"}
     
+    # Tools that don't count toward the tool call iteration limit.
+    # Communication tools (telegram, actor messaging) and memory tools are "free"
+    # so the agent isn't penalized for keeping the user informed or managing memory.
+    _FREE_TOOLS = {
+        "telegram_send_message", "telegram_send_file", "telegram_react",
+        "send_message", "user_notify", "terminate",
+        "memory_read", "memory_update", "memory_append",
+        "conversation_search", "archival_search", "archival_insert",
+    }
+    
     def _add_and_persist(self, message: "Message"):
         """Add message to context and persist to storage."""
         self.context.add_message(message)
@@ -1311,7 +1321,12 @@ class AsyncLLMClient:
                 if tool_calls:
                     import uuid
                     empty_count = 0  # Reset on actual tool use
-                    total_tool_calls += len(tool_calls)
+                    # Only count non-free tools toward the iteration limit
+                    billable = sum(
+                        1 for tc in tool_calls
+                        if tc.get("function", {}).get("name", "").strip() not in self._FREE_TOOLS
+                    )
+                    total_tool_calls += billable
                     for tc in tool_calls:
                         # Generate ID if missing (some models omit it)
                         if not tc.get("id"):
