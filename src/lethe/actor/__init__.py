@@ -687,7 +687,7 @@ class ActorRegistry:
         actor = self._actors.get(actor_id)
         if not actor:
             return
-        
+
         result_text = (actor._result or "no result").strip()
         lowered = result_text.lower()
         is_failed = (
@@ -698,9 +698,13 @@ class ActorRegistry:
             or lowered.startswith("system shutdown")
         )
         status_kind = "failed" if is_failed else "done"
-        
+
         # Notify parent if exists and running
         parent = self._actors.get(actor.spawned_by) if actor.spawned_by else None
+        if not parent:
+            logger.info(f"Actor {actor.config.name} terminated with no parent (spawned_by={actor.spawned_by})")
+        elif parent.state != ActorState.RUNNING:
+            logger.warning(f"Actor {actor.config.name} terminated but parent {parent.config.name} state={parent.state}")
         if parent and parent.state == ActorState.RUNNING:
             msg = ActorMessage(
                 sender=actor_id,

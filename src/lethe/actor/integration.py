@@ -80,6 +80,7 @@ class ActorSystem:
         self._send_to_user: Optional[Callable] = None
         self._get_reminders: Optional[Callable] = None
         self._decide_user_notify: Optional[Callable[[str, str, dict], Awaitable[Optional[str]]]] = None
+        self._run_cortex_turn: Optional[Callable[[str], Awaitable[None]]] = None
 
     def _get_principal_context(self) -> str:
         """Build principal context for DMN from live memory blocks."""
@@ -152,6 +153,14 @@ class ActorSystem:
         for func, _ in actor_tools:
             self.agent.add_tool(func)
         
+        # Wire principal actor into the agent so it can drain inbox and see actor context.
+        self.agent._principal_actor = self.principal
+        def _principal_actor_context() -> str:
+            if self.principal:
+                return self.principal.build_system_prompt()
+            return ""
+        self.agent._actor_context_provider = _principal_actor_context
+
         # Hook spawn to auto-start actors in background
         original_spawn = self.registry.spawn
         def spawn_and_start(*args, **kwargs):
@@ -329,32 +338,32 @@ class ActorSystem:
             content[:180],
         )
 
-        # Subagent task completions — relay to user via cortex decision.
+        # Subagent task completions — trigger a full cortex turn so it can
+        # process the result and respond to the user with full tool access.
         _TERMINAL_KINDS = {"done", "failed", "error", "max_turns"}
+        channel = metadata.get("channel", "")
+        kind = metadata.get("kind", "")
+        logger.info(
+            "Principal message from %s: channel=%s kind=%s content=%s",
+            sender_name, channel, kind, content[:120],
+        )
         if (
-            metadata.get("channel") == "task_update"
-            and metadata.get("kind") in _TERMINAL_KINDS
+            channel == "task_update"
+            and kind in _TERMINAL_KINDS
             and sender_name not in {"brainstem", "dmn", "amygdala"}
         ):
-            if self._decide_user_notify and self._send_to_user:
+            synthetic = (
+                f"[System: subagent '{sender_name}' finished ({kind}). "
+                f"Its result is in your inbox. Review it and respond to the user.]"
+            )
+            if self._run_cortex_turn:
+                logger.info("Triggering cortex turn for subagent '%s' completion", sender_name)
                 try:
-                    relay_message = await self._decide_user_notify(sender_name, content, metadata)
-                    relay_text = (relay_message or "").strip()
-                    if relay_text:
-                        await self._send_to_user(relay_text)
-                        if self.principal:
-                            self.registry.emit_event(
-                                "background_notify_relayed_to_user",
-                                self.principal,
-                                {
-                                    "from_actor_id": message.sender,
-                                    "from_actor_name": sender_name,
-                                    "message_preview": relay_text[:240],
-                                    "trigger": "task_update",
-                                },
-                            )
+                    await self._run_cortex_turn(synthetic)
                 except Exception as e:
-                    logger.warning("Subagent notify decision failed: %s", e)
+                    logger.warning("Cortex turn for subagent completion failed: %s", e)
+            else:
+                logger.warning("No run_cortex_turn callback; subagent '%s' result stuck in inbox", sender_name)
             return
 
         # Background processes can ask cortex to notify the user.
@@ -420,17 +429,20 @@ class ActorSystem:
         send_to_user: Callable,
         get_reminders: Optional[Callable] = None,
         decide_user_notify: Optional[Callable[[str, str, dict], Awaitable[Optional[str]]]] = None,
+        run_cortex_turn: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         """Set callbacks for DMN and actor system.
-        
+
         Args:
             send_to_user: async Callable(message: str) -> None
             get_reminders: async Callable() -> str
             decide_user_notify: async Callable(from_actor, message, metadata) -> relay message or None
+            run_cortex_turn: async Callable(synthetic_message: str) -> None — triggers a full cortex LLM turn
         """
         self._send_to_user = send_to_user
         self._get_reminders = get_reminders
         self._decide_user_notify = decide_user_notify
+        self._run_cortex_turn = run_cortex_turn
         if self.dmn:
             self.dmn.send_to_user = send_to_user
             self.dmn.get_reminders = get_reminders

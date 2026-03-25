@@ -888,7 +888,7 @@ wheels = [
 
 [[package]]
 name = "lethe"
-version = "0.10.14"
+version = "0.10.18"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
@@ -928,7 +928,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "lancedb", specifier = ">=0.27.1" },
-    { name = "litellm", specifier = ">=1.81.6" },
+    { name = "litellm", specifier = ">=1.81.6,!=1.82.7,!=1.82.8" },
     { name = "nicegui", specifier = ">=3.7.1" },
     { name = "pillow", specifier = ">=12.1.0" },
     { name = "psutil", specifier = ">=7.2.2" },

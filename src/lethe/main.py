@@ -376,12 +376,37 @@ async def run():
     if actor_system:
         telegram_bot.actor_system = actor_system
     
+    async def run_cortex_turn(synthetic_message: str):
+        """Trigger a full cortex LLM turn with a synthetic system message.
+
+        Used when a subagent finishes so the cortex can process the result
+        and respond to the user proactively.
+        """
+        if not heartbeat_chat_id:
+            logger.warning("run_cortex_turn: no chat_id configured")
+            return
+        # No rate limiting — subagent results are responses to user-initiated tasks.
+        from lethe.tools import set_telegram_context, clear_telegram_context
+        set_telegram_context(telegram_bot.bot, heartbeat_chat_id)
+        try:
+            await telegram_bot.start_typing(heartbeat_chat_id)
+            response = await agent.chat(synthetic_message)
+            if response and response.strip():
+                await telegram_bot.send_message(heartbeat_chat_id, response)
+                mark_user_visible_activity("cortex subagent followup")
+        except Exception as e:
+            logger.exception("run_cortex_turn failed: %s", e)
+        finally:
+            await telegram_bot.stop_typing(heartbeat_chat_id)
+            clear_telegram_context()
+
     # Wire DMN callbacks (send_to_user, get_reminders)
     if actor_system:
         actor_system.set_callbacks(
             send_to_user=heartbeat_send,
             get_reminders=get_active_reminders,
             decide_user_notify=decide_user_notify,
+            run_cortex_turn=run_cortex_turn,
         )
 
     # Console monitoring pump for dynamic runtime subsystems.

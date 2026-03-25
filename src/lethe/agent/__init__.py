@@ -30,6 +30,10 @@ class Agent:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         
+        # Optional: actor system hooks (set by ActorSystem.setup)
+        self._actor_context_provider: Optional[Callable[[], str]] = None
+        self._principal_actor = None  # Set to the principal Actor by ActorSystem
+
         # Initialize memory store
         self.memory = MemoryStore(
             data_dir=str(self.settings.memory_dir),
@@ -567,6 +571,23 @@ class Agent:
         content = "\n".join(lines)
         return f'<subscription_quota_block source="anthropic"{ts_attr}>\n{content}\n</subscription_quota_block>'
 
+    def _drain_actor_inbox(self) -> str:
+        """Drain the principal actor's inbox and format messages for the LLM."""
+        actor = self._principal_actor
+        if not actor:
+            return ""
+        import asyncio
+        parts = []
+        while not actor._inbox.empty():
+            try:
+                msg = actor._inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            sender = actor.registry.get(msg.sender)
+            sender_name = sender.config.name if sender else msg.sender
+            parts.append(f"[From {sender_name}]: {msg.content}")
+        return "\n".join(parts)
+
     async def chat(
         self,
         message: str,
@@ -585,21 +606,40 @@ class Agent:
         Returns:
             Final assistant response
         """
+        # Drain principal actor inbox — subagent results, progress updates, etc.
+        # These get prepended to the user message so the cortex sees them naturally.
+        if self._actor_context_provider:
+            try:
+                inbox_text = self._drain_actor_inbox()
+                if inbox_text:
+                    message = f"{inbox_text}\n\n{message}"
+            except Exception:
+                pass
+
         # Store user message in history (original, without recall)
         self.memory.messages.add("user", message)
-        
+
         # Recall relevant memories (unless disabled)
         recall_context = None
         if use_hippocampus:
             recent = self.memory.messages.get_recent(10)
             recall_context = await self.hippocampus.recall(message, recent)
         
-        # Inject transient system context for this turn (quota + recall).
+        # Inject transient system context for this turn (quota + recall + actor inbox).
         transient_parts = []
 
         quota_block = self._build_quota_block()
         if quota_block:
             transient_parts.append(quota_block)
+
+        # Inject principal actor context (inbox, visible actors) if actor system is active.
+        if self._actor_context_provider:
+            try:
+                actor_ctx = self._actor_context_provider()
+                if actor_ctx:
+                    transient_parts.append(actor_ctx)
+            except Exception:
+                pass
 
         if recall_context:
             recall_ts = datetime.now().astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
