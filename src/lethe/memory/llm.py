@@ -61,20 +61,14 @@ PROVIDERS = {
     "openrouter": {
         "env_key": "OPENROUTER_API_KEY",
         "model_prefix": "openrouter/",
-        "default_model": "openrouter/moonshotai/kimi-k2.5-0127",
-        "default_model_aux": "openrouter/qwen/qwen3-coder-next",
     },
     "anthropic": {
         "env_key": "ANTHROPIC_API_KEY",
         "model_prefix": "",  # litellm auto-detects claude models
-        "default_model": "claude-opus-4-5-20251101",  # Claude Opus 4.5
-        "default_model_aux": "claude-haiku-4-5-20251001",  # Claude Haiku 4.5
     },
     "openai": {
         "env_key": "OPENAI_API_KEY",
         "model_prefix": "",  # litellm auto-detects gpt models
-        "default_model": "gpt-5.2",
-        "default_model_aux": "gpt-5.2",
     },
 }
 
@@ -127,17 +121,23 @@ class LLMConfig:
         
         prefix = provider_config["model_prefix"]
         
-        # Set model from provider default if not set
+        # Read model from env if not passed explicitly
         if not self.model:
-            self.model = provider_config["default_model"]
-        else:
-            # Add provider prefix if needed (for litellm)
-            if prefix and not self.model.startswith(prefix):
-                self.model = prefix + self.model
+            self.model = os.environ.get("LLM_MODEL", "")
+        if not self.model:
+            raise ValueError(
+                f"LLM_MODEL is required. Set it in .env for provider '{self.provider}'. "
+                f"Examples: claude-opus-4-6, openrouter/moonshotai/kimi-k2.5, gpt-5.2"
+            )
+        # Add provider prefix if needed (for litellm)
+        if prefix and not self.model.startswith(prefix):
+            self.model = prefix + self.model
         
-        # Set aux model (for heartbeats, summarization)
+        # Read aux model from env if not passed, defaults to main model
         if not self.model_aux:
-            self.model_aux = provider_config.get("default_model_aux", self.model)
+            self.model_aux = os.environ.get("LLM_MODEL_AUX", "")
+        if not self.model_aux:
+            self.model_aux = self.model
         else:
             if prefix and not self.model_aux.startswith(prefix):
                 self.model_aux = prefix + self.model_aux
