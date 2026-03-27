@@ -1,0 +1,3 @@
+aiogram>=3.24.0
+docker>=7.0.0
+httpx>=0.28.0

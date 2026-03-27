@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: lethe-gateway
+    restart: unless-stopped
+    env_file: gateway.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - gateway-state:/data/gateway
+      - user-workspaces:/data/lethe-users
+    environment:
+      - STATE_FILE=/data/gateway/state.json
+      - WORKSPACE_BASE=/data/lethe-users
+      - CONTAINER_ENV_FILE=/etc/lethe/worker.env
+      - DOCKER_NETWORK=lethe-net
+    networks:
+      - lethe-net
+
+volumes:
+  gateway-state:
+  user-workspaces:
+
+networks:
+  lethe-net:
+    driver: bridge

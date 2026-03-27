@@ -505,13 +505,190 @@ async def run():
         console.print("[green]Shutdown complete.[/green]")
 
 
+async def run_api(port: int = 8080):
+    """Run Lethe in HTTP API mode for gateway architecture."""
+    logger = logging.getLogger(__name__)
+
+    try:
+        settings = get_settings()
+    except Exception as e:
+        console.print(f"[red]Configuration error:[/red] {e}")
+        sys.exit(1)
+
+    console.print("[bold blue]Lethe[/bold blue] - API Mode")
+    console.print(f"Model: {settings.llm_model}")
+    console.print(f"Memory: {settings.memory_dir}")
+    console.print()
+
+    # Initialize agent
+    console.print("[dim]Initializing agent...[/dim]")
+    agent = Agent(settings)
+    await agent.initialize()
+    agent.refresh_memory_context()
+
+    # Initialize actor system
+    actor_system = None
+    if os.environ.get("ACTORS_ENABLED", "true").lower() == "true":
+        from lethe.actor.integration import ActorSystem
+        actor_system = ActorSystem(agent, settings=settings)
+        await actor_system.setup()
+        console.print("[cyan]Actor system[/cyan] initialized")
+
+    stats = agent.get_stats()
+    console.print(f"[green]Agent ready[/green] - {stats['memory_blocks']} blocks, {stats['archival_memories']} memories")
+
+    # Initialize conversation manager
+    conversation_manager = ConversationManager(debounce_seconds=settings.debounce_seconds)
+
+    # Set up the API module globals
+    from lethe import api as api_module
+    api_module._agent = agent
+    api_module._conversation_manager = conversation_manager
+    api_module._actor_system = actor_system
+    api_module._settings = settings
+
+    # Initialize heartbeat with proactive messages going to /events SSE
+    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 15 * 60))
+    heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
+
+    async def heartbeat_process(message: str) -> str:
+        if actor_system:
+            await actor_system.brainstem_heartbeat(message)
+            result = await actor_system.background_round()
+            return result or "ok"
+        return await agent.heartbeat(message)
+
+    async def heartbeat_full_context(message: str) -> str:
+        if actor_system:
+            await actor_system.brainstem_heartbeat(message)
+            result = await actor_system.background_round()
+            return result or "ok"
+        return await agent.chat(message, use_hippocampus=False)
+
+    async def heartbeat_send(response: str):
+        await api_module.send_proactive(response)
+
+    async def heartbeat_summarize(prompt: str) -> str:
+        return await agent.llm.complete(prompt, use_aux=True)
+
+    async def heartbeat_idle(minutes_passed: int):
+        agent.llm.note_idle_interval(minutes_passed)
+
+    async def get_active_reminders() -> str:
+        from lethe.todos import TodoManager
+        todo_manager = TodoManager(settings.db_path)
+        todos = await todo_manager.list(status="pending")
+        if not todos:
+            return ""
+        lines = []
+        for todo in todos[:10]:
+            priority = todo.get("priority", "normal")
+            due = todo.get("due_at", "")
+            due_str = f" (due: {due})" if due else ""
+            lines.append(f"- [{priority}] {todo['title']}{due_str}")
+        return "\n".join(lines)
+
+    heartbeat = Heartbeat(
+        process_callback=heartbeat_process,
+        send_callback=heartbeat_send,
+        summarize_callback=heartbeat_summarize,
+        full_context_callback=heartbeat_full_context,
+        get_reminders_callback=get_active_reminders,
+        idle_callback=heartbeat_idle,
+        interval=heartbeat_interval,
+        enabled=heartbeat_enabled,
+    )
+    api_module._heartbeat = heartbeat
+
+    # Wire actor system callbacks
+    if actor_system:
+        async def decide_user_notify(from_actor_name: str, notify_text: str, metadata: dict) -> Optional[str]:
+            return None  # Gateway handles proactive decisions
+
+        async def run_cortex_turn(synthetic_message: str):
+            from lethe.tools import set_telegram_context, clear_telegram_context
+            from lethe.proxy_bot import ProxyBot
+            proxy = ProxyBot(api_module._proactive_queue)
+            set_telegram_context(proxy, 0)
+            try:
+                response = await agent.chat(synthetic_message)
+                if response and response.strip():
+                    await api_module.send_proactive(response)
+            except Exception as e:
+                logger.exception("run_cortex_turn failed: %s", e)
+            finally:
+                clear_telegram_context()
+
+        actor_system.set_callbacks(
+            send_to_user=heartbeat_send,
+            get_reminders=get_active_reminders,
+            decide_user_notify=decide_user_notify,
+            run_cortex_turn=run_cortex_turn,
+        )
+
+    # Set up shutdown handling
+    shutdown_event = asyncio.Event()
+
+    def signal_handler():
+        logger.info("Received shutdown signal...")
+        shutdown_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
+
+    # Start uvicorn
+    import uvicorn
+    config = uvicorn.Config(
+        api_module.app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+
+    console.print(f"[green]API server starting on port {port}[/green]")
+
+    heartbeat_task = asyncio.create_task(heartbeat.start())
+    server_task = asyncio.create_task(server.serve())
+
+    try:
+        await shutdown_event.wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        console.print("\n[yellow]Shutting down...[/yellow]")
+        server.should_exit = True
+        try:
+            async with asyncio.timeout(5):
+                if actor_system:
+                    await actor_system.shutdown()
+                await heartbeat.stop()
+                await agent.close()
+        except asyncio.TimeoutError:
+            logger.warning("Shutdown timed out, forcing exit")
+            os._exit(0)
+
+        heartbeat_task.cancel()
+        server_task.cancel()
+        for t in (heartbeat_task, server_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+        console.print("[green]Shutdown complete.[/green]")
+
+
 def main():
     """CLI entry point."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Lethe - Autonomous AI Assistant")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
-    
+    parser.add_argument("--api", action="store_true", help="Run in HTTP API mode (for gateway)")
+    parser.add_argument("--api-port", type=int, default=8080, help="HTTP API port (default: 8080)")
+
     subparsers = parser.add_subparsers(dest="command")
     oauth_parser = subparsers.add_parser(
         "oauth-login",
@@ -524,7 +701,7 @@ def main():
         default="anthropic",
         help="OAuth provider (default: anthropic)",
     )
-    
+
     args = parser.parse_args()
 
     # Handle subcommands
@@ -535,8 +712,14 @@ def main():
 
     setup_logging(verbose=args.verbose)
 
+    # Check for API mode (CLI flag or env var)
+    api_mode = args.api or os.environ.get("LETHE_MODE", "").lower() == "api"
+
     try:
-        asyncio.run(run())
+        if api_mode:
+            asyncio.run(run_api(port=args.api_port))
+        else:
+            asyncio.run(run())
     except KeyboardInterrupt:
         pass
 

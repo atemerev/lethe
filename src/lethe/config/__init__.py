@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
 
     # Telegram
-    telegram_bot_token: str = Field(..., description="Telegram bot token from BotFather")
+    telegram_bot_token: str = Field(default="", description="Telegram bot token from BotFather")
     telegram_allowed_user_ids: str = Field(
         default="",
         description="Comma-separated list of allowed Telegram user IDs (empty = allow all)",
