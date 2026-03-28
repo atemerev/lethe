@@ -84,6 +84,10 @@ class Settings(BaseSettings):
         default=True,
         description="Enable Amygdala emotional salience actor (heartbeat-triggered, aux model)",
     )
+    consolidation_enabled: bool = Field(
+        default=True,
+        description="Enable memory consolidation (background memory compression, aux model)",
+    )
 
     # Proactive messaging limits (hard enforcement, not prompt-dependent)
     proactive_max_per_day: int = Field(

@@ -21,6 +21,7 @@ from lethe.actor.runner import ActorRunner
 from lethe.actor.dmn import DefaultModeNetwork
 from lethe.actor.amygdala import Amygdala
 from lethe.actor.brainstem import Brainstem
+from lethe.actor.consolidation import MemoryConsolidation
 from lethe.config import Settings, get_settings
 from lethe.memory.llm import AsyncLLMClient, LLMConfig
 
@@ -68,6 +69,7 @@ class ActorSystem:
         self.brainstem: Optional[Brainstem] = None
         self.dmn: Optional[DefaultModeNetwork] = None
         self.amygdala: Optional[Amygdala] = None
+        self.consolidation: Optional[MemoryConsolidation] = None
         self._background_tasks: Dict[str, asyncio.Task] = {}
         self._principal_monitor_task: Optional[asyncio.Task] = None
         self._processed_principal_message_ids: set[str] = set()
@@ -166,7 +168,7 @@ class ActorSystem:
         def spawn_and_start(*args, **kwargs):
             actor = original_spawn(*args, **kwargs)
             # Auto-start non-principal actors, but NOT background supervisors.
-            if not actor.is_principal and actor.config.name not in {"brainstem", "dmn", "amygdala"}:
+            if not actor.is_principal and actor.config.name not in {"brainstem", "dmn", "amygdala", "consolidation"}:
                 self._start_actor(actor)
             return actor
         self.registry.spawn = spawn_and_start
@@ -206,13 +208,25 @@ class ActorSystem:
                 principal_context_provider=self._get_principal_context,
             )
         
+        # Initialize Memory Consolidation — slow-cadence memory compression
+        if getattr(self.settings, "consolidation_enabled", True):
+            self.consolidation = MemoryConsolidation(
+                registry=self.registry,
+                llm_factory=self._create_llm_for_actor,
+                available_tools=self._available_tools,
+                cortex_id=self.principal.id,
+                send_to_user=self._send_to_user or (lambda msg: asyncio.sleep(0)),
+            )
+
         tool_count = len(self.agent.llm._tools)
         available_count = len(self._available_tools)
         amygdala_state = "enabled" if self.amygdala else "disabled"
+        consolidation_state = "enabled" if self.consolidation else "disabled"
         logger.info(
             f"Actor system initialized. Principal: {self.principal.id}, "
             f"cortex tools: {tool_count}, subagent tools available: {available_count}, "
-            f"Brainstem online, DMN ready, Amygdala {amygdala_state}"
+            f"Brainstem online, DMN ready, Amygdala {amygdala_state}, "
+            f"Consolidation {consolidation_state}"
         )
         self._start_principal_monitor()
 
@@ -448,6 +462,8 @@ class ActorSystem:
             self.dmn.get_reminders = get_reminders
         if self.amygdala:
             self.amygdala.send_to_user = send_to_user
+        if self.consolidation:
+            self.consolidation.send_to_user = send_to_user
 
     async def dmn_round(self) -> Optional[str]:
         """Run a DMN round. Called by heartbeat timer.
@@ -465,6 +481,15 @@ class ActorSystem:
             return None
         return await self.amygdala.run_round()
 
+    async def consolidation_round(self) -> Optional[str]:
+        """Run a consolidation round. Called by heartbeat timer.
+
+        Self-gating: the module internally checks cadence/capacity triggers.
+        """
+        if self.consolidation is None:
+            return None
+        return await self.consolidation.run_round()
+
     async def brainstem_heartbeat(self, heartbeat_message: str = "") -> Optional[str]:
         """Run Brainstem supervisory checks (main heartbeat cadence)."""
         if self.brainstem is None:
@@ -473,9 +498,10 @@ class ActorSystem:
         return None
 
     async def background_round(self) -> Optional[str]:
-        """Run background cognition rounds (DMN + Amygdala)."""
+        """Run background cognition rounds (DMN + Amygdala + Consolidation)."""
         dmn_result = await self.dmn_round()
         amygdala_result = await self.amygdala_round()
+        await self.consolidation_round()  # self-gating, no user-facing output
         return dmn_result or amygdala_result
 
     async def shutdown(self):
