@@ -22,7 +22,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install agent-browser for browser automation (with Playwright deps)
-RUN npm install -g agent-browser && agent-browser install --with-deps
+# On ARM64 (e.g., AWS Graviton), Chrome for Testing isn't available;
+# install system chromium instead and skip agent-browser's bundled Chrome.
+RUN npm install -g agent-browser && \
+    if agent-browser install --with-deps 2>/dev/null; then \
+        echo "agent-browser installed with bundled Chrome"; \
+    else \
+        apt-get update && apt-get install -y --no-install-recommends chromium && \
+        rm -rf /var/lib/apt/lists/* && \
+        echo "Installed system chromium for ARM64"; \
+    fi
+ENV CHROME_PATH=/usr/bin/chromium
 
 # Install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
