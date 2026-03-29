@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 # Tools the cortex keeps (hybrid mode: actor + quick CLI/file + memory + telegram)
 CORTEX_TOOL_NAMES = {
     # Actor tools (added by actor system)
-    'send_message', 'wait_for_response', 'discover_actors',
+    # NOTE: wait_for_response deliberately excluded — cortex should NOT poll.
+    # Subagent completions are delivered automatically via the principal monitor.
+    'send_message', 'discover_actors',
     'terminate', 'spawn_actor', 'kill_actor', 'ping_actor',
     # CLI + file tools (cortex handles quick tasks directly)
     'bash', 'read_file', 'write_file', 'edit_file',

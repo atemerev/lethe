@@ -1041,13 +1041,16 @@ class AsyncLLMClient:
     _SKIP_PERSIST_TOOLS = {"conversation_search", "archival_search"}
     
     # Tools that don't count toward the tool call iteration limit.
-    # Communication tools (telegram, actor messaging) and memory tools are "free"
-    # so the agent isn't penalized for keeping the user informed or managing memory.
+    # Communication tools (telegram, actor messaging), memory tools, and actor
+    # coordination tools are "free" so the agent isn't penalized for keeping
+    # the user informed, managing memory, or coordinating subagents.
     _FREE_TOOLS = {
         "telegram_send_message", "telegram_send_file", "telegram_react",
         "send_message", "user_notify", "terminate",
         "memory_read", "memory_update", "memory_append",
         "conversation_search", "archival_search", "archival_insert",
+        "ping_actor", "wait_for_response", "discover_actors",
+        "spawn_actor", "kill_actor",
     }
     
     def _add_and_persist(self, message: "Message"):

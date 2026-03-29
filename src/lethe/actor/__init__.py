@@ -38,7 +38,9 @@ PRINCIPAL_PROMPT_BLOCK = load_prompt_template(
         "- It benefits from isolation or parallel execution (long crawling, multi-source research, independent subtasks)\n"
         "- You want parallel execution (multiple independent tasks)\n"
         "Be specific in subagent goals - they only know what you tell them.\n"
-        "Monitor subagents with ping_actor(). Kill stuck ones with kill_actor().\n\n"
+        "After spawning, respond to the user immediately ('Working on it' etc) and MOVE ON.\n"
+        "Do NOT poll or wait — you'll be notified automatically when the subagent finishes.\n"
+        "Kill stuck ones with kill_actor().\n\n"
         "CRITICAL - NEVER spawn duplicates:\n"
         "- ALWAYS call discover_actors() BEFORE spawning to see who's already running\n"
         "- If an actor with similar goals exists, send_message() to it instead\n"
@@ -62,12 +64,13 @@ PRINCIPAL_RULES_BLOCK = load_prompt_template(
     fallback=(
         "- Handle quick tasks directly (bash, file ops). Spawn subagents for long/complex work.\n"
         "- Use `spawn_actor(name, goals, tools, ...)` - be DETAILED in goals\n"
-        "- Use `ping_actor(actor_id)` to check what a subagent is doing\n"
+        "- After spawning, tell the user you've started the task and FINISH YOUR TURN\n"
+        "- You'll be automatically notified when a subagent completes — do NOT poll or loop\n"
+        "- Use `ping_actor(actor_id)` ONLY if the user asks about progress or it's been very long\n"
         "- Use `kill_actor(actor_id)` to terminate a stuck child\n"
         "- Use `send_message(actor_id, content)` to give instructions or ask for status\n"
         "- Use `discover_actors()` to see all active actors\n"
-        "- Use `discover_recently_finished()` to inspect recent completed work\n"
-        "- Wait for subagent results, then report to the user"
+        "- Use `discover_recently_finished()` to inspect recent completed work"
     ),
 )
 

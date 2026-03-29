@@ -214,7 +214,7 @@ class PoolManager:
                         self._save_state()
                         logger.info("Container %s is ready (idle)", info.container_name)
                         return
-                except (httpx.ConnectError, httpx.ReadTimeout):
+                except httpx.RequestError:
                     pass
                 await asyncio.sleep(2)
 

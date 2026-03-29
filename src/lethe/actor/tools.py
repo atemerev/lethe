@@ -59,14 +59,18 @@ def create_actor_tools(actor: "Actor", registry: "ActorRegistry") -> list:
         )
         return f"Message sent (id={msg.id}) to {target.config.name} ({actor_id})"
 
-    async def wait_for_response(timeout: int = 60) -> str:
+    async def wait_for_response(timeout: int = 120) -> str:
         """Wait for a message from another actor.
         
-        Blocks until a message arrives or timeout. Use this after sending
-        a message when you need the response before continuing.
+        Blocks until a message arrives or timeout. Use this after spawning
+        a subagent or sending a message when you need the response.
+        
+        IMPORTANT: Use a generous timeout (120-300s) for subagents doing
+        complex work. Do NOT call ping_actor in a loop — just wait here.
+        The subagent will message you when done.
         
         Args:
-            timeout: Seconds to wait (default 60)
+            timeout: Seconds to wait (default 120, use 300 for complex tasks)
             
         Returns:
             The message content, or timeout notice
