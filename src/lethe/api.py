@@ -169,6 +169,29 @@ async def send_proactive(content: str):
     })
 
 
+async def serve_file(request: Request):
+    """Serve a file from the container filesystem.
+    
+    Used by the gateway to fetch files that the agent created
+    (e.g. generated images, exports) when the container path
+    isn't directly accessible from the host.
+    """
+    from starlette.responses import FileResponse
+    
+    path = request.query_params.get("path", "")
+    if not path:
+        return JSONResponse({"error": "path parameter required"}, status_code=400)
+    
+    from pathlib import Path as P
+    p = P(path)
+    if not p.exists():
+        return JSONResponse({"error": f"not found: {path}"}, status_code=404)
+    if not p.is_file():
+        return JSONResponse({"error": f"not a file: {path}"}, status_code=400)
+    
+    return FileResponse(p)
+
+
 # Starlette app
 app = Starlette(
     routes=[
@@ -177,5 +200,6 @@ app = Starlette(
         Route("/cancel", cancel, methods=["POST"]),
         Route("/configure", configure, methods=["POST"]),
         Route("/events", events, methods=["GET"]),
+        Route("/file", serve_file, methods=["GET"]),
     ],
 )

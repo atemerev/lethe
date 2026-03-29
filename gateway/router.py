@@ -55,7 +55,7 @@ class Router:
                         await self.bot.send_message(chat_id, "Sorry, something went wrong. Please try again.")
                         return
 
-                    await self._consume_sse(response, chat_id)
+                    await self._consume_sse(response, chat_id, container)
         except httpx.ConnectError:
             logger.error("Cannot connect to container %s at %s", container.container_name, container.api_url)
             await self.bot.send_message(chat_id, "Your assistant is starting up, please try again in a moment.")
@@ -63,7 +63,7 @@ class Router:
             logger.exception("Error forwarding to container %s: %s", container.container_name, e)
             await self.bot.send_message(chat_id, f"Error: {e}")
 
-    async def _consume_sse(self, response: httpx.Response, chat_id: int):
+    async def _consume_sse(self, response: httpx.Response, chat_id: int, container: Optional[ContainerInfo] = None):
         """Parse SSE stream and relay events to Telegram."""
         event_type = ""
         data_buf = ""
@@ -80,13 +80,13 @@ class Router:
                         data = json.loads(data_buf)
                     except json.JSONDecodeError:
                         data = {}
-                    await self._handle_event(event_type, data, chat_id)
+                    await self._handle_event(event_type, data, chat_id, container)
                     if event_type == "done":
                         break
                 event_type = ""
                 data_buf = ""
 
-    async def _handle_event(self, event: str, data: dict, chat_id: int):
+    async def _handle_event(self, event: str, data: dict, chat_id: int, container: Optional[ContainerInfo] = None):
         """Handle a single SSE event by relaying to Telegram."""
         if event == "typing_start":
             await self._start_typing(chat_id)
@@ -109,7 +109,7 @@ class Router:
             await self._send_text(chat_id, content, parse_mode)
 
         elif event == "file":
-            await self._send_file(chat_id, data)
+            await self._send_file(chat_id, data, container)
 
         elif event == "reaction":
             emoji = data.get("emoji", "👍")
@@ -166,8 +166,15 @@ class Router:
                 pause *= random.uniform(0.8, 1.3)
                 await asyncio.sleep(pause)
 
-    async def _send_file(self, chat_id: int, data: dict):
-        """Send a file to Telegram based on event data."""
+    async def _send_file(self, chat_id: int, data: dict, container: Optional[ContainerInfo] = None):
+        """Send a file to Telegram based on event data.
+        
+        Files from containers aren't directly accessible on the host.
+        Strategy:
+        1. URLs → pass through to Telegram
+        2. /workspace/* paths → translate to host workspace_path mount
+        3. Other container paths → fetch via container's /file endpoint
+        """
         file_type = data.get("type", "document")
         path = data.get("path", "")
         caption = data.get("caption", "") or None
@@ -175,17 +182,13 @@ class Router:
         if not path:
             return
 
-        # Check if it's a URL or local path
-        is_url = path.startswith(("http://", "https://"))
-
-        if is_url:
+        # URLs pass through directly
+        if path.startswith(("http://", "https://")):
             file_input = path
         else:
-            p = Path(path)
-            if not p.exists():
-                logger.warning("File not found: %s", path)
+            file_input = await self._resolve_container_file(path, container)
+            if file_input is None:
                 return
-            file_input = FSInputFile(p)
 
         try:
             if file_type == "photo":
@@ -202,6 +205,52 @@ class Router:
                 await self.bot.send_document(chat_id, file_input, caption=caption)
         except Exception as e:
             logger.error("Failed to send %s: %s", file_type, e)
+
+    async def _resolve_container_file(self, container_path: str, container: Optional[ContainerInfo] = None) -> Optional[FSInputFile]:
+        """Resolve a container-internal path to a host-accessible FSInputFile.
+        
+        1. Try workspace path translation (/workspace/x → host_workspace/x)
+        2. Try direct host path (for non-containerized / single-host mode)
+        3. Fetch from container's /file endpoint as fallback
+        """
+        import tempfile
+        
+        # Strategy 1: Translate /workspace/ paths via the volume mount
+        if container and container.workspace_path and container_path.startswith("/workspace/"):
+            relative = container_path[len("/workspace/"):]
+            host_path = Path(container.workspace_path) / relative
+            if host_path.exists():
+                return FSInputFile(host_path)
+            logger.debug("Workspace translation miss: %s → %s", container_path, host_path)
+
+        # Strategy 2: Direct host path (works in non-containerized / single-host mode)
+        direct = Path(container_path)
+        if direct.exists():
+            return FSInputFile(direct)
+
+        # Strategy 3: Fetch from container's /file HTTP endpoint
+        if container:
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.get(
+                        f"{container.api_url}/file",
+                        params={"path": container_path},
+                    )
+                    if r.status_code == 200:
+                        # Save to temp file and send
+                        suffix = Path(container_path).suffix or ".bin"
+                        name = Path(container_path).name
+                        tmp = Path(tempfile.mkdtemp()) / name
+                        tmp.write_bytes(r.content)
+                        logger.info("Fetched file from container: %s (%d bytes)", container_path, len(r.content))
+                        return FSInputFile(tmp)
+                    else:
+                        logger.warning("Container /file returned %d for %s", r.status_code, container_path)
+            except Exception as e:
+                logger.warning("Failed to fetch file from container: %s", e)
+
+        logger.warning("File not found (all strategies exhausted): %s", container_path)
+        return None
 
     async def _start_typing(self, chat_id: int):
         if chat_id in self._typing_tasks:
@@ -266,7 +315,7 @@ class Router:
                                         data = json.loads(data_buf)
                                     except json.JSONDecodeError:
                                         data = {}
-                                    await self._handle_event(event_type, data, chat_id)
+                                    await self._handle_event(event_type, data, chat_id, container)
                                 event_type = ""
                                 data_buf = ""
             except asyncio.CancelledError:
