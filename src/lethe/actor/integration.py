@@ -354,9 +354,9 @@ class ActorSystem:
             content[:180],
         )
 
-        # Subagent task completions — trigger a full cortex turn so it can
-        # process the result and respond to the user with full tool access.
+        # Subagent task updates — trigger a cortex turn so it can decide how to respond.
         _TERMINAL_KINDS = {"done", "failed", "error", "max_turns"}
+        _NOTIFY_KINDS = _TERMINAL_KINDS | {"progress"}
         channel = metadata.get("channel", "")
         kind = metadata.get("kind", "")
         logger.info(
@@ -365,21 +365,27 @@ class ActorSystem:
         )
         if (
             channel == "task_update"
-            and kind in _TERMINAL_KINDS
+            and kind in _NOTIFY_KINDS
             and sender_name not in {"brainstem", "dmn", "amygdala"}
         ):
-            synthetic = (
-                f"[System: subagent '{sender_name}' finished ({kind}). "
-                f"Its result is in your inbox. Review it and respond to the user.]"
-            )
+            if kind in _TERMINAL_KINDS:
+                synthetic = (
+                    f"[System: subagent '{sender_name}' finished ({kind}). "
+                    f"Its result is in your inbox. Review it and respond to the user.]"
+                )
+            else:
+                synthetic = (
+                    f"[System: subagent '{sender_name}' progress update: {content[:200]}. "
+                    f"Let the user know if appropriate.]"
+                )
             if self._run_cortex_turn:
-                logger.info("Triggering cortex turn for subagent '%s' completion", sender_name)
+                logger.info("Triggering cortex turn for subagent '%s' %s", sender_name, kind)
                 try:
                     await self._run_cortex_turn(synthetic)
                 except Exception as e:
-                    logger.warning("Cortex turn for subagent completion failed: %s", e)
+                    logger.warning("Cortex turn for subagent %s failed: %s", kind, e)
             else:
-                logger.warning("No run_cortex_turn callback; subagent '%s' result stuck in inbox", sender_name)
+                logger.warning("No run_cortex_turn callback; subagent '%s' %s stuck in inbox", sender_name, kind)
             return
 
         # Background processes can ask cortex to notify the user.

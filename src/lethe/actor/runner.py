@@ -81,11 +81,34 @@ class ActorRunner:
                 except Exception as e:
                     logger.warning(f"Failed to notify parent: {e}")
 
+    async def _progress_timer(self, start_time: float):
+        """Background timer that sends progress updates to parent every 2 minutes."""
+        actor = self.actor
+        await asyncio.sleep(PROGRESS_NOTIFY_INTERVAL)  # First update after 2 min
+        while actor.state != ActorState.TERMINATED:
+            elapsed = int(time.monotonic() - start_time)
+            turn = actor._turns
+            last_response = getattr(actor, '_last_response', '') or ''
+            await self._notify_parent(
+                (
+                    f"{actor.config.name} still working (turn {turn}/{actor.config.max_turns}, "
+                    f"{elapsed}s elapsed). Last: {last_response[:100] if last_response else 'working...'}"
+                ),
+                metadata={"channel": "task_update", "kind": "progress"},
+            )
+            actor.registry.emit_event(
+                "actor_progress",
+                actor,
+                {"turn": turn, "max_turns": actor.config.max_turns, "elapsed_seconds": elapsed},
+            )
+            logger.info(f"Actor {actor.id} progress: turn {turn}, {elapsed}s elapsed")
+            await asyncio.sleep(PROGRESS_NOTIFY_INTERVAL)
+
     async def run(self) -> str:
         """Run the actor's LLM loop until completion or max turns."""
         actor = self.actor
         start_time = time.monotonic()
-        last_notify_time = start_time
+        progress_task: Optional[asyncio.Task] = None
         
         try:
             # Create LLM client for this actor
@@ -143,6 +166,12 @@ class ActorRunner:
             
             logger.info(f"Actor {actor.id} ({actor.config.name}) starting, tools: {len(llm._tools)}")
             
+            # Start background progress timer
+            progress_task = asyncio.create_task(
+                self._progress_timer(start_time),
+                name=f"progress-{actor.id}",
+            )
+            
             response = ""
             for turn in range(actor.config.max_turns):
                 actor._turns = turn + 1
@@ -193,26 +222,10 @@ class ActorRunner:
                     else:
                         message = "[Continue working on your goals. Call terminate(result) when done.]"
                 
-                # Check if we should notify parent about long-running task
-                elapsed = time.monotonic() - start_time
-                if elapsed - (last_notify_time - start_time) > PROGRESS_NOTIFY_INTERVAL:
-                    last_notify_time = time.monotonic()
-                    actor.registry.emit_event(
-                        "actor_progress",
-                        actor,
-                        {"turn": turn + 1, "max_turns": actor.config.max_turns, "elapsed_seconds": int(elapsed)},
-                    )
-                    await self._notify_parent(
-                        (
-                            f"{actor.config.name} still working (turn {turn + 1}/{actor.config.max_turns}, "
-                            f"{int(elapsed)}s elapsed). Last: {response[:100] if response else 'starting...'}"
-                        ),
-                        metadata={"channel": "task_update", "kind": "progress"},
-                    )
-                
                 # Call LLM
                 try:
                     response = await llm.chat(message)
+                    actor._last_response = response  # For progress timer
                 except Exception as e:
                     logger.error(f"Actor {actor.id} LLM error: {e}")
                     await self._notify_parent(
@@ -247,6 +260,14 @@ class ActorRunner:
                 metadata={"channel": "task_update", "kind": "fatal"},
             )
             actor.terminate(f"Runner error: {e}")
+        finally:
+            # Cancel progress timer
+            if progress_task and not progress_task.done():
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
         
         return actor._result or "No result"
 
