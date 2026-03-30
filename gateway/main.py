@@ -238,7 +238,8 @@ class Gateway:
             for name, model_id, pricing in models:
                 is_active = model_id == current and auth == current_auth
                 marker = "✅ " if is_active else ""
-                btn_text = f"{marker}{name} ({pricing})"
+                suffix = "" if auth == "sub" else f" ({pricing})"
+                btn_text = f"{marker}{name}{suffix}"
                 cb_data = f"{kind}:{auth}:{model_id}"
                 if len(cb_data) > 64:
                     cb_data = cb_data[:64]
