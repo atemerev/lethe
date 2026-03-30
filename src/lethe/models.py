@@ -1,8 +1,11 @@
 """Model catalog loader — single source of truth in config/model_catalog.json."""
 
 import json
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Resolve catalog path relative to project root (works for both direct and installed)
 _CATALOG_PATHS = [
@@ -23,20 +26,44 @@ def _load_catalog() -> dict:
 
 MODEL_CATALOG: dict = _load_catalog()
 
+# Provider → env key (or auth token fallback) used to detect availability
+_PROVIDER_KEYS = {
+    "openrouter": ["OPENROUTER_API_KEY"],
+    "anthropic": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+    "openai": ["OPENAI_API_KEY", "OPENAI_AUTH_TOKEN"],
+}
 
-def build_model_keyboard(provider: str, kind: str, current_model: str) -> list[list[dict]]:
-    """Build inline keyboard button data for model selection.
+# Short display labels for provider headers
+_PROVIDER_LABELS = {
+    "openrouter": "OpenRouter",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+}
 
-    Returns list of rows, each row is a list of {text, callback_data} dicts.
-    """
-    catalog = MODEL_CATALOG.get(provider, {})
-    models = catalog.get(kind, [])
-    rows = []
-    for name, model_id, pricing in models:
-        marker = "\u2705 " if model_id == current_model else ""
-        btn_text = f"{marker}{name} ({pricing})"
-        callback_data = f"{kind}:{model_id}"
-        if len(callback_data) > 64:
-            callback_data = callback_data[:64]
-        rows.append([{"text": btn_text, "callback_data": callback_data}])
-    return rows
+
+def get_available_providers() -> list[str]:
+    """Return list of providers that have API keys configured."""
+    available = []
+    for provider, keys in _PROVIDER_KEYS.items():
+        if provider not in MODEL_CATALOG:
+            continue
+        if any(os.environ.get(k) for k in keys):
+            available.append(provider)
+    return available
+
+
+def provider_for_model(model_id: str) -> str | None:
+    """Detect which provider a model_id belongs to based on catalog lookup."""
+    for provider, kinds in MODEL_CATALOG.items():
+        for kind_models in kinds.values():
+            for _name, mid, _price in kind_models:
+                if mid == model_id:
+                    return provider
+    # Fallback heuristics
+    if model_id.startswith("openrouter/"):
+        return "openrouter"
+    if "claude" in model_id.lower():
+        return "anthropic"
+    if "gpt" in model_id.lower():
+        return "openai"
+    return None

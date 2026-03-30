@@ -12,7 +12,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
-from lethe.models import MODEL_CATALOG, build_model_keyboard
+from lethe.models import MODEL_CATALOG, get_available_providers, provider_for_model, _PROVIDER_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -316,32 +316,44 @@ class TelegramBot:
                 logger.error(f"Failed to process document: {e}")
                 await message.answer(f"Failed to download file: {e}")
 
+    def _build_model_buttons(self, kind: str, current: str) -> list[list[InlineKeyboardButton]]:
+        """Build inline keyboard buttons for all available providers."""
+        providers = get_available_providers()
+        if not providers:
+            # Fallback: show current provider only
+            providers = [self.agent.llm.config.provider]
+
+        buttons = []
+        for provider in providers:
+            catalog = MODEL_CATALOG.get(provider, {})
+            models = catalog.get(kind, [])
+            if not models:
+                continue
+            # Provider header
+            label = _PROVIDER_LABELS.get(provider, provider)
+            buttons.append([InlineKeyboardButton(text=f"── {label} ──", callback_data="noop")])
+            for name, model_id, pricing in models:
+                marker = "✅ " if model_id == current else ""
+                btn_text = f"{marker}{name} ({pricing})"
+                cb_data = f"{kind}:{model_id}"
+                if len(cb_data) > 64:
+                    cb_data = cb_data[:64]
+                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+        return buttons
+
     async def _show_model_picker(self, message: Message, kind: str):
         """Show inline keyboard with model options for main or aux model."""
         if not self.agent:
             await message.answer("Agent not initialized yet.")
             return
 
-        provider = self.agent.llm.config.provider
-        catalog = MODEL_CATALOG.get(provider, {})
-        models = catalog.get(kind, [])
-
-        if not models:
-            await message.answer(f"No model catalog for provider '{provider}'.")
-            return
-
         current = self.agent.llm.config.model if kind == "main" else self.agent.llm.config.model_aux
         label = "Main model" if kind == "main" else "Aux model"
 
-        buttons = []
-        for name, model_id, pricing in models:
-            marker = "✅ " if model_id == current else ""
-            btn_text = f"{marker}{name} ({pricing})"
-            callback_data = f"{kind}:{model_id}"
-            # Telegram limits callback_data to 64 bytes
-            if len(callback_data) > 64:
-                callback_data = callback_data[:64]
-            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=callback_data)])
+        buttons = self._build_model_buttons(kind, current)
+        if not buttons:
+            await message.answer("No models available.")
+            return
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer(f"{label}: `{current}`\n\nSelect new model:", reply_markup=keyboard, parse_mode="Markdown")
@@ -353,6 +365,10 @@ class TelegramBot:
             return
 
         data = callback.data or ""
+        if data == "noop":
+            await callback.answer()
+            return
+
         if data.startswith("main:"):
             kind = "main"
             model_id = data[5:]
@@ -365,6 +381,13 @@ class TelegramBot:
 
         old_model = self.agent.llm.config.model if kind == "main" else self.agent.llm.config.model_aux
 
+        # Switch provider if model belongs to a different one
+        new_provider = provider_for_model(model_id)
+        if new_provider and new_provider != self.agent.llm.config.provider:
+            old_provider = self.agent.llm.config.provider
+            self.agent.llm.config.provider = new_provider
+            logger.info(f"Provider changed: {old_provider} → {new_provider}")
+
         if kind == "main":
             self.agent.llm.config.model = model_id
         else:
@@ -376,21 +399,10 @@ class TelegramBot:
         await callback.answer(f"Switched to {model_id}")
         # Update the message to reflect new selection
         try:
-            provider = self.agent.llm.config.provider
-            catalog = MODEL_CATALOG.get(provider, {})
-            models = catalog.get(kind, [])
-            current = model_id
-            buttons = []
-            for name, mid, pricing in models:
-                marker = "✅ " if mid == current else ""
-                btn_text = f"{marker}{name} ({pricing})"
-                cb_data = f"{kind}:{mid}"
-                if len(cb_data) > 64:
-                    cb_data = cb_data[:64]
-                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+            buttons = self._build_model_buttons(kind, model_id)
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.edit_text(
-                f"{label}: `{current}`\n\n✅ Switched from `{old_model}`",
+                f"{label}: `{model_id}`\n\n✅ Switched from `{old_model}`",
                 reply_markup=keyboard,
                 parse_mode="Markdown",
             )

@@ -19,7 +19,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 import httpx
 
 from gateway.config import GatewayConfig
-from gateway.models import MODEL_CATALOG
+from gateway.models import MODEL_CATALOG, PROVIDER_LABELS
 from gateway.pool import PoolManager
 from gateway.router import Router
 
@@ -222,6 +222,26 @@ class Gateway:
                         metadata=metadata,
                     )
 
+    @staticmethod
+    def _build_model_buttons(providers: list[str], kind: str, current: str) -> list[list[InlineKeyboardButton]]:
+        """Build inline keyboard buttons for all available providers."""
+        buttons = []
+        for provider in providers:
+            catalog = MODEL_CATALOG.get(provider, {})
+            models = catalog.get(kind, [])
+            if not models:
+                continue
+            label = PROVIDER_LABELS.get(provider, provider)
+            buttons.append([InlineKeyboardButton(text=f"── {label} ──", callback_data="noop")])
+            for name, model_id, pricing in models:
+                marker = "✅ " if model_id == current else ""
+                btn_text = f"{marker}{name} ({pricing})"
+                cb_data = f"{kind}:{model_id}"
+                if len(cb_data) > 64:
+                    cb_data = cb_data[:64]
+                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+        return buttons
+
     async def _show_model_picker(self, message: Message, container, kind: str):
         """Show inline keyboard with model options, fetching current model from worker."""
         try:
@@ -232,24 +252,14 @@ class Gateway:
             await message.answer(f"Failed to get model info: {e}")
             return
 
-        provider = data.get("provider", "openrouter")
+        providers = data.get("available_providers", [data.get("provider", "openrouter")])
         current = data.get("model") if kind == "main" else data.get("model_aux")
         label = "Main model" if kind == "main" else "Aux model"
 
-        catalog = MODEL_CATALOG.get(provider, {})
-        models = catalog.get(kind, [])
-        if not models:
-            await message.answer(f"No model catalog for provider '{provider}'.")
+        buttons = self._build_model_buttons(providers, kind, current)
+        if not buttons:
+            await message.answer("No models available.")
             return
-
-        buttons = []
-        for name, model_id, pricing in models:
-            marker = "✅ " if model_id == current else ""
-            btn_text = f"{marker}{name} ({pricing})"
-            cb_data = f"{kind}:{model_id}"
-            if len(cb_data) > 64:
-                cb_data = cb_data[:64]
-            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer(
@@ -261,6 +271,10 @@ class Gateway:
     async def _handle_model_selection(self, callback: CallbackQuery, container):
         """Handle model selection callback by updating the worker via API."""
         data = callback.data or ""
+        if data == "noop":
+            await callback.answer()
+            return
+
         if data.startswith("main:"):
             kind = "main"
             model_id = data[5:]
@@ -289,25 +303,13 @@ class Gateway:
 
         # Update keyboard to reflect new selection
         try:
-            provider_resp = result.get("model", "") or ""
-            # Re-fetch provider from previous GET to build keyboard
             async with httpx.AsyncClient(timeout=5) as client:
                 info = (await client.get(f"{container.api_url}/model")).json()
-            provider = info.get("provider", "openrouter")
-            current = model_id
-            catalog = MODEL_CATALOG.get(provider, {})
-            models = catalog.get(kind, [])
-            buttons = []
-            for name, mid, pricing in models:
-                marker = "✅ " if mid == current else ""
-                btn_text = f"{marker}{name} ({pricing})"
-                cb_data = f"{kind}:{mid}"
-                if len(cb_data) > 64:
-                    cb_data = cb_data[:64]
-                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+            providers = info.get("available_providers", [info.get("provider", "openrouter")])
+            buttons = self._build_model_buttons(providers, kind, model_id)
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.edit_text(
-                f"{label}: `{current}`\n\n✅ Switched from `{old_model}`",
+                f"{label}: `{model_id}`\n\n✅ Switched from `{old_model}`",
                 reply_markup=keyboard,
                 parse_mode="Markdown",
             )

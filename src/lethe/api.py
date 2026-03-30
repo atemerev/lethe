@@ -151,9 +151,11 @@ async def configure(request: Request) -> JSONResponse:
 async def model(request: Request) -> JSONResponse:
     """Get or set the main/aux model.
 
-    GET  /model          → {"model": "...", "model_aux": "...", "provider": "..."}
-    POST /model          → {"model": "new-id"} and/or {"model_aux": "new-id"}
+    GET  /model          → {"model", "model_aux", "provider", "available_providers"}
+    POST /model          → {"model"} and/or {"model_aux"}, auto-switches provider
     """
+    from lethe.models import get_available_providers, provider_for_model
+
     if not _agent:
         return JSONResponse({"error": "agent not initialized"}, status_code=503)
 
@@ -163,6 +165,7 @@ async def model(request: Request) -> JSONResponse:
             "model": config.model,
             "model_aux": config.model_aux,
             "provider": config.provider,
+            "available_providers": get_available_providers(),
         })
 
     body = await request.json()
@@ -171,7 +174,13 @@ async def model(request: Request) -> JSONResponse:
     changed = {}
 
     if "model" in body:
-        config.model = body["model"]
+        new_model = body["model"]
+        new_provider = provider_for_model(new_model)
+        if new_provider and new_provider != config.provider:
+            changed["provider"] = {"old": config.provider, "new": new_provider}
+            config.provider = new_provider
+            logger.info("Provider changed via API: %s → %s", changed["provider"]["old"], new_provider)
+        config.model = new_model
         changed["model"] = {"old": old_model, "new": config.model}
         logger.info("Model changed via API: %s → %s", old_model, config.model)
 
@@ -184,6 +193,7 @@ async def model(request: Request) -> JSONResponse:
         "status": "updated",
         "model": config.model,
         "model_aux": config.model_aux,
+        "provider": config.provider,
         "changed": changed,
     })
 

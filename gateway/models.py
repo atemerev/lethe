@@ -9,6 +9,12 @@ _CATALOG_PATHS = [
     Path(os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))) / "config" / "model_catalog.json",
 ]
 
+PROVIDER_LABELS = {
+    "openrouter": "OpenRouter",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+}
+
 
 def _load_catalog() -> dict:
     for p in _CATALOG_PATHS:
