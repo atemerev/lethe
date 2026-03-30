@@ -14,9 +14,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+
+import httpx
 
 from gateway.config import GatewayConfig
+from gateway.models import MODEL_CATALOG
 from gateway.pool import PoolManager
 from gateway.router import Router
 
@@ -91,6 +94,40 @@ class Gateway:
             for state, count in pool_status.get("by_state", {}).items():
                 lines.append(f"  {state}: {count}")
             await message.answer("\n".join(lines))
+
+        @dp.message(Command("model"))
+        async def cmd_model(message: Message):
+            user = message.from_user
+            if not user:
+                return
+            container = self.pool.get_container(user.id)
+            if not container:
+                await message.answer("No active session. Send /start first.")
+                return
+            await self._show_model_picker(message, container, "main")
+
+        @dp.message(Command("aux"))
+        async def cmd_aux(message: Message):
+            user = message.from_user
+            if not user:
+                return
+            container = self.pool.get_container(user.id)
+            if not container:
+                await message.answer("No active session. Send /start first.")
+                return
+            await self._show_model_picker(message, container, "aux")
+
+        @dp.callback_query(F.data.startswith("main:") | F.data.startswith("aux:"))
+        async def handle_model_callback(callback: CallbackQuery):
+            user = callback.from_user
+            if not user:
+                await callback.answer("Unauthorized")
+                return
+            container = self.pool.get_container(user.id)
+            if not container:
+                await callback.answer("No active session.")
+                return
+            await self._handle_model_selection(callback, container)
 
         @dp.message(F.text)
         async def handle_text(message: Message):
@@ -184,6 +221,98 @@ class Gateway:
                         message=text,
                         metadata=metadata,
                     )
+
+    async def _show_model_picker(self, message: Message, container, kind: str):
+        """Show inline keyboard with model options, fetching current model from worker."""
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{container.api_url}/model")
+                data = resp.json()
+        except Exception as e:
+            await message.answer(f"Failed to get model info: {e}")
+            return
+
+        provider = data.get("provider", "openrouter")
+        current = data.get("model") if kind == "main" else data.get("model_aux")
+        label = "Main model" if kind == "main" else "Aux model"
+
+        catalog = MODEL_CATALOG.get(provider, {})
+        models = catalog.get(kind, [])
+        if not models:
+            await message.answer(f"No model catalog for provider '{provider}'.")
+            return
+
+        buttons = []
+        for name, model_id, pricing in models:
+            marker = "✅ " if model_id == current else ""
+            btn_text = f"{marker}{name} ({pricing})"
+            cb_data = f"{kind}:{model_id}"
+            if len(cb_data) > 64:
+                cb_data = cb_data[:64]
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer(
+            f"{label}: `{current}`\n\nSelect new model:",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+
+    async def _handle_model_selection(self, callback: CallbackQuery, container):
+        """Handle model selection callback by updating the worker via API."""
+        data = callback.data or ""
+        if data.startswith("main:"):
+            kind = "main"
+            model_id = data[5:]
+            payload = {"model": model_id}
+        elif data.startswith("aux:"):
+            kind = "aux"
+            model_id = data[4:]
+            payload = {"model_aux": model_id}
+        else:
+            await callback.answer("Unknown selection.")
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(f"{container.api_url}/model", json=payload)
+                result = resp.json()
+        except Exception as e:
+            await callback.answer(f"Failed: {e}")
+            return
+
+        label = "Main model" if kind == "main" else "Aux model"
+        changed = result.get("changed", {}).get(kind, {})
+        old_model = changed.get("old", "?")
+
+        await callback.answer(f"Switched to {model_id}")
+
+        # Update keyboard to reflect new selection
+        try:
+            provider_resp = result.get("model", "") or ""
+            # Re-fetch provider from previous GET to build keyboard
+            async with httpx.AsyncClient(timeout=5) as client:
+                info = (await client.get(f"{container.api_url}/model")).json()
+            provider = info.get("provider", "openrouter")
+            current = model_id
+            catalog = MODEL_CATALOG.get(provider, {})
+            models = catalog.get(kind, [])
+            buttons = []
+            for name, mid, pricing in models:
+                marker = "✅ " if mid == current else ""
+                btn_text = f"{marker}{name} ({pricing})"
+                cb_data = f"{kind}:{mid}"
+                if len(cb_data) > 64:
+                    cb_data = cb_data[:64]
+                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.edit_text(
+                f"{label}: `{current}`\n\n✅ Switched from `{old_model}`",
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
     def _extract_metadata(self, message: Message) -> dict:
         """Extract user metadata from a Telegram message."""

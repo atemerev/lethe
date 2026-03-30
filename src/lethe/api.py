@@ -148,6 +148,46 @@ async def configure(request: Request) -> JSONResponse:
     return JSONResponse({"status": "configured"})
 
 
+async def model(request: Request) -> JSONResponse:
+    """Get or set the main/aux model.
+
+    GET  /model          → {"model": "...", "model_aux": "...", "provider": "..."}
+    POST /model          → {"model": "new-id"} and/or {"model_aux": "new-id"}
+    """
+    if not _agent:
+        return JSONResponse({"error": "agent not initialized"}, status_code=503)
+
+    config = _agent.llm.config
+    if request.method == "GET":
+        return JSONResponse({
+            "model": config.model,
+            "model_aux": config.model_aux,
+            "provider": config.provider,
+        })
+
+    body = await request.json()
+    old_model = config.model
+    old_aux = config.model_aux
+    changed = {}
+
+    if "model" in body:
+        config.model = body["model"]
+        changed["model"] = {"old": old_model, "new": config.model}
+        logger.info("Model changed via API: %s → %s", old_model, config.model)
+
+    if "model_aux" in body:
+        config.model_aux = body["model_aux"]
+        changed["model_aux"] = {"old": old_aux, "new": config.model_aux}
+        logger.info("Aux model changed via API: %s → %s", old_aux, config.model_aux)
+
+    return JSONResponse({
+        "status": "updated",
+        "model": config.model,
+        "model_aux": config.model_aux,
+        "changed": changed,
+    })
+
+
 async def events(request: Request) -> StreamingResponse:
     """Persistent SSE stream for proactive messages (heartbeat, DMN)."""
     async def event_stream():
@@ -199,6 +239,7 @@ app = Starlette(
         Route("/chat", chat, methods=["POST"]),
         Route("/cancel", cancel, methods=["POST"]),
         Route("/configure", configure, methods=["POST"]),
+        Route("/model", model, methods=["GET", "POST"]),
         Route("/events", events, methods=["GET"]),
         Route("/file", serve_file, methods=["GET"]),
     ],
