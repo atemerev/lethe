@@ -26,14 +26,22 @@ def _load_catalog() -> dict:
 
 MODEL_CATALOG: dict = _load_catalog()
 
-# Provider → env key (or auth token fallback) used to detect availability
-_PROVIDER_KEYS = {
-    "openrouter": ["OPENROUTER_API_KEY"],
-    "anthropic": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-    "openai": ["OPENAI_API_KEY", "OPENAI_AUTH_TOKEN"],
+# Provider auth detection: (env_var, auth_type_label)
+_PROVIDER_AUTH = {
+    "openrouter": [
+        ("OPENROUTER_API_KEY", "API"),
+    ],
+    "anthropic": [
+        ("ANTHROPIC_API_KEY", "API"),
+        ("ANTHROPIC_AUTH_TOKEN", "OAuth"),
+    ],
+    "openai": [
+        ("OPENAI_API_KEY", "API"),
+        ("OPENAI_AUTH_TOKEN", "OAuth"),
+    ],
 }
 
-# Short display labels for provider headers
+# Base display labels
 _PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic",
@@ -41,14 +49,25 @@ _PROVIDER_LABELS = {
 }
 
 
-def get_available_providers() -> list[str]:
-    """Return list of providers that have API keys configured."""
+def get_available_providers() -> list[dict]:
+    """Return list of available providers with auth info.
+
+    Each entry: {"provider": "anthropic", "label": "Anthropic (OAuth)", "auth": "OAuth"}
+    """
     available = []
-    for provider, keys in _PROVIDER_KEYS.items():
+    for provider, auth_options in _PROVIDER_AUTH.items():
         if provider not in MODEL_CATALOG:
             continue
-        if any(os.environ.get(k) for k in keys):
-            available.append(provider)
+        for env_var, auth_type in auth_options:
+            if os.environ.get(env_var):
+                base_label = _PROVIDER_LABELS.get(provider, provider)
+                label = f"{base_label} ({auth_type})" if auth_type != "API" or provider != "openrouter" else base_label
+                available.append({
+                    "provider": provider,
+                    "label": label,
+                    "auth": auth_type,
+                })
+                break  # First match wins (API key takes precedence over OAuth)
     return available
 
 

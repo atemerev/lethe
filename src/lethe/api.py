@@ -165,7 +165,8 @@ async def model(request: Request) -> JSONResponse:
             "model": config.model,
             "model_aux": config.model_aux,
             "provider": config.provider,
-            "available_providers": get_available_providers(),
+            "available_providers": [p["provider"] for p in get_available_providers()],
+            "provider_info": get_available_providers(),
         })
 
     body = await request.json()

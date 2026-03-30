@@ -223,15 +223,16 @@ class Gateway:
                     )
 
     @staticmethod
-    def _build_model_buttons(providers: list[str], kind: str, current: str) -> list[list[InlineKeyboardButton]]:
+    def _build_model_buttons(provider_info: list[dict], kind: str, current: str) -> list[list[InlineKeyboardButton]]:
         """Build inline keyboard buttons for all available providers."""
         buttons = []
-        for provider in providers:
+        for info in provider_info:
+            provider = info.get("provider", "")
+            label = info.get("label", PROVIDER_LABELS.get(provider, provider))
             catalog = MODEL_CATALOG.get(provider, {})
             models = catalog.get(kind, [])
             if not models:
                 continue
-            label = PROVIDER_LABELS.get(provider, provider)
             buttons.append([InlineKeyboardButton(text=f"── {label} ──", callback_data="noop")])
             for name, model_id, pricing in models:
                 marker = "✅ " if model_id == current else ""
@@ -252,11 +253,11 @@ class Gateway:
             await message.answer(f"Failed to get model info: {e}")
             return
 
-        providers = data.get("available_providers", [data.get("provider", "openrouter")])
+        provider_info = data.get("provider_info") or [{"provider": data.get("provider", "openrouter"), "label": data.get("provider", "openrouter")}]
         current = data.get("model") if kind == "main" else data.get("model_aux")
         label = "Main model" if kind == "main" else "Aux model"
 
-        buttons = self._build_model_buttons(providers, kind, current)
+        buttons = self._build_model_buttons(provider_info, kind, current)
         if not buttons:
             await message.answer("No models available.")
             return
@@ -305,8 +306,8 @@ class Gateway:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 info = (await client.get(f"{container.api_url}/model")).json()
-            providers = info.get("available_providers", [info.get("provider", "openrouter")])
-            buttons = self._build_model_buttons(providers, kind, model_id)
+            pi = info.get("provider_info") or [{"provider": info.get("provider", "openrouter"), "label": info.get("provider", "openrouter")}]
+            buttons = self._build_model_buttons(pi, kind, model_id)
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.edit_text(
                 f"{label}: `{model_id}`\n\n✅ Switched from `{old_model}`",

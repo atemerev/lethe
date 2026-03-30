@@ -318,20 +318,20 @@ class TelegramBot:
 
     def _build_model_buttons(self, kind: str, current: str) -> list[list[InlineKeyboardButton]]:
         """Build inline keyboard buttons for all available providers."""
-        providers = get_available_providers()
-        if not providers:
+        provider_infos = get_available_providers()
+        if not provider_infos:
             # Fallback: show current provider only
-            providers = [self.agent.llm.config.provider]
+            provider_infos = [{"provider": self.agent.llm.config.provider, "label": self.agent.llm.config.provider}]
 
         buttons = []
-        for provider in providers:
+        for info in provider_infos:
+            provider = info["provider"]
             catalog = MODEL_CATALOG.get(provider, {})
             models = catalog.get(kind, [])
             if not models:
                 continue
-            # Provider header
-            label = _PROVIDER_LABELS.get(provider, provider)
-            buttons.append([InlineKeyboardButton(text=f"── {label} ──", callback_data="noop")])
+            # Provider header with auth type
+            buttons.append([InlineKeyboardButton(text=f"── {info['label']} ──", callback_data="noop")])
             for name, model_id, pricing in models:
                 marker = "✅ " if model_id == current else ""
                 btn_text = f"{marker}{name} ({pricing})"
