@@ -1034,8 +1034,27 @@ class AsyncLLMClient:
         elif self.config.provider == "openai":
             logger.info("Auth: using OpenAI API key")
         
+        # Remember which provider the OAuth client was initialized for
+        self._oauth_provider: str = self.config.provider if self._oauth else ""
+
         logger.info(f"AsyncLLMClient initialized with model {self.config.model}")
-    
+
+    def _should_use_oauth(self, model: str) -> bool:
+        """Check if the given model should route through the OAuth client.
+
+        Returns False if the user hot-swapped to a different provider,
+        so the call falls through to litellm instead.
+        """
+        if not self._oauth:
+            return False
+        # If provider was explicitly changed away from OAuth provider, don't use OAuth
+        if self.config.provider != self._oauth_provider:
+            return False
+        # OpenRouter models always go through litellm
+        if model.startswith("openrouter/"):
+            return False
+        return True
+
     # Tool results that should NOT be persisted to message history
     # (conversation_search results contain previous search results, creating recursive bloat)
     _SKIP_PERSIST_TOOLS = {"conversation_search", "archival_search"}
@@ -1584,8 +1603,9 @@ class AsyncLLMClient:
         """Make API call with retry logic for transient errors."""
         import asyncio
         
-        # OAuth path: route through direct Anthropic API
-        if self._oauth:
+        # OAuth path: only if current model belongs to the OAuth provider.
+        # If user hot-swapped to a different provider (e.g. OpenRouter), skip OAuth.
+        if self._oauth and self._should_use_oauth(kwargs.get("model", self.config.model)):
             return await self._call_with_retry_oauth(kwargs, log_type, max_retries)
         
         last_error = None
