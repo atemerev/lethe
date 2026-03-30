@@ -350,8 +350,7 @@ class DefaultModeNetwork:
         config = LLMConfig()
         if self.model_override:
             config.model = self.model_override
-        elif config.model_aux:
-            config.model = config.model_aux
+        # Otherwise use main model (DMN needs full reasoning for memory compaction)
         
         # Reasonable context for background work
         config.context_limit = min(config.context_limit, 64000)

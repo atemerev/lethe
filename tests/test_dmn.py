@@ -197,8 +197,10 @@ class TestDMNBasic:
         send_to_user.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_dmn_uses_aux_model_by_default(self, registry, butler, available_tools, monkeypatch):
+    async def test_dmn_uses_main_model_by_default(self, registry, butler, available_tools, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        monkeypatch.setenv("LLM_MODEL", "openrouter/moonshotai/kimi-k2.5")
+        monkeypatch.setenv("LLM_MODEL_AUX", "openrouter/google/gemini-3-flash-preview")
         captured = {}
 
         class FakeClient:
@@ -218,7 +220,8 @@ class TestDMNBasic:
         with patch("lethe.actor.dmn.AsyncLLMClient", FakeClient):
             await dmn._create_dmn_llm(butler)
 
-        assert captured["model"] == captured["model_aux"]
+        # DMN should use main model, not fall back to aux
+        assert captured["model"] == "openrouter/moonshotai/kimi-k2.5"
 
     @pytest.mark.asyncio
     async def test_dmn_model_override_takes_precedence(self, registry, butler, available_tools, monkeypatch):

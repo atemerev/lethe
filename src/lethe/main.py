@@ -198,6 +198,7 @@ async def run():
         conversation_manager=conversation_manager,
         process_callback=process_message,
     )
+    telegram_bot.agent = agent  # For /model, /aux commands
     # heartbeat_callback will be set below after Heartbeat is created
 
     # Initialize heartbeat

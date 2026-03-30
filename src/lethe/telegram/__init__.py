@@ -8,12 +8,65 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
 
 logger = logging.getLogger(__name__)
+
+# Curated model catalog per provider (updated March 2026)
+MODEL_CATALOG = {
+    "openrouter": {
+        "main": [
+            ("Kimi K2.5", "openrouter/moonshotai/kimi-k2.5", "$0.42/$2.20"),
+            ("Claude Opus 4.6", "openrouter/anthropic/claude-opus-4.6", "$5/$25"),
+            ("Claude Sonnet 4.6", "openrouter/anthropic/claude-sonnet-4.6", "$3/$15"),
+            ("GPT-5.4", "openrouter/openai/gpt-5.4", "$2.50/$15"),
+            ("GPT-5.2", "openrouter/openai/gpt-5.2", "$1.75/$14"),
+            ("MiMo V2 Pro", "openrouter/xiaomi/mimo-v2-pro", "$1/$3"),
+            ("MiniMax M2.7", "openrouter/minimax/minimax-m2.7", "$0.30/$1.20"),
+            ("Gemini 3.1 Pro", "openrouter/google/gemini-3.1-pro-preview", "$2/$12"),
+            ("Grok 4.20 Beta", "openrouter/x-ai/grok-4.20-beta", "$2/$6"),
+            ("GLM 5 Turbo", "openrouter/z-ai/glm-5-turbo", "$1.20/$4"),
+            ("Qwen 3.5 Plus", "openrouter/qwen/qwen3.5-plus-02-15", "$0.26/$1.56"),
+        ],
+        "aux": [
+            ("Gemini 3 Flash", "openrouter/google/gemini-3-flash-preview", "$0.50/$3"),
+            ("Qwen 3.5 Flash", "openrouter/qwen/qwen3.5-flash-02-23", "$0.07/$0.26"),
+            ("GPT-5.4 Nano", "openrouter/openai/gpt-5.4-nano", "$0.20/$1.25"),
+            ("GLM 4.7 Flash", "openrouter/z-ai/glm-4.7-flash", "$0.06/$0.40"),
+            ("MiMo V2 Flash", "openrouter/xiaomi/mimo-v2-flash", "$0.09/$0.29"),
+            ("Claude Haiku 4.5", "openrouter/anthropic/claude-haiku-4.5", "$1/$5"),
+            ("Gemini 3.1 Flash Lite", "openrouter/google/gemini-3.1-flash-lite-preview", "$0.25/$1.50"),
+        ],
+    },
+    "anthropic": {
+        "main": [
+            ("Claude Opus 4.6", "claude-opus-4-6", "$5/$25"),
+            ("Claude Sonnet 4.6", "claude-sonnet-4-6", "$3/$15"),
+            ("Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", "$3/$15"),
+            ("Claude Haiku 4.5", "claude-haiku-4-5-20251001", "$1/$5"),
+        ],
+        "aux": [
+            ("Claude Haiku 4.5", "claude-haiku-4-5-20251001", "$1/$5"),
+            ("Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", "$3/$15"),
+        ],
+    },
+    "openai": {
+        "main": [
+            ("GPT-5.4", "gpt-5.4", "$2.50/$15"),
+            ("GPT-5.2", "gpt-5.2", "$1.75/$14"),
+            ("GPT-5", "gpt-5", "$1.25/$10"),
+            ("GPT-5.4 Mini", "gpt-5.4-mini", "$0.75/$4.50"),
+        ],
+        "aux": [
+            ("GPT-5.4 Mini", "gpt-5.4-mini", "$0.75/$4.50"),
+            ("GPT-5.4 Nano", "gpt-5.4-nano", "$0.20/$1.25"),
+            ("GPT-5 Mini", "gpt-5-mini", "$0.25/$2"),
+        ],
+    },
+}
 
 
 class TelegramBot:
@@ -30,6 +83,7 @@ class TelegramBot:
         self.conversation_manager = conversation_manager
         self.process_callback = process_callback
         self.actor_system = None  # Set after ActorSystem.setup()
+        self.agent = None  # Set after agent init — needed for /model, /aux
         self.heartbeat_callback = heartbeat_callback
 
         self.bot = Bot(
@@ -59,7 +113,9 @@ class TelegramBot:
                 "Commands:\n"
                 "/status - Check status\n"
                 "/stop - Cancel current processing\n"
-                "/heartbeat - Force a check-in"
+                "/heartbeat - Force a check-in\n"
+                "/model - Switch main LLM model\n"
+                "/aux - Switch auxiliary model"
             )
 
         @self.dp.message(Command("status"))
@@ -148,6 +204,25 @@ class TelegramBot:
                 await message.answer("Heartbeat not configured.")
         
 
+
+        @self.dp.message(Command("model"))
+        async def handle_model(message: Message):
+            if not self._is_authorized(message.from_user.id):
+                return
+            await self._show_model_picker(message, "main")
+
+        @self.dp.message(Command("aux"))
+        async def handle_aux(message: Message):
+            if not self._is_authorized(message.from_user.id):
+                return
+            await self._show_model_picker(message, "aux")
+
+        @self.dp.callback_query(F.data.startswith("main:") | F.data.startswith("aux:"))
+        async def handle_model_callback(callback: CallbackQuery):
+            if not callback.from_user or not self._is_authorized(callback.from_user.id):
+                await callback.answer("Unauthorized")
+                return
+            await self._handle_model_selection(callback)
 
         @self.dp.message(F.text)
         async def handle_message(message: Message):
@@ -292,6 +367,87 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Failed to process document: {e}")
                 await message.answer(f"Failed to download file: {e}")
+
+    async def _show_model_picker(self, message: Message, kind: str):
+        """Show inline keyboard with model options for main or aux model."""
+        if not self.agent:
+            await message.answer("Agent not initialized yet.")
+            return
+
+        provider = self.agent.llm.config.provider
+        catalog = MODEL_CATALOG.get(provider, {})
+        models = catalog.get(kind, [])
+
+        if not models:
+            await message.answer(f"No model catalog for provider '{provider}'.")
+            return
+
+        current = self.agent.llm.config.model if kind == "main" else self.agent.llm.config.model_aux
+        label = "Main model" if kind == "main" else "Aux model"
+
+        buttons = []
+        for name, model_id, pricing in models:
+            marker = "✅ " if model_id == current else ""
+            btn_text = f"{marker}{name} ({pricing})"
+            callback_data = f"{kind}:{model_id}"
+            # Telegram limits callback_data to 64 bytes
+            if len(callback_data) > 64:
+                callback_data = callback_data[:64]
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=callback_data)])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer(f"{label}: `{current}`\n\nSelect new model:", reply_markup=keyboard, parse_mode="Markdown")
+
+    async def _handle_model_selection(self, callback: CallbackQuery):
+        """Handle model/aux selection from inline keyboard."""
+        if not self.agent:
+            await callback.answer("Agent not initialized.")
+            return
+
+        data = callback.data or ""
+        if data.startswith("main:"):
+            kind = "main"
+            model_id = data[5:]
+        elif data.startswith("aux:"):
+            kind = "aux"
+            model_id = data[4:]
+        else:
+            await callback.answer("Unknown selection.")
+            return
+
+        old_model = self.agent.llm.config.model if kind == "main" else self.agent.llm.config.model_aux
+
+        if kind == "main":
+            self.agent.llm.config.model = model_id
+        else:
+            self.agent.llm.config.model_aux = model_id
+
+        label = "Main model" if kind == "main" else "Aux model"
+        logger.info(f"{label} changed: {old_model} → {model_id}")
+
+        await callback.answer(f"Switched to {model_id}")
+        # Update the message to reflect new selection
+        try:
+            provider = self.agent.llm.config.provider
+            catalog = MODEL_CATALOG.get(provider, {})
+            models = catalog.get(kind, [])
+            current = model_id
+            buttons = []
+            for name, mid, pricing in models:
+                marker = "✅ " if mid == current else ""
+                btn_text = f"{marker}{name} ({pricing})"
+                cb_data = f"{kind}:{mid}"
+                if len(cb_data) > 64:
+                    cb_data = cb_data[:64]
+                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.edit_text(
+                f"{label}: `{current}`\n\n✅ Switched from `{old_model}`",
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass  # Message edit can fail if unchanged
 
     def _is_authorized(self, user_id: int) -> bool:
         """Check if user is authorized."""

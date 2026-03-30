@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     )
     llm_model_dmn: str = Field(
         default="",
-        description="DMN LLM model override (empty = use aux model)",
+        description="DMN LLM model override (empty = use main model)",
     )
     llm_api_base: str = Field(
         default="",
