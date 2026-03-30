@@ -161,10 +161,22 @@ async def model(request: Request) -> JSONResponse:
 
     config = _agent.llm.config
     if request.method == "GET":
+        # Determine current auth type
+        force = getattr(_agent.llm, "_force_oauth", None)
+        if force is True:
+            current_auth = "sub"
+        elif force is False:
+            current_auth = "API"
+        elif getattr(_agent.llm, "_oauth", None) and config.provider == getattr(_agent.llm, "_oauth_provider", ""):
+            current_auth = "sub"
+        else:
+            current_auth = "API"
+
         return JSONResponse({
             "model": config.model,
             "model_aux": config.model_aux,
             "provider": config.provider,
+            "current_auth": current_auth,
             "available_providers": [p["provider"] for p in get_available_providers()],
             "provider_info": get_available_providers(),
         })

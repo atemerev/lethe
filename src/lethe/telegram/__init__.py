@@ -316,12 +316,25 @@ class TelegramBot:
                 logger.error(f"Failed to process document: {e}")
                 await message.answer(f"Failed to download file: {e}")
 
+    def _get_current_auth(self) -> str:
+        """Return current auth type: 'sub' if OAuth is active, 'API' otherwise."""
+        llm = self.agent.llm
+        if llm._force_oauth is True:
+            return "sub"
+        if llm._force_oauth is False:
+            return "API"
+        # Auto: check if OAuth is initialized and active for current provider
+        if llm._oauth and llm.config.provider == llm._oauth_provider:
+            return "sub"
+        return "API"
+
     def _build_model_buttons(self, kind: str, current: str) -> list[list[InlineKeyboardButton]]:
         """Build inline keyboard buttons for all available providers."""
         provider_infos = get_available_providers()
         if not provider_infos:
-            # Fallback: show current provider only
             provider_infos = [{"provider": self.agent.llm.config.provider, "label": self.agent.llm.config.provider, "auth": "API"}]
+
+        current_auth = self._get_current_auth()
 
         buttons = []
         for info in provider_infos:
@@ -331,12 +344,12 @@ class TelegramBot:
             models = catalog.get(kind, [])
             if not models:
                 continue
-            # Provider header with auth type
             buttons.append([InlineKeyboardButton(text=f"── {info['label']} ──", callback_data="noop")])
             for name, model_id, pricing in models:
-                marker = "✅ " if model_id == current else ""
+                # Only mark active if both model AND auth type match
+                is_active = model_id == current and auth == current_auth
+                marker = "✅ " if is_active else ""
                 btn_text = f"{marker}{name} ({pricing})"
-                # Encode auth type: main:sub:model-id or main:api:model-id
                 cb_data = f"{kind}:{auth}:{model_id}"
                 if len(cb_data) > 64:
                     cb_data = cb_data[:64]

@@ -223,7 +223,7 @@ class Gateway:
                     )
 
     @staticmethod
-    def _build_model_buttons(provider_info: list[dict], kind: str, current: str) -> list[list[InlineKeyboardButton]]:
+    def _build_model_buttons(provider_info: list[dict], kind: str, current: str, current_auth: str = "API") -> list[list[InlineKeyboardButton]]:
         """Build inline keyboard buttons for all available providers."""
         buttons = []
         for info in provider_info:
@@ -236,7 +236,8 @@ class Gateway:
                 continue
             buttons.append([InlineKeyboardButton(text=f"── {label} ──", callback_data="noop")])
             for name, model_id, pricing in models:
-                marker = "✅ " if model_id == current else ""
+                is_active = model_id == current and auth == current_auth
+                marker = "✅ " if is_active else ""
                 btn_text = f"{marker}{name} ({pricing})"
                 cb_data = f"{kind}:{auth}:{model_id}"
                 if len(cb_data) > 64:
@@ -256,9 +257,10 @@ class Gateway:
 
         provider_info = data.get("provider_info") or [{"provider": data.get("provider", "openrouter"), "label": data.get("provider", "openrouter")}]
         current = data.get("model") if kind == "main" else data.get("model_aux")
+        current_auth = data.get("current_auth", "API")
         label = "Main model" if kind == "main" else "Aux model"
 
-        buttons = self._build_model_buttons(provider_info, kind, current)
+        buttons = self._build_model_buttons(provider_info, kind, current, current_auth)
         if not buttons:
             await message.answer("No models available.")
             return
@@ -317,7 +319,8 @@ class Gateway:
             async with httpx.AsyncClient(timeout=5) as client:
                 info = (await client.get(f"{container.api_url}/model")).json()
             pi = info.get("provider_info") or [{"provider": info.get("provider", "openrouter"), "label": info.get("provider", "openrouter")}]
-            buttons = self._build_model_buttons(pi, kind, model_id)
+            ca = info.get("current_auth", auth)
+            buttons = self._build_model_buttons(pi, kind, model_id, ca)
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.edit_text(
                 f"{label}: `{model_id}`\n\n✅ Switched from `{old_model}`",
