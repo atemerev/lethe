@@ -27,17 +27,18 @@ def _load_catalog() -> dict:
 MODEL_CATALOG: dict = _load_catalog()
 
 # Provider auth detection: (env_var, auth_type_label)
+# Order matters: OAuth (subscription) listed first = preferred when available
 _PROVIDER_AUTH = {
     "openrouter": [
         ("OPENROUTER_API_KEY", "API"),
     ],
     "anthropic": [
+        ("ANTHROPIC_AUTH_TOKEN", "sub"),  # Subscription (Max/Pro) — preferred
         ("ANTHROPIC_API_KEY", "API"),
-        ("ANTHROPIC_AUTH_TOKEN", "OAuth"),
     ],
     "openai": [
+        ("OPENAI_AUTH_TOKEN", "sub"),  # Subscription (Plus/Pro) — preferred
         ("OPENAI_API_KEY", "API"),
-        ("OPENAI_AUTH_TOKEN", "OAuth"),
     ],
 }
 
@@ -48,11 +49,20 @@ _PROVIDER_LABELS = {
     "openai": "OpenAI",
 }
 
+# Auth type → display suffix
+_AUTH_LABELS = {
+    "sub": "subscription",
+    "API": "API key",
+}
+
 
 def get_available_providers() -> list[dict]:
     """Return list of available providers with auth info.
 
-    Each entry: {"provider": "anthropic", "label": "Anthropic (OAuth)", "auth": "OAuth"}
+    If a provider has both subscription and API key, both appear as separate
+    entries so the user can choose. Subscription is listed first (preferred).
+
+    Each entry: {"provider": "anthropic", "label": "Anthropic (subscription)", "auth": "sub"}
     """
     available = []
     for provider, auth_options in _PROVIDER_AUTH.items():
@@ -61,13 +71,16 @@ def get_available_providers() -> list[dict]:
         for env_var, auth_type in auth_options:
             if os.environ.get(env_var):
                 base_label = _PROVIDER_LABELS.get(provider, provider)
-                label = f"{base_label} ({auth_type})" if auth_type != "API" or provider != "openrouter" else base_label
+                suffix = _AUTH_LABELS.get(auth_type, auth_type)
+                if provider == "openrouter":
+                    label = base_label  # No suffix for OpenRouter
+                else:
+                    label = f"{base_label} ({suffix})"
                 available.append({
                     "provider": provider,
                     "label": label,
                     "auth": auth_type,
                 })
-                break  # First match wins (API key takes precedence over OAuth)
     return available
 
 

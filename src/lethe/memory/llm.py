@@ -1036,6 +1036,8 @@ class AsyncLLMClient:
         
         # Remember which provider the OAuth client was initialized for
         self._oauth_provider: str = self.config.provider if self._oauth else ""
+        # User override from /model command: True=force OAuth, False=force API key, None=auto
+        self._force_oauth: Optional[bool] = None
 
         logger.info(f"AsyncLLMClient initialized with model {self.config.model}")
 
@@ -1047,7 +1049,12 @@ class AsyncLLMClient:
         """
         if not self._oauth:
             return False
-        # If provider was explicitly changed away from OAuth provider, don't use OAuth
+        # Explicit user override from /model command
+        if self._force_oauth is True and self.config.provider == self._oauth_provider:
+            return True
+        if self._force_oauth is False:
+            return False
+        # Auto: use OAuth if still on the same provider
         if self.config.provider != self._oauth_provider:
             return False
         # OpenRouter models always go through litellm

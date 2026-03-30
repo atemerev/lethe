@@ -174,6 +174,8 @@ async def model(request: Request) -> JSONResponse:
     old_aux = config.model_aux
     changed = {}
 
+    auth_type = body.get("auth", "API")  # "sub" for subscription/OAuth, "API" for key
+
     if "model" in body:
         new_model = body["model"]
         new_provider = provider_for_model(new_model)
@@ -189,6 +191,14 @@ async def model(request: Request) -> JSONResponse:
         config.model_aux = body["model_aux"]
         changed["model_aux"] = {"old": old_aux, "new": config.model_aux}
         logger.info("Aux model changed via API: %s → %s", old_aux, config.model_aux)
+
+    # Set OAuth preference
+    if auth_type == "sub":
+        _agent.llm._force_oauth = True
+        logger.info("OAuth forced ON via API")
+    elif auth_type == "API":
+        _agent.llm._force_oauth = False
+        logger.info("OAuth forced OFF via API, using API key")
 
     return JSONResponse({
         "status": "updated",

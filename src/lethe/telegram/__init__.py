@@ -165,7 +165,7 @@ class TelegramBot:
                 return
             await self._show_model_picker(message, "aux")
 
-        @self.dp.callback_query(F.data.startswith("main:") | F.data.startswith("aux:"))
+        @self.dp.callback_query(lambda c: c.data and (c.data.startswith("main:") or c.data.startswith("aux:") or c.data == "noop"))
         async def handle_model_callback(callback: CallbackQuery):
             if not callback.from_user or not self._is_authorized(callback.from_user.id):
                 await callback.answer("Unauthorized")
@@ -321,11 +321,12 @@ class TelegramBot:
         provider_infos = get_available_providers()
         if not provider_infos:
             # Fallback: show current provider only
-            provider_infos = [{"provider": self.agent.llm.config.provider, "label": self.agent.llm.config.provider}]
+            provider_infos = [{"provider": self.agent.llm.config.provider, "label": self.agent.llm.config.provider, "auth": "API"}]
 
         buttons = []
         for info in provider_infos:
             provider = info["provider"]
+            auth = info.get("auth", "API")
             catalog = MODEL_CATALOG.get(provider, {})
             models = catalog.get(kind, [])
             if not models:
@@ -335,7 +336,8 @@ class TelegramBot:
             for name, model_id, pricing in models:
                 marker = "✅ " if model_id == current else ""
                 btn_text = f"{marker}{name} ({pricing})"
-                cb_data = f"{kind}:{model_id}"
+                # Encode auth type: main:sub:model-id or main:api:model-id
+                cb_data = f"{kind}:{auth}:{model_id}"
                 if len(cb_data) > 64:
                     cb_data = cb_data[:64]
                 buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
@@ -359,7 +361,11 @@ class TelegramBot:
         await message.answer(f"{label}: `{current}`\n\nSelect new model:", reply_markup=keyboard, parse_mode="Markdown")
 
     async def _handle_model_selection(self, callback: CallbackQuery):
-        """Handle model/aux selection from inline keyboard."""
+        """Handle model/aux selection from inline keyboard.
+
+        Callback data format: "{kind}:{auth}:{model_id}"
+        e.g. "main:sub:claude-opus-4-6" or "aux:API:openrouter/google/gemini-3-flash-preview"
+        """
         if not self.agent:
             await callback.answer("Agent not initialized.")
             return
@@ -369,13 +375,20 @@ class TelegramBot:
             await callback.answer()
             return
 
-        if data.startswith("main:"):
-            kind = "main"
-            model_id = data[5:]
-        elif data.startswith("aux:"):
-            kind = "aux"
-            model_id = data[4:]
+        # Parse: kind:auth:model_id
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            # Legacy format without auth: kind:model_id
+            if len(parts) == 2:
+                kind, model_id = parts
+                auth = "API"
+            else:
+                await callback.answer("Unknown selection.")
+                return
         else:
+            kind, auth, model_id = parts
+
+        if kind not in ("main", "aux"):
             await callback.answer("Unknown selection.")
             return
 
@@ -387,6 +400,16 @@ class TelegramBot:
             old_provider = self.agent.llm.config.provider
             self.agent.llm.config.provider = new_provider
             logger.info(f"Provider changed: {old_provider} → {new_provider}")
+
+        # Enable/disable OAuth based on auth type selection
+        if auth == "sub":
+            # User explicitly chose subscription — ensure OAuth is active
+            self.agent.llm._force_oauth = True
+            logger.info(f"OAuth forced ON for {new_provider or self.agent.llm.config.provider}")
+        else:
+            # User chose API key — disable OAuth for this provider
+            self.agent.llm._force_oauth = False
+            logger.info(f"OAuth forced OFF, using API key")
 
         if kind == "main":
             self.agent.llm.config.model = model_id

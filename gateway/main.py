@@ -228,6 +228,7 @@ class Gateway:
         buttons = []
         for info in provider_info:
             provider = info.get("provider", "")
+            auth = info.get("auth", "API")
             label = info.get("label", PROVIDER_LABELS.get(provider, provider))
             catalog = MODEL_CATALOG.get(provider, {})
             models = catalog.get(kind, [])
@@ -237,7 +238,7 @@ class Gateway:
             for name, model_id, pricing in models:
                 marker = "✅ " if model_id == current else ""
                 btn_text = f"{marker}{name} ({pricing})"
-                cb_data = f"{kind}:{model_id}"
+                cb_data = f"{kind}:{auth}:{model_id}"
                 if len(cb_data) > 64:
                     cb_data = cb_data[:64]
                 buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
@@ -276,17 +277,26 @@ class Gateway:
             await callback.answer()
             return
 
-        if data.startswith("main:"):
-            kind = "main"
-            model_id = data[5:]
-            payload = {"model": model_id}
-        elif data.startswith("aux:"):
-            kind = "aux"
-            model_id = data[4:]
-            payload = {"model_aux": model_id}
+        # Parse: kind:auth:model_id
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            if len(parts) == 2:
+                kind, model_id = parts
+                auth = "API"
+            else:
+                await callback.answer("Unknown selection.")
+                return
         else:
+            kind, auth, model_id = parts
+
+        if kind not in ("main", "aux"):
             await callback.answer("Unknown selection.")
             return
+
+        if kind == "main":
+            payload = {"model": model_id, "auth": auth}
+        else:
+            payload = {"model_aux": model_id, "auth": auth}
 
         try:
             async with httpx.AsyncClient(timeout=5) as client:
