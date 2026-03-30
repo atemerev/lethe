@@ -79,6 +79,7 @@ class ConsoleState:
     stem: Dict[str, Any] = field(default_factory=dict)
     dmn_context: str = ""
     amygdala_context: str = ""
+    consolidation_context: str = ""
     hippocampus_context: str = ""
     stem_context: str = ""
     
@@ -366,6 +367,14 @@ def update_amygdala_context(context: str):
     context = context or ""
     if _state.amygdala_context != context:
         _state.amygdala_context = context
+        _state.version += 1
+
+
+def update_consolidation_context(context: str):
+    """Update consolidation module context/debug view text."""
+    context = context or ""
+    if _state.consolidation_context != context:
+        _state.consolidation_context = context
         _state.version += 1
 
 
