@@ -80,10 +80,7 @@ class Settings(BaseSettings):
     db_path: Path = Field(default=Path("./data/lethe.db"), description="SQLite database path")
 
     # Background cognition modules
-    amygdala_enabled: bool = Field(
-        default=True,
-        description="Enable Amygdala emotional salience actor (heartbeat-triggered, aux model)",
-    )
+    # amygdala_enabled removed: salience tagging merged into hippocampus (per-message)
     consolidation_enabled: bool = Field(
         default=True,
         description="Enable memory consolidation (background memory compression, aux model)",

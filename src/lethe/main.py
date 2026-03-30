@@ -427,8 +427,7 @@ async def run():
                             lethe_console.update_stem_context(actor_system.brainstem.get_context_view())
                         if actor_system.dmn:
                             lethe_console.update_dmn_context(actor_system.dmn.get_context_view())
-                        if actor_system.amygdala:
-                            lethe_console.update_amygdala_context(actor_system.amygdala.get_context_view())
+                        # Amygdala removed: salience stats now in hippocampus context view
                         if actor_system.consolidation:
                             lethe_console.update_consolidation_context(actor_system.consolidation.get_context_view())
                 except asyncio.CancelledError:

@@ -96,12 +96,7 @@ class TelegramBot:
                 # DMN status: sleeping (between rounds) or running
                 dmn_active = any(a.name == "dmn" and a.state == ActorState.RUNNING for a in actors)
                 dmn_status = "🟢 running" if dmn_active else "💤 sleeping (wakes on heartbeat)"
-                amygdala_enabled = bool(getattr(self.actor_system, "amygdala", None))
-                amygdala_active = any(a.name == "amygdala" and a.state == ActorState.RUNNING for a in actors)
-                if not amygdala_enabled:
-                    amygdala_status = "⚪ disabled"
-                else:
-                    amygdala_status = "🟢 running" if amygdala_active else "💤 sleeping (wakes on heartbeat)"
+                amygdala_status = "🔀 merged into hippocampus (per-message)"
                 
                 # Subagents (non-system)
                 subagents = [a for a in active if a.name not in system_names]

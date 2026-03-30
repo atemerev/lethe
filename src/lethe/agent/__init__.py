@@ -74,12 +74,13 @@ class Agent:
             usage_scope="cortex",
         )
         
-        # Initialize hippocampus with LLM functions (analyzer + summarizer use aux model)
+        # Initialize hippocampus with LLM functions (analyzer + summarizer + salience use aux model)
         hippocampus_enabled = os.environ.get("HIPPOCAMPUS_ENABLED", "true").lower() == "true"
         self.hippocampus = Hippocampus(
             self.memory, 
             summarizer=self._summarize_memories,
             analyzer=self._summarize_memories,  # Same aux model for analysis
+            salience_classifier=self._classify_salience,
             enabled=hippocampus_enabled,
         )
         
@@ -238,6 +239,10 @@ class Agent:
     async def _summarize_memories(self, prompt: str) -> str:
         """Summarize memories using LLM (for hippocampus)."""
         return await self.llm.complete(prompt, use_aux=True, usage_tag="hippocampus")
+
+    async def _classify_salience(self, prompt: str) -> str:
+        """Classify emotional salience using aux LLM (for hippocampus salience tagging)."""
+        return await self.llm.complete(prompt, use_aux=True, usage_tag="salience")
     
     def _add_memory_tools(self):
         """Add internal memory management tools."""
@@ -648,6 +653,11 @@ class Agent:
                 f"{recall_context}\n"
                 "</recall_block>"
             )
+
+        # Inject emotional state summary (from salience tags) so agent adjusts tone naturally
+        emotional_state = self.hippocampus.get_emotional_state()
+        if emotional_state:
+            transient_parts.append(emotional_state)
 
         if transient_parts:
             self.llm.context.transient_system_context = "\n".join(transient_parts)

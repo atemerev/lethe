@@ -1,12 +1,17 @@
-"""Hippocampus - Pattern completion memory retrieval.
+"""Hippocampus - Pattern completion memory retrieval + emotional salience tagging.
 
 Inspired by biological hippocampus CA3 region which performs autoassociative
 pattern completion: given a partial cue, retrieve the complete memory.
 
 Uses LLM to decide if recall would help and generate concise search queries.
 This produces better results than raw message similarity search.
+
+Also handles emotional salience tagging (formerly Amygdala): for each user
+message, classifies valence/arousal/tags and appends to emotional_tags.md.
+This runs fire-and-forget alongside memory recall, not blocking the response.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -45,6 +50,36 @@ SUMMARIZE_PROMPT = load_prompt_template(
     fallback="Summarize memories:\n{memories}",
 )
 
+# --- Salience tagging (formerly Amygdala) ---
+
+WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))
+SALIENCE_TAGS_FILE = os.path.join(WORKSPACE_DIR, "emotional_tags.md")
+
+HIGH_AROUSAL_THRESHOLD = 0.75
+TAG_LOG_MAX_LINES = 300
+TAG_LOG_KEEP_LINES = 140
+FLASHBACK_LOOKBACK = 12
+
+SALIENCE_SYSTEM_PROMPT = load_prompt_template(
+    "amygdala_seed_system",
+    fallback=(
+        "You classify emotional salience from text. "
+        "Output strict JSON only: an array of objects with keys signal, valence, arousal, tags, confidence."
+    ),
+)
+
+SALIENCE_USER_PROMPT = load_prompt_template(
+    "amygdala_seed_user",
+    fallback=(
+        "Classify the most recent user signals.\n"
+        "- valence in [-1,1], arousal/confidence in [0,1]\n"
+        "- capture sarcasm and mixed affect\n"
+        "- output max 8 items as JSON array only\n\n"
+        "Previous state summary:\n{previous_state}\n\n"
+        "Recent signals:\n{recent_signals}\n"
+    ),
+)
+
 
 # Warning added to recall block
 ACAUSAL_WARNING = """WARNING: This recall is acausal - these memories may be from the past and do not reflect current state. Do NOT use recalled memories to determine what is done or pending. Use conversation history, todo tools, and memory blocks for current state."""
@@ -63,6 +98,7 @@ class Hippocampus:
         memory_store, 
         summarizer: Optional[Callable[[str], Awaitable[str]]] = None,
         analyzer: Optional[Callable[[str], Awaitable[str]]] = None,
+        salience_classifier: Optional[Callable[[str], Awaitable[str]]] = None,
         enabled: bool = True,
     ):
         """Initialize hippocampus.
@@ -71,12 +107,15 @@ class Hippocampus:
             memory_store: MemoryStore instance with archival and messages
             summarizer: Async function to summarize memories (uses aux model)
             analyzer: Async function to analyze if recall needed (uses aux model)
+            salience_classifier: Async function for emotional salience classification (aux model).
+                                 If None, salience tagging is disabled.
             enabled: Whether to enable memory recall
         """
         self.memory = memory_store
         self.summarizer = summarizer
         # Analyzer is optional. If absent, recall falls back to a simple query builder.
         self.analyzer = analyzer
+        self.salience_classifier = salience_classifier
         self.enabled = enabled
         self._stats = {
             "enabled": enabled,
@@ -92,8 +131,19 @@ class Hippocampus:
             "last_message": "",
             "last_recall_preview": "",
         }
+        self._salience_stats = {
+            "tags_total": 0,
+            "tags_high_arousal": 0,
+            "last_tagged_at": "",
+            "last_error": "",
+            "tags_pruned_total": 0,
+        }
+        self._active_patterns: deque[str] = deque(maxlen=FLASHBACK_LOOKBACK)
         self._trace: deque[dict] = deque(maxlen=50)
-        logger.info(f"Hippocampus initialized (enabled={enabled}, summarizer={summarizer is not None})")
+        logger.info(
+            "Hippocampus initialized (enabled=%s, summarizer=%s, salience=%s)",
+            enabled, summarizer is not None, salience_classifier is not None,
+        )
     
     async def recall(
         self,
@@ -113,6 +163,14 @@ class Hippocampus:
         Returns:
             Formatted (and optionally summarized) memory recall string
         """
+        # Fire-and-forget salience tagging (runs concurrently, doesn't block recall)
+        salience_task: Optional[asyncio.Task] = None
+        if self.salience_classifier:
+            salience_task = asyncio.create_task(
+                self._tag_salience(message),
+                name="salience-tag",
+            )
+
         if not self.enabled:
             call_started = datetime.now(timezone.utc)
             self._stats["calls"] += 1
@@ -177,6 +235,13 @@ class Hippocampus:
             return None
         self._stats["last_query"] = search_query
         
+        # Step 1.5: Emotional recall bias — if recent emotional state is high-arousal,
+        # augment search with emotional keywords to surface emotionally relevant memories.
+        emotional_boost = self._get_emotional_boost()
+        if emotional_boost:
+            search_query = f"{search_query} {emotional_boost}"
+            logger.info("Hippocampus: emotional boost applied: '%s'", emotional_boost)
+
         logger.info(f"Hippocampus: searching with query '{search_query}' (reason: {analysis.get('reason')})")
         
         # Step 2: Search with LLM-generated query
@@ -656,12 +721,300 @@ class Hippocampus:
         
         return message
 
+    # --- Salience tagging (formerly Amygdala) ---
+
+    async def _tag_salience(self, message) -> None:
+        """Classify emotional salience for a user message and append to tags file.
+
+        Runs as fire-and-forget alongside recall. Errors are logged, never raised.
+        """
+        try:
+            # Extract text from multimodal content
+            if isinstance(message, list):
+                text_parts = [
+                    p.get("text", "") for p in message
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                text = " ".join(text_parts).strip()
+            else:
+                text = str(message).strip()
+
+            if not text or len(text) < 5:
+                return
+
+            # Read previous tags for context
+            previous_state = self._read_tags_tail(max_lines=30)
+
+            prompt = SALIENCE_USER_PROMPT.format(
+                previous_state=previous_state or "(none)",
+                recent_signals=text[:2000],
+            )
+
+            raw = await self.salience_classifier(prompt)
+            if not raw:
+                return
+
+            tags = self._parse_salience_tags(raw)
+            if not tags:
+                return
+
+            # Append to tags file
+            self._append_tags(tags)
+            self._update_active_patterns(tags)
+
+            self._salience_stats["tags_total"] += len(tags)
+            self._salience_stats["tags_high_arousal"] += sum(
+                1 for t in tags if t.get("high_arousal")
+            )
+            self._salience_stats["last_tagged_at"] = datetime.now(timezone.utc).isoformat()
+
+        except Exception as e:
+            logger.warning("Salience tagging failed: %s", e)
+            self._salience_stats["last_error"] = str(e)
+
+    @staticmethod
+    def _parse_salience_tags(raw: str) -> list[dict]:
+        """Parse LLM output into normalized salience tag dicts."""
+        candidate = raw.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+            candidate = re.sub(r"\s*```$", "", candidate)
+        # Try direct parse
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            start = candidate.find("[")
+            end = candidate.rfind("]")
+            if start == -1 or end == -1 or end <= start:
+                return []
+            try:
+                data = json.loads(candidate[start:end + 1])
+            except Exception:
+                return []
+
+        if not isinstance(data, list):
+            return []
+
+        normalized = []
+        for item in data[:8]:
+            if not isinstance(item, dict):
+                continue
+            signal = str(item.get("signal", "")).strip()[:180]
+            if not signal:
+                continue
+            try:
+                valence = max(-1.0, min(1.0, float(item.get("valence", 0.0))))
+            except Exception:
+                valence = 0.0
+            try:
+                arousal = max(0.0, min(1.0, float(item.get("arousal", 0.0))))
+            except Exception:
+                arousal = 0.0
+            try:
+                confidence = max(0.0, min(1.0, float(item.get("confidence", 0.5))))
+            except Exception:
+                confidence = 0.5
+            tags = item.get("tags", [])
+            if not isinstance(tags, list):
+                tags = [str(tags)]
+            clean_tags = [str(t).strip()[:32] for t in tags if str(t).strip()]
+            normalized.append({
+                "signal": signal,
+                "valence": round(valence, 2),
+                "arousal": round(arousal, 2),
+                "confidence": round(confidence, 2),
+                "tags": clean_tags or ["neutral"],
+                "high_arousal": arousal >= HIGH_AROUSAL_THRESHOLD,
+            })
+        return normalized
+
+    def _append_tags(self, tags: list[dict]) -> None:
+        """Append salience tags to emotional_tags.md and compact if needed."""
+        if not tags:
+            return
+        now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        lines = [f"## {now}"]
+        for t in tags:
+            ha = " ⚡" if t.get("high_arousal") else ""
+            lines.append(
+                f"- [{t['valence']:+.2f}v {t['arousal']:.2f}a] "
+                f"{', '.join(t.get('tags', []))}: {t['signal'][:120]}{ha}"
+            )
+        lines.append("")
+
+        try:
+            with open(SALIENCE_TAGS_FILE, "a") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            logger.warning("Failed to write salience tags: %s", e)
+            return
+
+        self._compact_tag_log()
+
+    def _compact_tag_log(self) -> None:
+        """Keep emotional tag log bounded; preserve recent window."""
+        try:
+            if not os.path.exists(SALIENCE_TAGS_FILE):
+                return
+            with open(SALIENCE_TAGS_FILE, "r") as f:
+                lines = f.read().splitlines()
+            if len(lines) <= TAG_LOG_MAX_LINES:
+                return
+
+            keep = lines[-TAG_LOG_KEEP_LINES:]
+            pruned = len(lines) - len(keep)
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+            header = [
+                f"# Emotional tags (compacted at {now})",
+                f"- pruned_lines: {pruned}",
+                "- note: keeping only recent rolling window",
+                "",
+            ]
+            with open(SALIENCE_TAGS_FILE, "w") as f:
+                f.write("\n".join(header + keep).strip() + "\n")
+            self._salience_stats["tags_pruned_total"] = (
+                int(self._salience_stats.get("tags_pruned_total", 0)) + pruned
+            )
+        except Exception as e:
+            logger.warning("Failed to compact tag log: %s", e)
+
+    def _update_active_patterns(self, tags: list[dict]) -> None:
+        """Track high-arousal tag patterns for flashback detection."""
+        for item in tags:
+            if not item.get("high_arousal"):
+                continue
+            tag_list = item.get("tags", [])
+            if isinstance(tag_list, list) and tag_list:
+                self._active_patterns.append(str(tag_list[0]))
+
+    def _get_emotional_boost(self) -> str:
+        """Return emotional keywords to bias memory search if high arousal is active.
+
+        Reads the last few tag entries; if any high-arousal tags exist, returns
+        the top emotional keywords to append to the search query.
+        """
+        if not self._active_patterns:
+            return ""
+        # Deduplicate while preserving order
+        seen = set()
+        keywords = []
+        for p in reversed(self._active_patterns):
+            if p not in seen:
+                seen.add(p)
+                keywords.append(p)
+            if len(keywords) >= 3:
+                break
+        if not keywords:
+            return ""
+        return " ".join(keywords)
+
+    def get_emotional_state(self) -> Optional[str]:
+        """Build a one-line emotional state summary from recent salience tags.
+
+        Returns a short string like:
+            '[Emotional state: frustrated (high arousal), recurring: deployment_issues, stuck]'
+        or None if no recent tags.
+
+        Designed to be injected into transient system context so the agent
+        naturally adjusts tone without explicit instructions.
+        """
+        tail = self._read_tags_tail(max_lines=20)
+        if not tail or len(tail.strip()) < 10:
+            return None
+
+        # Parse recent tags from the file
+        recent_tags = []
+        high_arousal_signals = []
+        for line in tail.splitlines():
+            line = line.strip()
+            if not line.startswith("- ["):
+                continue
+            # Parse: - [+0.30v 0.80a] tag1, tag2: signal text ⚡
+            try:
+                bracket_end = line.index("]", 3)
+                scores = line[3:bracket_end]
+                rest = line[bracket_end + 2:]
+                parts = scores.split()
+                arousal = float(parts[1].rstrip("a"))
+                valence = float(parts[0].rstrip("v"))
+                colon_idx = rest.find(":")
+                if colon_idx > 0:
+                    tags_str = rest[:colon_idx].strip()
+                    signal = rest[colon_idx + 1:].strip().rstrip("⚡").strip()
+                else:
+                    tags_str = rest.strip()
+                    signal = ""
+                tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+                recent_tags.extend(tags)
+                if arousal >= HIGH_AROUSAL_THRESHOLD:
+                    high_arousal_signals.append((valence, tags, signal[:60]))
+            except (ValueError, IndexError):
+                continue
+
+        if not recent_tags:
+            return None
+
+        # Build summary
+        parts = []
+
+        if high_arousal_signals:
+            # Describe the dominant high-arousal emotion
+            last_v, last_tags, last_signal = high_arousal_signals[-1]
+            if last_v < -0.3:
+                mood = "distressed"
+            elif last_v < 0:
+                mood = "tense"
+            elif last_v > 0.3:
+                mood = "excited"
+            else:
+                mood = "aroused"
+            parts.append(f"{mood} (high arousal)")
+            if last_signal:
+                parts.append(f"about: {last_signal}")
+
+        # Recurring patterns
+        if self._active_patterns:
+            seen = set()
+            patterns = []
+            for p in reversed(self._active_patterns):
+                if p not in seen:
+                    seen.add(p)
+                    patterns.append(p)
+                if len(patterns) >= 3:
+                    break
+            if patterns:
+                parts.append(f"recurring: {', '.join(patterns)}")
+
+        if not parts:
+            return None
+
+        return f"[Emotional state: {'; '.join(parts)}]"
+
+    @staticmethod
+    def _read_tags_tail(max_lines: int = 30) -> str:
+        """Read last N lines of the tags file for context."""
+        try:
+            if not os.path.exists(SALIENCE_TAGS_FILE):
+                return ""
+            with open(SALIENCE_TAGS_FILE, "r") as f:
+                lines = f.read().splitlines()
+            if not lines:
+                return ""
+            tail = lines[-max_lines:] if len(lines) > max_lines else lines
+            return "\n".join(tail)
+        except Exception:
+            return ""
+
+    # --- Stats and monitoring ---
+
     def get_stats(self) -> dict:
         """Return lightweight runtime stats for monitoring UIs."""
         stats = dict(self._stats)
         calls = max(1, int(stats.get("calls", 0)))
         stats["hit_rate"] = float(stats.get("recalls", 0)) / calls
         stats["recent_trace"] = list(self._trace)
+        stats["salience"] = dict(self._salience_stats)
+        stats["salience"]["active_patterns"] = list(self._active_patterns)
         return stats
 
     def get_context_view(self) -> str:
@@ -685,5 +1038,11 @@ class Hippocampus:
             "",
             "## Last recall preview",
             stats.get("last_recall_preview", "") or "(none)",
+            "",
+            "## Salience tagging",
+            f"- tags_total: {self._salience_stats.get('tags_total', 0)}",
+            f"- tags_high_arousal: {self._salience_stats.get('tags_high_arousal', 0)}",
+            f"- last_tagged_at: {self._salience_stats.get('last_tagged_at') or '-'}",
+            f"- active_patterns: {', '.join(self._active_patterns) or '(none)'}",
         ]
         return "\n".join(lines)

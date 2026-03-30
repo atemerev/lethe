@@ -19,7 +19,7 @@ from lethe.actor import Actor, ActorConfig, ActorMessage, ActorRegistry, ActorSt
 from lethe.actor.tools import create_actor_tools
 from lethe.actor.runner import ActorRunner
 from lethe.actor.dmn import DefaultModeNetwork
-from lethe.actor.amygdala import Amygdala
+# Amygdala merged into hippocampus — salience tagging now runs per-message
 from lethe.actor.brainstem import Brainstem
 from lethe.actor.consolidation import MemoryConsolidation
 from lethe.config import Settings, get_settings
@@ -70,7 +70,7 @@ class ActorSystem:
         self.principal: Optional[Actor] = None
         self.brainstem: Optional[Brainstem] = None
         self.dmn: Optional[DefaultModeNetwork] = None
-        self.amygdala: Optional[Amygdala] = None
+        self.amygdala = None  # Deprecated: salience tagging merged into hippocampus
         self.consolidation: Optional[MemoryConsolidation] = None
         self._background_tasks: Dict[str, asyncio.Task] = {}
         self._principal_monitor_task: Optional[asyncio.Task] = None
@@ -200,15 +200,7 @@ class ActorSystem:
             principal_context_provider=self._get_principal_context,
             model_override=self.settings.llm_model_dmn,
         )
-        if self.settings.amygdala_enabled:
-            self.amygdala = Amygdala(
-                registry=self.registry,
-                available_tools=self._available_tools,
-                cortex_id=self.principal.id,
-                send_to_user=self._send_to_user or (lambda msg: asyncio.sleep(0)),
-                recent_signals_provider=self._get_recent_user_signals,
-                principal_context_provider=self._get_principal_context,
-            )
+        # Amygdala removed: salience tagging now runs per-message in hippocampus
         
         # Initialize Memory Consolidation — slow-cadence memory compression
         if getattr(self.settings, "consolidation_enabled", True):
@@ -222,7 +214,7 @@ class ActorSystem:
 
         tool_count = len(self.agent.llm._tools)
         available_count = len(self._available_tools)
-        amygdala_state = "enabled" if self.amygdala else "disabled"
+        amygdala_state = "merged into hippocampus"
         consolidation_state = "enabled" if self.consolidation else "disabled"
         logger.info(
             f"Actor system initialized. Principal: {self.principal.id}, "
@@ -468,8 +460,7 @@ class ActorSystem:
         if self.dmn:
             self.dmn.send_to_user = send_to_user
             self.dmn.get_reminders = get_reminders
-        if self.amygdala:
-            self.amygdala.send_to_user = send_to_user
+        # Amygdala removed — salience tagging in hippocampus doesn't need send_to_user
         if self.consolidation:
             self.consolidation.send_to_user = send_to_user
 
@@ -482,12 +473,6 @@ class ActorSystem:
         if self.dmn is None:
             return None
         return await self.dmn.run_round()
-
-    async def amygdala_round(self) -> Optional[str]:
-        """Run an Amygdala round. Called by heartbeat timer."""
-        if self.amygdala is None:
-            return None
-        return await self.amygdala.run_round()
 
     async def consolidation_round(self) -> Optional[str]:
         """Run a consolidation round. Called by heartbeat timer.
@@ -506,11 +491,13 @@ class ActorSystem:
         return None
 
     async def background_round(self) -> Optional[str]:
-        """Run background cognition rounds (DMN + Amygdala + Consolidation)."""
+        """Run background cognition rounds (DMN + Consolidation).
+
+        Amygdala salience tagging now runs per-message in hippocampus.
+        """
         dmn_result = await self.dmn_round()
-        amygdala_result = await self.amygdala_round()
         await self.consolidation_round()  # self-gating, no user-facing output
-        return dmn_result or amygdala_result
+        return dmn_result
 
     async def shutdown(self):
         """Shut down all actors gracefully."""
@@ -550,7 +537,7 @@ class ActorSystem:
             if e.event_type in {"actor_spawned", "actor_terminated"}
         ][-30:]
         dmn_status = self.dmn.status if self.dmn else {}
-        amygdala_status = self.amygdala.status if self.amygdala else {}
+        amygdala_status = {}  # Deprecated: merged into hippocampus
         brainstem_status = self.brainstem.status if self.brainstem else {}
         actor_last_event_at: dict[str, str] = {}
         for e in all_events:
