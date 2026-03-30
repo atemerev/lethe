@@ -17,7 +17,7 @@ from lethe.utils import strip_model_tags
 logger = logging.getLogger(__name__)
 
 # Default interval in seconds (15 minutes)
-DEFAULT_HEARTBEAT_INTERVAL = 15 * 60
+DEFAULT_HEARTBEAT_INTERVAL = 60 * 60  # 1 hour
 # Full context heartbeat interval (2 hours)
 FULL_CONTEXT_INTERVAL = 2 * 60 * 60
 

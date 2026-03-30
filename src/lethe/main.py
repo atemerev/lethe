@@ -201,7 +201,7 @@ async def run():
     # heartbeat_callback will be set below after Heartbeat is created
 
     # Initialize heartbeat
-    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 15 * 60))  # Default 15 min
+    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 60 * 60))  # Default 1 hour
     heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
     
     # Get the first allowed user ID for heartbeat messages
@@ -549,7 +549,7 @@ async def run_api(port: int = 8080):
     api_module._settings = settings
 
     # Initialize heartbeat with proactive messages going to /events SSE
-    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 15 * 60))
+    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 60 * 60))  # Default 1 hour
     heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
 
     async def heartbeat_process(message: str) -> str:
