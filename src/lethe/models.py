@@ -1,72 +1,39 @@
-"""Curated model catalog for /model and /aux commands.
+"""Model catalog loader — single source of truth in config/model_catalog.json."""
 
-Updated March 2026. Only recent models (≤5 months old), tool-capable, ≥100k context.
-"""
+import json
+import os
+from pathlib import Path
 
-# {provider: {kind: [(display_name, model_id, pricing_str), ...]}}
-MODEL_CATALOG = {
-    "openrouter": {
-        "main": [
-            ("Kimi K2.5", "openrouter/moonshotai/kimi-k2.5", "$0.42/$2.20"),
-            ("Claude Opus 4.6", "openrouter/anthropic/claude-opus-4.6", "$5/$25"),
-            ("Claude Sonnet 4.6", "openrouter/anthropic/claude-sonnet-4.6", "$3/$15"),
-            ("GPT-5.4", "openrouter/openai/gpt-5.4", "$2.50/$15"),
-            ("GPT-5.2", "openrouter/openai/gpt-5.2", "$1.75/$14"),
-            ("MiMo V2 Pro", "openrouter/xiaomi/mimo-v2-pro", "$1/$3"),
-            ("MiniMax M2.7", "openrouter/minimax/minimax-m2.7", "$0.30/$1.20"),
-            ("Gemini 3.1 Pro", "openrouter/google/gemini-3.1-pro-preview", "$2/$12"),
-            ("Grok 4.20 Beta", "openrouter/x-ai/grok-4.20-beta", "$2/$6"),
-            ("GLM 5 Turbo", "openrouter/z-ai/glm-5-turbo", "$1.20/$4"),
-            ("Qwen 3.5 Plus", "openrouter/qwen/qwen3.5-plus-02-15", "$0.26/$1.56"),
-        ],
-        "aux": [
-            ("Gemini 3 Flash", "openrouter/google/gemini-3-flash-preview", "$0.50/$3"),
-            ("Qwen 3.5 Flash", "openrouter/qwen/qwen3.5-flash-02-23", "$0.07/$0.26"),
-            ("GPT-5.4 Nano", "openrouter/openai/gpt-5.4-nano", "$0.20/$1.25"),
-            ("GLM 4.7 Flash", "openrouter/z-ai/glm-4.7-flash", "$0.06/$0.40"),
-            ("MiMo V2 Flash", "openrouter/xiaomi/mimo-v2-flash", "$0.09/$0.29"),
-            ("Claude Haiku 4.5", "openrouter/anthropic/claude-haiku-4.5", "$1/$5"),
-            ("Gemini 3.1 Flash Lite", "openrouter/google/gemini-3.1-flash-lite-preview", "$0.25/$1.50"),
-        ],
-    },
-    "anthropic": {
-        "main": [
-            ("Claude Opus 4.6", "claude-opus-4-6", "$5/$25"),
-            ("Claude Sonnet 4.6", "claude-sonnet-4-6", "$3/$15"),
-            ("Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", "$3/$15"),
-            ("Claude Haiku 4.5", "claude-haiku-4-5-20251001", "$1/$5"),
-        ],
-        "aux": [
-            ("Claude Haiku 4.5", "claude-haiku-4-5-20251001", "$1/$5"),
-            ("Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", "$3/$15"),
-        ],
-    },
-    "openai": {
-        "main": [
-            ("GPT-5.4", "gpt-5.4", "$2.50/$15"),
-            ("GPT-5.2", "gpt-5.2", "$1.75/$14"),
-            ("GPT-5", "gpt-5", "$1.25/$10"),
-            ("GPT-5.4 Mini", "gpt-5.4-mini", "$0.75/$4.50"),
-        ],
-        "aux": [
-            ("GPT-5.4 Mini", "gpt-5.4-mini", "$0.75/$4.50"),
-            ("GPT-5.4 Nano", "gpt-5.4-nano", "$0.20/$1.25"),
-            ("GPT-5 Mini", "gpt-5-mini", "$0.25/$2"),
-        ],
-    },
-}
+# Resolve catalog path relative to project root (works for both direct and installed)
+_CATALOG_PATHS = [
+    Path(__file__).resolve().parent.parent.parent / "config" / "model_catalog.json",  # dev: src/lethe/../../config/
+    Path(os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))) / "config" / "model_catalog.json",
+]
+
+
+def _load_catalog() -> dict:
+    for p in _CATALOG_PATHS:
+        if p.exists():
+            with open(p) as f:
+                data = json.load(f)
+            # Strip metadata keys
+            return {k: v for k, v in data.items() if not k.startswith("_")}
+    return {}
+
+
+MODEL_CATALOG: dict = _load_catalog()
 
 
 def build_model_keyboard(provider: str, kind: str, current_model: str) -> list[list[dict]]:
     """Build inline keyboard button data for model selection.
-    
+
     Returns list of rows, each row is a list of {text, callback_data} dicts.
     """
     catalog = MODEL_CATALOG.get(provider, {})
     models = catalog.get(kind, [])
     rows = []
     for name, model_id, pricing in models:
-        marker = "✅ " if model_id == current_model else ""
+        marker = "\u2705 " if model_id == current_model else ""
         btn_text = f"{marker}{name} ({pricing})"
         callback_data = f"{kind}:{model_id}"
         if len(callback_data) > 64:
