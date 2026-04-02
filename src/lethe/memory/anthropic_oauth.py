@@ -393,50 +393,95 @@ class AnthropicOAuth:
     
     @staticmethod
     def _clean_orphaned_tool_pairs(messages: List[Dict]) -> List[Dict]:
-        """Remove tool_result blocks that have no matching tool_use in the previous message.
+        """Ensure every tool_use has a matching tool_result and vice versa.
         
-        Anthropic requires every tool_result to reference a tool_use ID from
-        the immediately preceding assistant message. Orphans cause 400 errors.
+        Anthropic requires:
+        1. Every tool_result references a tool_use ID from the immediately preceding assistant message
+        2. Every tool_use in an assistant message is followed by a tool_result in the next user message
+        
+        Violations cause 400 errors. This method strips orphans in both directions.
         """
+        if not messages:
+            return messages
+
+        # Forward pass: collect tool_use IDs per assistant message
+        # and check which ones have results in the next message
+        tool_use_ids_by_idx = {}  # msg_idx → set of tool_use IDs
+        tool_result_ids_by_idx = {}  # msg_idx → set of tool_use_ids referenced by tool_results
+
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            uses = set()
+            results = set()
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_use":
+                        uses.add(block.get("id", ""))
+                    elif block.get("type") == "tool_result":
+                        results.add(block.get("tool_use_id", ""))
+            if uses:
+                tool_use_ids_by_idx[i] = uses
+            if results:
+                tool_result_ids_by_idx[i] = results
+
+        # Build set of tool_use IDs that have matching results
+        matched_use_ids = set()
+        for i, use_ids in tool_use_ids_by_idx.items():
+            # Look for results in subsequent messages until next assistant tool_use
+            for j in range(i + 1, len(messages)):
+                if j in tool_result_ids_by_idx:
+                    matched_use_ids.update(use_ids & tool_result_ids_by_idx[j])
+                # Stop looking if we hit another assistant message with tool_use
+                if j in tool_use_ids_by_idx:
+                    break
+
+        # Build set of tool_result IDs that have matching uses
+        matched_result_ids = set()
+        for i, result_ids in tool_result_ids_by_idx.items():
+            # Look backwards for the tool_use
+            for j in range(i - 1, -1, -1):
+                if j in tool_use_ids_by_idx:
+                    matched_result_ids.update(result_ids & tool_use_ids_by_idx[j])
+                    break
+
+        # Clean pass: filter out unmatched tool_use and tool_result blocks
         cleaned = []
         for i, msg in enumerate(messages):
             content = msg.get("content")
             if not isinstance(content, list):
                 cleaned.append(msg)
                 continue
-            
-            # Collect tool_use IDs from previous assistant message
-            prev_tool_ids = set()
-            if cleaned:
-                prev = cleaned[-1]
-                prev_content = prev.get("content")
-                if prev.get("role") == "assistant" and isinstance(prev_content, list):
-                    for block in prev_content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            prev_tool_ids.add(block.get("id", ""))
-            
-            # Filter out orphaned tool_result blocks
-            has_tool_results = any(
-                isinstance(b, dict) and b.get("type") == "tool_result"
-                for b in content
-            )
-            if not has_tool_results:
-                cleaned.append(msg)
-                continue
-            
-            filtered_blocks = []
+
+            filtered = []
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
+                if not isinstance(block, dict):
+                    filtered.append(block)
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    tid = block.get("id", "")
+                    if tid in matched_use_ids:
+                        filtered.append(block)
+                    else:
+                        logger.warning(f"Dropping orphaned tool_use (id={tid[:30]})")
+                elif btype == "tool_result":
                     tid = block.get("tool_use_id", "")
-                    if tid not in prev_tool_ids:
-                        logger.warning(f"Dropping orphaned tool_result (tool_use_id={tid[:20]})")
-                        continue
-                filtered_blocks.append(block)
-            
-            if filtered_blocks:
-                cleaned.append({**msg, "content": filtered_blocks})
-            # else: entire message was orphaned tool_results, drop it
-        
+                    if tid in matched_result_ids:
+                        filtered.append(block)
+                    else:
+                        logger.warning(f"Dropping orphaned tool_result (tool_use_id={tid[:30]})")
+                else:
+                    filtered.append(block)
+
+            if filtered:
+                cleaned.append({**msg, "content": filtered})
+            else:
+                # Entire message was orphaned tool blocks — check if we can skip it
+                # Don't drop if it would create consecutive same-role messages
+                logger.warning(f"Dropping message {i} (all tool blocks orphaned)")
+
         return cleaned
     
     def _parse_response(self, data: dict) -> dict:
