@@ -6,6 +6,7 @@ headers, tool naming, and request format. Tokens are refreshed automatically.
 Based on reverse-engineering from opencode-anthropic-auth plugin.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -16,6 +17,14 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimitError(RuntimeError):
+    """Raised on HTTP 429. Carries retry_after seconds."""
+    def __init__(self, message: str, retry_after: float = 30.0):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 # Claude Code's OAuth client ID (public, embedded in the CLI)
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -113,6 +122,10 @@ class AnthropicOAuth:
         self.refresh_token = refresh_token
         self.expires_at = expires_at or 0
         self._client: Optional[httpx.AsyncClient] = None
+        
+        # Shared rate limit state: all callers check this before making requests
+        self._rate_limit_until: float = 0  # monotonic time when rate limit expires
+        self._rate_limit_lock = asyncio.Lock()
         
         # Try loading from env or file if not provided
         if not self.access_token:
@@ -608,7 +621,26 @@ class AnthropicOAuth:
         
         logger.info(f"OAuth API call: model={model}, messages={len(api_messages)}, tools={len(api_tools)}")
         
+        # Wait for any active rate limit cooldown before making the request
+        await self._wait_for_rate_limit()
+        
         response = await client.post(url, headers=headers, json=body)
+        
+        if response.status_code == 429:
+            self._set_rate_limit(response)
+            error_text = response.text[:500]
+            logger.warning(f"OAuth rate limited (429): {error_text}")
+            raise RateLimitError(
+                f"Anthropic OAuth rate limited (429) - {error_text}",
+                retry_after=self._parse_retry_after(response),
+            )
+        
+        if response.status_code == 529:
+            error_text = response.text[:500]
+            logger.warning(f"OAuth overloaded (529): {error_text}")
+            raise RuntimeError(
+                f"Anthropic OAuth overloaded (529) - {error_text}"
+            )
         
         if response.status_code != 200:
             error_text = response.text[:500]
@@ -629,6 +661,30 @@ class AnthropicOAuth:
         parsed = self._parse_response(data)
         parsed["_response_headers"] = {k.lower(): v for k, v in response.headers.items()}
         return parsed
+    
+    @staticmethod
+    def _parse_retry_after(response: httpx.Response) -> float:
+        """Parse retry-after header, return seconds to wait."""
+        retry_after = response.headers.get("retry-after", "")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return 30.0  # Default if no header
+    
+    def _set_rate_limit(self, response: httpx.Response):
+        """Set shared rate limit cooldown from response headers."""
+        wait = self._parse_retry_after(response)
+        self._rate_limit_until = time.monotonic() + wait
+        logger.warning(f"Rate limit set: waiting {wait:.0f}s (until +{wait:.0f}s)")
+    
+    async def _wait_for_rate_limit(self):
+        """Wait if a rate limit cooldown is active. All callers share this."""
+        remaining = self._rate_limit_until - time.monotonic()
+        if remaining > 0:
+            logger.info(f"Rate limit active, waiting {remaining:.1f}s before request")
+            await asyncio.sleep(remaining)
     
     async def close(self):
         """Close the HTTP client."""

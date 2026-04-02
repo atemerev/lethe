@@ -17,7 +17,7 @@ import litellm
 from litellm import acompletion, completion
 
 from lethe.utils import strip_model_tags
-from lethe.memory.anthropic_oauth import AnthropicOAuth, is_oauth_available
+from lethe.memory.anthropic_oauth import AnthropicOAuth, RateLimitError, is_oauth_available
 from lethe.memory.openai_oauth import OpenAIOAuth, is_oauth_available_openai
 from lethe.prompts import load_prompt_template
 
@@ -1647,8 +1647,15 @@ class AsyncLLMClient:
         logger.error(f"API call failed after {max_retries} attempts: {last_error}")
         raise last_error
     
-    async def _call_with_retry_oauth(self, kwargs: Dict, log_type: str, max_retries: int = 5) -> Dict:
-        """Route any litellm-style kwargs through OAuth instead."""
+    async def _call_with_retry_oauth(self, kwargs: Dict, log_type: str, max_retries: int = 3) -> Dict:
+        """Route any litellm-style kwargs through OAuth instead.
+        
+        Rate limit handling:
+        - RateLimitError (429) uses retry_after from Anthropic's header
+        - The OAuth client has shared cooldown state so concurrent callers
+          don't all hammer the API independently
+        - Only 3 retries (not 5) since each wait is already server-guided
+        """
         import asyncio
         
         messages = kwargs.get("messages", [])
@@ -1668,19 +1675,20 @@ class AsyncLLMClient:
                 self._track_provider_headers(result)
                 _log_llm_interaction(kwargs, result, f"{log_type}_oauth")
                 return result
+            except RateLimitError as e:
+                last_error = e
+                # Server tells us when to retry; shared cooldown already set on OAuth client
+                wait_time = e.retry_after
+                logger.warning(f"OAuth 429 (attempt {attempt + 1}/{max_retries}), waiting {wait_time:.0f}s (server retry-after)...")
+                await asyncio.sleep(wait_time)
             except Exception as e:
                 last_error = e
                 error_str = str(e).lower()
                 
-                is_rate_limit = self._is_rate_limit_error(error_str)
-                is_transient = self._is_transient_error(error_str)
+                is_transient = self._is_transient_error(error_str) or "529" in error_str
                 
-                if is_rate_limit:
-                    wait_time = min(60, 15 * (attempt + 1))
-                    logger.warning(f"OAuth rate limit (attempt {attempt + 1}/{max_retries}), waiting {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                elif is_transient:
-                    wait_time = (attempt + 1) * 2
+                if is_transient:
+                    wait_time = (attempt + 1) * 5
                     logger.warning(f"OAuth transient error (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
                     await asyncio.sleep(wait_time)
                 else:
