@@ -46,8 +46,14 @@ class SubconsciousClient:
         self._fallback = fallback_complete
         self._available = False
 
+        # Ollama doesn't support per-request LoRA hot-swap like vLLM.
+        # In Ollama mode, all adapters route to the base model until
+        # specialized models are trained and registered (e.g. ollama create lethe-recall).
+        self._ollama_mode = model_prefix.startswith("ollama/")
+
         if self._enabled:
-            logger.info("Subconscious client initialized: %s (prefix: %s)", api_base, model_prefix)
+            mode = "ollama" if self._ollama_mode else "vllm"
+            logger.info("Subconscious client initialized: %s (prefix: %s, mode: %s)", api_base, model_prefix, mode)
         else:
             logger.info("Subconscious client disabled — using cloud fallback")
 
@@ -64,7 +70,12 @@ class SubconsciousClient:
         """
         if self._enabled:
             try:
-                model = f"{self._model_prefix}-{adapter}"
+                # Ollama: all adapters hit the base model (no hot-swap).
+                # vLLM: each adapter is a distinct model name.
+                if self._ollama_mode:
+                    model = self._model_prefix
+                else:
+                    model = f"{self._model_prefix}-{adapter}"
                 messages = []
                 if system:
                     messages.append({"role": "system", "content": system})

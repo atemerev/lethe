@@ -24,6 +24,8 @@ from lethe.cognition import CognitionLoop
 from lethe.relationships import RelationshipManager
 from lethe.experiments import ExperimentRunner
 from lethe.tension import TensionRegistry
+from lethe.subconscious import SubconsciousClient
+from lethe.dream import DreamProcessor
 from lethe import console as lethe_console
 
 console = Console()
@@ -70,8 +72,34 @@ async def run():
     await agent.initialize()  # Async init: load history with summarization
     agent.refresh_memory_context()
 
-    # Initialize drive system
+    # Initialize subconscious (local model layer)
     workspace_dir = str(settings.workspace_dir)
+
+    async def _aux_fallback(prompt: str) -> str:
+        """Cloud aux model fallback for subconscious tasks."""
+        return await agent.llm.complete(prompt, use_aux=True, usage_tag="subconscious")
+
+    subconscious = SubconsciousClient(
+        api_base=settings.llm_local_api_base,
+        model_prefix=settings.llm_local_model,
+        enabled=settings.llm_local_enabled,
+        fallback_complete=_aux_fallback,
+    )
+    if settings.llm_local_enabled:
+        console.print(f"[cyan]Subconscious[/cyan] local model: {settings.llm_local_model} @ {settings.llm_local_api_base}")
+
+    # Initialize dream processor (LoRA training data pipeline)
+    async def _dream_llm_complete(prompt: str) -> str:
+        """Frontier LLM for dream pattern extraction."""
+        return await agent.llm.complete(prompt, use_aux=True, usage_tag="dream")
+
+    dream_processor = DreamProcessor(
+        workspace_dir=workspace_dir,
+        llm_complete=_dream_llm_complete,
+    )
+    console.print(f"[cyan]Dream processor[/cyan] training data: {dream_processor._training_data_path}")
+
+    # Initialize drive system
     drives = DriveSystem()
     drives_state_path = os.path.join(workspace_dir, "drives_state.json")
     drives.load(drives_state_path)
@@ -428,12 +456,142 @@ async def run():
         """Consolidate memory — runs DMN with creative reinterpretation."""
         return await cognition_think("consolidate memory, update deep identity")
 
+    # --- Dream cycle: collect → extract → train LoRA → reload model ---
+
+    # Training threshold: minimum examples before triggering LoRA training
+    DREAM_TRAIN_THRESHOLD = int(os.environ.get("DREAM_TRAIN_THRESHOLD", "50"))
+    # Track last training count to detect new data since last train
+    _last_trained_count = 0
+    _training_in_progress = False
+
+    async def _collect_conversations() -> list[dict]:
+        """Collect and group recent messages into conversations."""
+        recent_messages = agent.memory.messages.get_recent(limit=200)
+        if not recent_messages:
+            return []
+
+        conversations = []
+        current_conv: list[dict] = []
+        last_time = None
+        for msg in recent_messages:
+            msg_time = msg.get("created_at", "")
+            if last_time and msg_time:
+                try:
+                    from datetime import datetime as dt
+                    t1 = dt.fromisoformat(last_time.replace("Z", "+00:00"))
+                    t2 = dt.fromisoformat(msg_time.replace("Z", "+00:00"))
+                    gap = abs((t2 - t1).total_seconds())
+                    if gap > 1800:  # 30 min gap = new conversation
+                        if len(current_conv) >= 2:
+                            conversations.append({"messages": current_conv})
+                        current_conv = []
+                except (ValueError, TypeError):
+                    pass
+            current_conv.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", ""),
+            })
+            last_time = msg_time
+        if len(current_conv) >= 2:
+            conversations.append({"messages": current_conv})
+        return conversations
+
+    async def _run_lora_training() -> str:
+        """Run LoRA training in a subprocess (non-blocking)."""
+        nonlocal _training_in_progress
+        if _training_in_progress:
+            return "training already in progress"
+        _training_in_progress = True
+
+        import subprocess as sp
+
+        training_data = dream_processor._training_data_path
+        base_model = os.environ.get("DREAM_BASE_MODEL", "Qwen/Qwen3-8B-Instruct")
+        ollama_name = os.environ.get("DREAM_OLLAMA_MODEL", "lethe-dreamer")
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "..", "scripts", "train_lora.py")
+        # Resolve to absolute path
+        script = os.path.normpath(script)
+
+        cmd = [
+            sys.executable, script,
+            "--training-data", training_data,
+            "--base-model", base_model,
+            "--ollama-import", ollama_name,
+        ]
+        logger.info("Starting LoRA training subprocess: %s", " ".join(cmd))
+
+        try:
+            # Run in executor to not block the event loop
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: sp.run(cmd, capture_output=True, text=True, timeout=3600),
+            )
+            if result.returncode == 0:
+                logger.info("LoRA training completed successfully")
+                # Update subconscious to use the new model
+                new_model = f"ollama/{ollama_name}"
+                subconscious._model_prefix = new_model
+                logger.info("Subconscious model updated to %s", new_model)
+                return f"training complete, model switched to {new_model}"
+            else:
+                logger.error("LoRA training failed (exit %d): %s", result.returncode, result.stderr[-500:])
+                return f"training failed: {result.stderr[-200:]}"
+        except sp.TimeoutExpired:
+            logger.error("LoRA training timed out (1h)")
+            return "training timed out"
+        except Exception as e:
+            logger.error("LoRA training error: %s", e)
+            return f"training error: {e}"
+        finally:
+            _training_in_progress = False
+
+    async def cognition_dream() -> str:
+        """Full dream cycle: collect → extract patterns → train LoRA if threshold met."""
+        nonlocal _last_trained_count
+        try:
+            # Phase 1: Collect and process conversations
+            conversations = await _collect_conversations()
+            if not conversations:
+                return "no conversations to dream about"
+
+            stats = await dream_processor.run_dream_cycle(conversations)
+            training_stats = dream_processor.get_training_stats()
+            total_examples = training_stats["training_examples"]
+            new_since_train = total_examples - _last_trained_count
+
+            result = (
+                f"dream: {stats['collected']} convs → {stats['anonymized']} anonymized "
+                f"→ {stats['examples_accepted']} accepted "
+                f"(total: {total_examples}, new since last train: {new_since_train})"
+            )
+            logger.info(result)
+
+            # Phase 2: Train LoRA if enough new examples accumulated
+            if new_since_train >= DREAM_TRAIN_THRESHOLD and settings.llm_local_enabled:
+                logger.info(
+                    "Training threshold reached (%d >= %d), starting LoRA training",
+                    new_since_train, DREAM_TRAIN_THRESHOLD,
+                )
+                train_result = await _run_lora_training()
+                _last_trained_count = total_examples
+                result += f" | {train_result}"
+            elif new_since_train > 0:
+                result += f" | {DREAM_TRAIN_THRESHOLD - new_since_train} more examples until training"
+
+            return result
+        except Exception as e:
+            logger.error("Dream cycle failed: %s", e, exc_info=True)
+            return f"dream failed: {e}"
+
     cognition = CognitionLoop(
         drives=drives,
         on_think=cognition_think,
         on_respond=cognition_respond,
         on_message=cognition_message,
         on_consolidate=cognition_consolidate,
+        on_dream=cognition_dream,
         get_reminders=get_active_reminders,
         get_tensions_above_threshold=tension.get_above_threshold,
         drives_state_path=drives_state_path,

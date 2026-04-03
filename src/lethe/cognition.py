@@ -73,11 +73,13 @@ class CognitionLoop:
         on_research: Optional[Callable[[str], Awaitable[str]]] = None,
         on_experiment: Optional[Callable[[str], Awaitable[str]]] = None,
         on_consolidate: Optional[Callable[[], Awaitable[str]]] = None,
+        on_dream: Optional[Callable[[], Awaitable[str]]] = None,
         get_pending_messages: Optional[Callable[[], Awaitable[list[PendingMessage]]]] = None,
         get_reminders: Optional[Callable[[], Awaitable[str]]] = None,
         get_tensions_above_threshold: Optional[Callable[[], list]] = None,
         decide_action_llm: Optional[Callable[[DriveSystem, CycleContext], Awaitable[Action]]] = None,
         drives_state_path: str = "",
+        dream_hour: int = 3,  # Hour (0-23) to trigger nightly dream cycle
     ):
         self.drives = drives
         self._on_think = on_think
@@ -86,6 +88,7 @@ class CognitionLoop:
         self._on_research = on_research
         self._on_experiment = on_experiment
         self._on_consolidate = on_consolidate
+        self._on_dream = on_dream
         self._get_pending_messages = get_pending_messages
         self._get_reminders = get_reminders
         self._get_tensions = get_tensions_above_threshold
@@ -97,6 +100,8 @@ class CognitionLoop:
         self._max_recent_actions = 20
         self._cycle_count = 0
         self._last_social_time = time.time()
+        self._dream_hour = dream_hour
+        self._last_dream_date: Optional[str] = None  # YYYY-MM-DD of last dream cycle
 
     async def run(self):
         """Main loop — runs until shutdown."""
@@ -109,6 +114,9 @@ class CognitionLoop:
             try:
                 # 1. Tick drives (decay satisfaction based on elapsed time)
                 self.drives.tick()
+
+                # 1.5. Nightly dream cycle check
+                await self._maybe_dream()
 
                 # 2. Gather context
                 context = await self._gather_context()
@@ -296,6 +304,27 @@ class CognitionLoop:
         # Sustained activity boosts rest need
         if action.kind not in ("rest", "skip"):
             self.drives.on_event("high_activity")
+
+    async def _maybe_dream(self):
+        """Trigger nightly dream cycle if it's the right hour and hasn't run today."""
+        if not self._on_dream:
+            return
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        if now.hour == self._dream_hour and self._last_dream_date != today:
+            logger.info("Dream cycle triggered (hour=%d, date=%s)", self._dream_hour, today)
+            self._last_dream_date = today
+            try:
+                result = await self._on_dream()
+                logger.info("Dream cycle complete: %s", result)
+            except Exception as e:
+                logger.error("Dream cycle failed: %s", e, exc_info=True)
+
+    async def trigger_dream(self):
+        """Manually trigger a dream cycle (for /dream command or testing)."""
+        if self._on_dream:
+            return await self._on_dream()
+        return "dream processor not configured"
 
     def stop(self):
         """Signal the cognition loop to stop."""

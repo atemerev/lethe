@@ -54,3 +54,11 @@ emotional_tags.md
 .dmn_state_reset_v1
 epost/
 browser/
+# Runtime state (per-user, per-session)
+workspace-split/
+
+# Runtime state (per-user, per-session)
+workspace-split/
+data-split/
+outputs/
+unsloth_compiled_cache/
