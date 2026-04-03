@@ -20,6 +20,7 @@ dependencies = [
     "litellm>=1.81.6,!=1.82.7,!=1.82.8",
     "nicegui>=3.7.1",
     "psutil>=7.2.2",
+    "unsloth>=2026.4.1",
 ]
 # Note: Browser automation requires agent-browser CLI: npm install -g agent-browser
 

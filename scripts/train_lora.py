@@ -192,58 +192,87 @@ def train(args):
     tokenizer.save_pretrained(str(adapter_path))
     logger.info("LoRA adapter saved to %s", adapter_path)
 
-    # Import into Ollama if requested (uses Ollama's native adapter support)
+    # Import into Ollama: merge LoRA → convert to GGUF → quantize → ollama create
     if args.ollama_import:
-        ollama_import(adapter_path, args.ollama_import, args.base_model)
-
-    # Legacy GGUF export (optional, for non-Ollama deployments)
-    if args.export_gguf and not args.ollama_import:
-        export_gguf(model, tokenizer, output_dir, args.gguf_quant)
+        ollama_import(adapter_path, args.ollama_import, args.base_model,
+                      output_dir, args.gguf_quant)
 
     logger.info("Training complete.")
     return str(adapter_path)
 
 
-def export_gguf(model, tokenizer, output_dir: Path, quant: str = "q4_k_m"):
-    """Export merged model as GGUF for non-Ollama deployments."""
-    gguf_dir = output_dir / "gguf"
-    logger.info("Exporting merged GGUF (%s) to %s", quant, gguf_dir)
-    model.save_pretrained_gguf(
-        str(gguf_dir),
-        tokenizer,
-        quantization_method=quant,
-    )
-    logger.info("GGUF export complete: %s", gguf_dir)
+def ollama_import(adapter_path: Path, model_name: str, base_model: str,
+                  output_dir: Path, quant: str = "q4_k_m"):
+    """Merge LoRA into base model, convert to GGUF, quantize, import into Ollama.
 
-
-def ollama_import(adapter_path: Path, model_name: str, base_model: str):
-    """Import LoRA adapter into Ollama using native adapter support.
-
-    Uses Ollama's Modelfile with FROM (base) + ADAPTER (LoRA safetensors).
-    No GGUF conversion needed — Ollama handles quantization internally.
+    Pipeline: PEFT merge (CPU) → llama.cpp convert_hf_to_gguf → llama-quantize → ollama create
     """
-    import subprocess
+    import subprocess as sp
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+    import torch
 
-    # Map HuggingFace model name to Ollama model name
-    ollama_base = os.environ.get("DREAM_OLLAMA_BASE", "qwen3.5:9b")
+    llama_cpp_dir = os.environ.get("LLAMA_CPP_DIR", os.path.expanduser("~/devel/llama.cpp"))
+    convert_script = os.path.join(llama_cpp_dir, "convert_hf_to_gguf.py")
+    quantize_bin = os.path.join(llama_cpp_dir, "build", "bin", "llama-quantize")
 
-    # Create Ollama Modelfile
-    modelfile_path = adapter_path.parent / "Modelfile"
-    modelfile_content = f"""FROM {ollama_base}
-ADAPTER {adapter_path}
+    if not os.path.exists(convert_script):
+        logger.error("llama.cpp not found at %s. Set LLAMA_CPP_DIR env var.", llama_cpp_dir)
+        return
+    if not os.path.exists(quantize_bin):
+        logger.error("llama-quantize not found. Build llama.cpp first.")
+        return
 
-PARAMETER temperature 0.7
-PARAMETER top_p 0.9
-PARAMETER num_ctx {MAX_SEQ_LENGTH}
+    merged_dir = output_dir / "merged"
+    f16_gguf = output_dir / f"{model_name}-f16.gguf"
+    quant_gguf = output_dir / f"{model_name}-{quant}.gguf"
 
-SYSTEM You are the subconscious layer of an autonomous AI entity. You handle pattern recognition, emotional salience, memory recall decisions, and reflective insight.
-"""
-    modelfile_path.write_text(modelfile_content)
-    logger.info("Created Modelfile at %s (base: %s, adapter: %s)", modelfile_path, ollama_base, adapter_path)
+    # Step 1: Merge LoRA into base model on CPU
+    logger.info("Merging LoRA adapter into base model (CPU)...")
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model, torch_dtype=torch.bfloat16, device_map="cpu",
+    )
+    model = PeftModel.from_pretrained(base, str(adapter_path))
+    merged = model.merge_and_unload()
+    merged.save_pretrained(str(merged_dir), safe_serialization=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(adapter_path))
+    tokenizer.save_pretrained(str(merged_dir))
+    del base, model, merged
+    logger.info("Merged model saved to %s", merged_dir)
 
-    # Create model in Ollama
+    # Step 2: Convert to f16 GGUF
+    logger.info("Converting to f16 GGUF...")
+    result = sp.run(
+        [sys.executable, convert_script, str(merged_dir),
+         "--outfile", str(f16_gguf), "--outtype", "f16"],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        logger.error("GGUF conversion failed: %s", result.stderr[-500:])
+        return
+
+    # Step 3: Quantize
+    logger.info("Quantizing to %s...", quant)
+    result = sp.run(
+        [quantize_bin, str(f16_gguf), str(quant_gguf), quant],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        logger.error("Quantization failed: %s", result.stderr[-500:])
+        return
+
+    # Step 4: Create Ollama model
+    modelfile_path = output_dir / "Modelfile"
+    modelfile_path.write_text(
+        f"FROM {quant_gguf}\n\n"
+        f"PARAMETER temperature 0.7\nPARAMETER top_p 0.9\n"
+        f"PARAMETER num_ctx {MAX_SEQ_LENGTH}\n\n"
+        "SYSTEM You are the subconscious layer of an autonomous AI entity. "
+        "You handle pattern recognition, emotional salience, memory recall "
+        "decisions, and reflective insight.\n"
+    )
     logger.info("Importing into Ollama as '%s'...", model_name)
-    result = subprocess.run(
+    result = sp.run(
         ["ollama", "create", model_name, "-f", str(modelfile_path)],
         capture_output=True, text=True, timeout=600,
     )
@@ -251,6 +280,15 @@ SYSTEM You are the subconscious layer of an autonomous AI entity. You handle pat
         logger.info("Successfully imported as ollama model '%s'", model_name)
     else:
         logger.error("Ollama import failed: %s", result.stderr)
+
+    # Cleanup intermediate files
+    import shutil
+    for p in [merged_dir, f16_gguf]:
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        elif p.exists():
+            p.unlink(missing_ok=True)
+    logger.info("Cleaned up intermediate files")
 
 
 def main():
