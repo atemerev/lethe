@@ -86,14 +86,18 @@ class Settings(BaseSettings):
         description="Enable memory consolidation (background memory compression, aux model)",
     )
 
-    # Proactive messaging limits (hard enforcement, not prompt-dependent)
-    proactive_max_per_day: int = Field(
-        default=4,
-        description="Maximum proactive messages to user per calendar day (0 = disabled)",
+    # Local model (subconscious layer)
+    llm_local_model: str = Field(
+        default="",
+        description="Local model for subconscious tasks (e.g., 'openai/lethe-base' for vLLM)",
     )
-    proactive_cooldown_minutes: int = Field(
-        default=60,
-        description="Minimum minutes between proactive messages",
+    llm_local_api_base: str = Field(
+        default="",
+        description="Local model API base URL (e.g., 'http://localhost:8000/v1')",
+    )
+    llm_local_enabled: bool = Field(
+        default=False,
+        description="Enable local model for subconscious processing (fallback to cloud aux when disabled)",
     )
 
 

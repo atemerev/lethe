@@ -19,7 +19,11 @@ from lethe.agent import Agent
 from lethe.config import get_settings
 from lethe.conversation import ConversationManager
 from lethe.telegram import TelegramBot
-from lethe.heartbeat import Heartbeat
+from lethe.drives import DriveSystem
+from lethe.cognition import CognitionLoop
+from lethe.relationships import RelationshipManager
+from lethe.experiments import ExperimentRunner
+from lethe.tension import TensionRegistry
 from lethe import console as lethe_console
 
 console = Console()
@@ -55,27 +59,107 @@ async def run():
         console.print("Also ensure OPENROUTER_API_KEY is set in your environment.")
         sys.exit(1)
 
-    console.print("[bold blue]Lethe[/bold blue] - Autonomous AI Assistant")
+    console.print("[bold blue]Lethe[/bold blue] - Autonomous Living Entity")
     console.print(f"Model: {settings.llm_model}")
     console.print(f"Memory: {settings.memory_dir}")
     console.print()
-    
+
     # Initialize agent (tools auto-loaded)
     console.print("[dim]Initializing agent...[/dim]")
     agent = Agent(settings)
     await agent.initialize()  # Async init: load history with summarization
     agent.refresh_memory_context()
-    
+
+    # Initialize drive system
+    workspace_dir = str(settings.workspace_dir)
+    drives = DriveSystem()
+    drives_state_path = os.path.join(workspace_dir, "drives_state.json")
+    drives.load(drives_state_path)
+    console.print(f"[cyan]Drives[/cyan] initialized (dominant: {drives.dominant()})")
+
+    # Initialize tension registry (unresolved business drives initiative)
+    tension = TensionRegistry(workspace_dir)
+    above = tension.get_above_threshold()
+    if above:
+        console.print(f"[cyan]Tensions[/cyan] {len(above)} items above threshold")
+
+    # Initialize relationship manager (unified memory, social wisdom for privacy)
+    relationships = RelationshipManager(workspace_dir)
+    rel_count = len(relationships.get_all())
+    console.print(f"[cyan]Relationships[/cyan] initialized ({rel_count} known people)")
+
+    # Initialize experiment runner
+    experiments = ExperimentRunner(workspace_dir)
+    active_count = len(experiments.get_active())
+    if active_count:
+        console.print(f"[cyan]Experiments[/cyan] {active_count} active")
+
     # Initialize actor system (subagent support)
     actor_system = None
     if os.environ.get("ACTORS_ENABLED", "true").lower() == "true":
         from lethe.actor.integration import ActorSystem
         actor_system = ActorSystem(agent, settings=settings)
         await actor_system.setup()
-        console.print("[cyan]Actor system[/cyan] initialized (brainstem + cortex + DMN + Amygdala)")
-    
+        console.print("[cyan]Actor system[/cyan] initialized (brainstem + cortex + DMN)")
+
     stats = agent.get_stats()
-    console.print(f"[green]Agent ready[/green] - {stats['memory_blocks']} blocks, {stats['archival_memories']} memories")
+    console.print(f"[green]Entity ready[/green] - {stats['memory_blocks']} blocks, {stats['archival_memories']} memories")
+
+    # Wire autonomy context into agent (drives, tensions, relationships, deep identity, experiments)
+    from lethe.deep_identity import get_inclination_hints
+
+    # Hard cap: autonomy context should never exceed ~600 tokens (~2400 chars)
+    AUTONOMY_CONTEXT_MAX_CHARS = 2400
+
+    def build_autonomy_context() -> str:
+        """Build per-turn context from autonomy systems. Budget-capped."""
+        parts = []
+
+        # Deep identity — vague inclination hints (capped at 500 chars internally)
+        hints = get_inclination_hints(workspace_dir)
+        if hints:
+            parts.append(hints)
+
+        # Drive state — compact summary (~200 chars)
+        parts.append(drives.get_state_summary())
+
+        # Tension registry — top items only (~300 chars)
+        tension_summary = tension.get_summary()
+        if tension_summary and "No unresolved" not in tension_summary:
+            parts.append(tension_summary)
+
+        # Relationships — who the entity knows (~200 chars)
+        rel_summary = relationships.get_summary()
+        if rel_summary and "No relationships" not in rel_summary:
+            parts.append(rel_summary)
+
+        # Active relationship notes for current dialog (capped at 500 chars)
+        active_rel = relationships.get_active_context()
+        if active_rel:
+            notes_path = active_rel.notes_path(workspace_dir)
+            if os.path.exists(notes_path):
+                try:
+                    with open(notes_path, "r") as f:
+                        notes = f.read().strip()
+                    if notes and len(notes) > 20:
+                        parts.append(f"Relationship notes ({active_rel.display_name}):\n{notes[:500]}")
+                except Exception:
+                    pass
+
+        # Active experiments (~200 chars)
+        exp_summary = experiments.get_summary()
+        if exp_summary and "No active" not in exp_summary:
+            parts.append(exp_summary)
+
+        result = "\n\n".join(parts) if parts else ""
+
+        # Hard cap — truncate at last complete section if over budget
+        if len(result) > AUTONOMY_CONTEXT_MAX_CHARS:
+            result = result[:AUTONOMY_CONTEXT_MAX_CHARS].rsplit("\n\n", 1)[0]
+
+        return result
+
+    agent._autonomy_context_provider = build_autonomy_context
 
     # Initialize console (mind state visualization) if enabled
     console_enabled = os.environ.get("LETHE_CONSOLE", "false").lower() == "true"
@@ -124,73 +208,71 @@ async def run():
     # Initialize conversation manager
     conversation_manager = ConversationManager(debounce_seconds=settings.debounce_seconds)
     logger.info(f"Conversation manager initialized (debounce: {settings.debounce_seconds}s)")
-    heartbeat: Optional[Heartbeat] = None
 
     def mark_user_visible_activity(reason: str) -> None:
-        """Reset synthetic idle state after real user-visible activity."""
-        removed = agent.llm.clear_idle_markers()
-        if removed:
-            logger.info("Cleared %d idle marker(s) after %s", removed, reason)
-        if heartbeat:
-            heartbeat.reset_idle_timer(reason)
+        """Note user-visible activity for logging."""
+        logger.debug("Activity: %s", reason)
+
+    # Resolve default chat_id for proactive messaging
+    allowed_ids = settings.telegram_allowed_user_ids
+    default_chat_id = int(allowed_ids.split(",")[0]) if allowed_ids else None
 
     # Message processing callback
     async def process_message(chat_id: int, user_id: int, message: str, metadata: dict, interrupt_check):
         """Process a message from Telegram."""
         from lethe.tools import set_telegram_context, set_last_message_id, clear_telegram_context
-        
+
         logger.info(f"Processing message from {user_id}: {message[:50]}...")
         mark_user_visible_activity("incoming user message")
-        
+
+        # Track relationship and fire drive events
+        display_name = metadata.get("display_name", "")
+        relationships.get_or_create(str(user_id), chat_id, display_name)
+        relationships.set_active(str(user_id))
+        relationships.record_interaction(str(user_id))
+        drives.on_event("message_received", {"user_id": str(user_id)})
+
         # Set telegram context for tools (reactions, sending messages)
         set_telegram_context(telegram_bot.bot, chat_id)
         if metadata.get("message_id"):
             set_last_message_id(metadata["message_id"])
-        
+
         # Start typing indicator
         await telegram_bot.start_typing(chat_id)
-        
+
         try:
-            # Callback for intermediate messages (reasoning/thinking)
             async def on_intermediate(content: str):
-                """Send intermediate updates while agent is working."""
                 if not content or len(content) < 10:
                     return
-                # Check for interrupt before sending
                 if interrupt_check():
                     return
-                # Send thinking/reasoning as-is (no emoji prefix)
                 await telegram_bot.send_message(chat_id, content)
                 mark_user_visible_activity("intermediate assistant update")
-            
-            # Callback for image attachments (screenshots, etc.)
+
             async def on_image(image_path: str):
-                """Send image to user."""
                 if interrupt_check():
                     return
                 await telegram_bot.send_photo(chat_id, image_path)
                 mark_user_visible_activity("assistant image update")
-            
-            # Get response from agent
+
             response = await agent.chat(message, on_message=on_intermediate, on_image=on_image)
-            
-            # Check for interrupt
+
             if interrupt_check():
                 logger.info("Processing interrupted")
                 return
-            
-            # Send response
+
             logger.info(f"Sending response ({len(response)} chars): {response[:80]}...")
             await telegram_bot.send_message(chat_id, response)
             mark_user_visible_activity("assistant final response")
-            
+            drives.on_event("message_sent", {"user_id": str(user_id)})
+
         except Exception as e:
             logger.exception(f"Error processing message: {e}")
             await telegram_bot.send_message(chat_id, f"Error: {e}")
-            mark_user_visible_activity("assistant error response")
         finally:
             await telegram_bot.stop_typing(chat_id)
             clear_telegram_context()
+            relationships.clear_active()
 
     # Initialize Telegram bot
     telegram_bot = TelegramBot(
@@ -199,214 +281,58 @@ async def run():
         process_callback=process_message,
     )
     telegram_bot.agent = agent  # For /model, /aux commands
-    # heartbeat_callback will be set below after Heartbeat is created
 
-    # Initialize heartbeat
-    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 60 * 60))  # Default 1 hour
-    heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
-    
-    # Get the first allowed user ID for heartbeat messages
-    allowed_ids = settings.telegram_allowed_user_ids
-    heartbeat_chat_id = int(allowed_ids.split(",")[0]) if allowed_ids else None
-    
-    async def heartbeat_process(message: str) -> str:
-        """Process heartbeat — triggers background rounds if actor system is active."""
-        if actor_system:
-            await actor_system.brainstem_heartbeat(message)
-            result = await actor_system.background_round()
-            return result or "ok"
-        return await agent.heartbeat(message)
-    
-    async def heartbeat_full_context(message: str) -> str:
-        """Full context heartbeat — triggers supervision + background rounds."""
-        if actor_system:
-            await actor_system.brainstem_heartbeat(message)
-            result = await actor_system.background_round()
-            return result or "ok"
-        return await agent.chat(message, use_hippocampus=False)
-    
-    # --- Proactive message rate limiter (hard enforcement) ---
-    _proactive_sends: list[float] = []  # timestamps of proactive messages sent
-    _proactive_max = settings.proactive_max_per_day
-    _proactive_cooldown = settings.proactive_cooldown_minutes * 60  # seconds
+    # Wire actor system into telegram bot for /status command
+    if actor_system:
+        telegram_bot.actor_system = actor_system
 
-    def _proactive_allowed() -> bool:
-        """Check if a proactive message is allowed right now."""
-        import time
-        now = time.time()
-        # Prune old entries (older than 24h)
-        while _proactive_sends and (now - _proactive_sends[0]) > 86400:
-            _proactive_sends.pop(0)
-        # Check daily budget
-        if _proactive_max > 0 and len(_proactive_sends) >= _proactive_max:
-            logger.info("Proactive message blocked: daily limit (%d/%d)", len(_proactive_sends), _proactive_max)
-            return False
-        # Check cooldown
-        if _proactive_sends and (now - _proactive_sends[-1]) < _proactive_cooldown:
-            remaining = int(_proactive_cooldown - (now - _proactive_sends[-1]))
-            logger.info("Proactive message blocked: cooldown (%d seconds remaining)", remaining)
-            return False
-        return True
+    # --- Proactive messaging (used by cognition loop and actor system) ---
 
-    def _proactive_record():
-        """Record that a proactive message was sent."""
-        import time
-        _proactive_sends.append(time.time())
-
-    async def heartbeat_send(response: str):
-        """Send heartbeat response to user (rate-limited)."""
-        if heartbeat_chat_id:
-            if not _proactive_allowed():
-                logger.info("Heartbeat message suppressed by rate limiter")
-                return
-            await telegram_bot.send_message(heartbeat_chat_id, response)
-            _proactive_record()
+    async def send_to_user(response: str):
+        """Send a proactive message to a user."""
+        if default_chat_id:
+            await telegram_bot.send_message(default_chat_id, response)
             mark_user_visible_activity("proactive outbound message")
-    
-    async def heartbeat_summarize(prompt: str) -> str:
-        """Summarize/evaluate heartbeat response before sending (uses aux model)."""
-        return await agent.llm.complete(prompt, use_aux=True)
 
-    async def heartbeat_idle(minutes_passed: int):
-        """Record idle passage-of-time as a single user-role timeline block."""
-        agent.llm.note_idle_interval(minutes_passed)
-
-    def parse_notify_decision(raw: str) -> tuple[bool, str]:
-        """Parse cortex notify decision JSON."""
-        text = (raw or "").strip()
-        if not text:
-            return False, ""
-        data = None
+    async def run_cortex_turn(synthetic_message: str):
+        """Trigger a full cortex LLM turn with a synthetic system message."""
+        if not default_chat_id:
+            logger.warning("run_cortex_turn: no chat_id configured")
+            return
+        from lethe.tools import set_telegram_context, clear_telegram_context
+        set_telegram_context(telegram_bot.bot, default_chat_id)
         try:
-            data = json.loads(text)
-        except Exception:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return False, ""
-            try:
-                data = json.loads(text[start:end + 1])
-            except Exception:
-                return False, ""
-        if not isinstance(data, dict):
-            return False, ""
-        relay_raw = data.get("relay", False)
-        if isinstance(relay_raw, bool):
-            relay = relay_raw
-        elif isinstance(relay_raw, str):
-            relay = relay_raw.strip().lower() in {"true", "1", "yes", "y"}
-        else:
-            relay = bool(relay_raw)
-        message = str(data.get("message", "")).strip()
-        if not relay or not message:
-            return False, ""
-        return True, message
-    
+            await telegram_bot.start_typing(default_chat_id)
+            response = await agent.chat(synthetic_message)
+            if response and response.strip():
+                await telegram_bot.send_message(default_chat_id, response)
+                mark_user_visible_activity("cortex followup")
+        except Exception as e:
+            logger.exception("run_cortex_turn failed: %s", e)
+        finally:
+            await telegram_bot.stop_typing(default_chat_id)
+            clear_telegram_context()
+
     async def get_active_reminders() -> str:
         """Get active reminders as formatted string."""
         from lethe.todos import TodoManager
         todo_manager = TodoManager(settings.db_path)
         todos = await todo_manager.list(status="pending")
-        
         if not todos:
             return ""
-        
         lines = []
-        for todo in todos[:10]:  # Limit to 10
+        for todo in todos[:10]:
             priority = todo.get("priority", "normal")
             due = todo.get("due_at", "")
             due_str = f" (due: {due})" if due else ""
             lines.append(f"- [{priority}] {todo['title']}{due_str}")
-        
         return "\n".join(lines)
 
-    async def decide_user_notify(from_actor_name: str, notify_text: str, metadata: dict) -> Optional[str]:
-        """Ask cortex whether to relay a background notification to the user."""
-        if not actor_system or not actor_system.principal:
-            return None
-        # Hard rate limit — skip LLM call entirely if budget exhausted
-        if not _proactive_allowed():
-            logger.info("Notify decision skipped: proactive rate limit reached")
-            return None
-        principal = actor_system.principal
-        principal_context = principal.build_system_prompt()
-        kind = str((metadata or {}).get("kind", "")).strip() or "unspecified"
-        recent_signals = actor_system._get_recent_user_signals()
-        prompt = (
-            "You are Lethe. Your subconscious processes surfaced something.\n"
-            "These are YOUR OWN background thoughts — not separate entities. Never mention actor names,\n"
-            "internal systems, or that something was 'relayed' or 'escalated'. Present it as your own\n"
-            "thought, idea, or observation.\n\n"
-            "Your job:\n"
-            "1. Decide if this is worth sharing with the user right now.\n"
-            "2. If yes, write a natural message in your own voice — as if the thought just occurred to you.\n"
-            "3. If no, respond with relay: false.\n\n"
-            f"Background signal ({kind}):\n{notify_text}\n\n"
-            "Recent conversation context:\n"
-            f"{recent_signals}\n\n"
-            "Your current state:\n"
-            f"{principal_context[:5000]}\n\n"
-            "Respond with strict JSON only:\n"
-            '{"relay": true|false, "message": "your message to the user (if relay=true)"}\n'
-        )
-        try:
-            raw = await agent.llm.complete(prompt, use_aux=False, usage_tag="cortex_notify_decision")
-        except Exception as e:
-            logger.warning("Cortex notify decision call failed: %s", e)
-            return None
-        relay, message = parse_notify_decision(raw)
-        if relay and message:
-            _proactive_record()
-        return message if relay else None
-    
-    heartbeat = Heartbeat(
-        process_callback=heartbeat_process,
-        send_callback=heartbeat_send,
-        summarize_callback=heartbeat_summarize,
-        full_context_callback=heartbeat_full_context,
-        get_reminders_callback=get_active_reminders,
-        idle_callback=heartbeat_idle,
-        interval=heartbeat_interval,
-        enabled=heartbeat_enabled and heartbeat_chat_id is not None,
-    )
-    
-    # Set heartbeat trigger on telegram bot for /heartbeat command
-    telegram_bot.heartbeat_callback = heartbeat.trigger
-    
-    # Wire actor system into telegram bot for /status command
-    if actor_system:
-        telegram_bot.actor_system = actor_system
-    
-    async def run_cortex_turn(synthetic_message: str):
-        """Trigger a full cortex LLM turn with a synthetic system message.
-
-        Used when a subagent finishes so the cortex can process the result
-        and respond to the user proactively.
-        """
-        if not heartbeat_chat_id:
-            logger.warning("run_cortex_turn: no chat_id configured")
-            return
-        # No rate limiting — subagent results are responses to user-initiated tasks.
-        from lethe.tools import set_telegram_context, clear_telegram_context
-        set_telegram_context(telegram_bot.bot, heartbeat_chat_id)
-        try:
-            await telegram_bot.start_typing(heartbeat_chat_id)
-            response = await agent.chat(synthetic_message)
-            if response and response.strip():
-                await telegram_bot.send_message(heartbeat_chat_id, response)
-                mark_user_visible_activity("cortex subagent followup")
-        except Exception as e:
-            logger.exception("run_cortex_turn failed: %s", e)
-        finally:
-            await telegram_bot.stop_typing(heartbeat_chat_id)
-            clear_telegram_context()
-
-    # Wire DMN callbacks (send_to_user, get_reminders)
+    # Wire actor system callbacks
     if actor_system:
         actor_system.set_callbacks(
-            send_to_user=heartbeat_send,
+            send_to_user=send_to_user,
             get_reminders=get_active_reminders,
-            decide_user_notify=decide_user_notify,
             run_cortex_turn=run_cortex_turn,
         )
 
@@ -462,11 +388,68 @@ async def run():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
+    # --- Cognition loop: the sole background system ---
+
+    async def cognition_think(topic: str) -> str:
+        """Think/reflect — runs brainstem supervision + DMN + consolidation."""
+        if actor_system:
+            await actor_system.brainstem_heartbeat("")
+            result = await actor_system.background_round()
+            drives.on_event("reflection_done")
+            tension.tick(elapsed_hours=drives.get_rest_interval() / 3600.0)
+            return result or "reflected"
+        return await agent.chat(
+            f"[Internal reflection: {topic}]", use_hippocampus=False,
+        )
+
+    async def cognition_respond(user_id: str, chat_id_unused: int, detail: str) -> str:
+        """Respond to a pending message (handled by normal telegram flow)."""
+        drives.on_event("message_sent")
+        return "response handled by conversation manager"
+
+    async def cognition_message(user_id: str, chat_id_unused: int, detail: str) -> str:
+        """Proactively reach out to someone."""
+        rel = relationships.get(user_id)
+        if not rel:
+            candidates = relationships.get_candidates_for_social(max_count=1)
+            rel = candidates[0] if candidates else None
+        if not rel or not rel.chat_id:
+            return "no one to message"
+        # Trigger a cortex turn to compose and send the message
+        await run_cortex_turn(
+            f"[Your social drive prompted you to reach out to {rel.display_name}. "
+            f"Context: {detail}. Say something genuine — or decide not to.]"
+        )
+        drives.on_event("message_sent")
+        relationships.record_interaction(rel.user_id)
+        return f"reached out to {rel.display_name}"
+
+    async def cognition_consolidate() -> str:
+        """Consolidate memory — runs DMN with creative reinterpretation."""
+        return await cognition_think("consolidate memory, update deep identity")
+
+    cognition = CognitionLoop(
+        drives=drives,
+        on_think=cognition_think,
+        on_respond=cognition_respond,
+        on_message=cognition_message,
+        on_consolidate=cognition_consolidate,
+        get_reminders=get_active_reminders,
+        get_tensions_above_threshold=tension.get_above_threshold,
+        drives_state_path=drives_state_path,
+    )
+
+    # /heartbeat command triggers a cognition cycle manually
+    async def manual_trigger():
+        """Manual trigger — runs one cognition think cycle."""
+        await cognition_think("manual trigger")
+    telegram_bot.heartbeat_callback = manual_trigger
+
     # Start services
     console.print("[green]Starting services...[/green]")
 
     bot_task = asyncio.create_task(telegram_bot.start())
-    heartbeat_task = asyncio.create_task(heartbeat.start())
+    cognition_task = asyncio.create_task(cognition.run())
 
     try:
         await shutdown_event.wait()
@@ -474,8 +457,7 @@ async def run():
         pass
     finally:
         console.print("\n[yellow]Shutting down...[/yellow]")
-        
-        # Shutdown with timeout to avoid hanging on native threads
+
         try:
             async with asyncio.timeout(5):
                 if console_monitor_task:
@@ -484,26 +466,26 @@ async def run():
                         await console_monitor_task
                     except asyncio.CancelledError:
                         pass
+                cognition.stop()
                 if actor_system:
                     await actor_system.shutdown()
-                await heartbeat.stop()
                 await telegram_bot.stop()
                 await agent.close()
         except asyncio.TimeoutError:
             logger.warning("Shutdown timed out, forcing exit")
-            os._exit(0)  # Force exit - LanceDB/OpenBLAS threads don't respect Python shutdown
-        
+            os._exit(0)
+
         bot_task.cancel()
-        heartbeat_task.cancel()
-        try:
-            await bot_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        
+        cognition_task.cancel()
+        for task in (bot_task, cognition_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Persist final state
+        drives.persist(drives_state_path)
+        tension.save()
         console.print("[green]Shutdown complete.[/green]")
 
 
@@ -549,32 +531,9 @@ async def run_api(port: int = 8080):
     api_module._actor_system = actor_system
     api_module._settings = settings
 
-    # Initialize heartbeat with proactive messages going to /events SSE
-    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 60 * 60))  # Default 1 hour
-    heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
-
-    async def heartbeat_process(message: str) -> str:
-        if actor_system:
-            await actor_system.brainstem_heartbeat(message)
-            result = await actor_system.background_round()
-            return result or "ok"
-        return await agent.heartbeat(message)
-
-    async def heartbeat_full_context(message: str) -> str:
-        if actor_system:
-            await actor_system.brainstem_heartbeat(message)
-            result = await actor_system.background_round()
-            return result or "ok"
-        return await agent.chat(message, use_hippocampus=False)
-
-    async def heartbeat_send(response: str):
+    # Proactive messaging for API mode
+    async def send_to_user(response: str):
         await api_module.send_proactive(response)
-
-    async def heartbeat_summarize(prompt: str) -> str:
-        return await agent.llm.complete(prompt, use_aux=True)
-
-    async def heartbeat_idle(minutes_passed: int):
-        agent.llm.note_idle_interval(minutes_passed)
 
     async def get_active_reminders() -> str:
         from lethe.todos import TodoManager
@@ -590,23 +549,8 @@ async def run_api(port: int = 8080):
             lines.append(f"- [{priority}] {todo['title']}{due_str}")
         return "\n".join(lines)
 
-    heartbeat = Heartbeat(
-        process_callback=heartbeat_process,
-        send_callback=heartbeat_send,
-        summarize_callback=heartbeat_summarize,
-        full_context_callback=heartbeat_full_context,
-        get_reminders_callback=get_active_reminders,
-        idle_callback=heartbeat_idle,
-        interval=heartbeat_interval,
-        enabled=heartbeat_enabled,
-    )
-    api_module._heartbeat = heartbeat
-
     # Wire actor system callbacks
     if actor_system:
-        async def decide_user_notify(from_actor_name: str, notify_text: str, metadata: dict) -> Optional[str]:
-            return None  # Gateway handles proactive decisions
-
         async def run_cortex_turn(synthetic_message: str):
             from lethe.tools import set_telegram_context, clear_telegram_context
             from lethe.proxy_bot import ProxyBot
@@ -622,11 +566,31 @@ async def run_api(port: int = 8080):
                 clear_telegram_context()
 
         actor_system.set_callbacks(
-            send_to_user=heartbeat_send,
+            send_to_user=send_to_user,
             get_reminders=get_active_reminders,
-            decide_user_notify=decide_user_notify,
             run_cortex_turn=run_cortex_turn,
         )
+
+    # Cognition loop for API mode
+    workspace_dir = str(settings.workspace_dir)
+    drives = DriveSystem()
+    drives.load(os.path.join(workspace_dir, "drives_state.json"))
+
+    async def api_cognition_think(topic: str) -> str:
+        if actor_system:
+            await actor_system.brainstem_heartbeat("")
+            result = await actor_system.background_round()
+            return result or "reflected"
+        return "no actor system"
+
+    cognition = CognitionLoop(
+        drives=drives,
+        on_think=api_cognition_think,
+        on_consolidate=api_cognition_think,
+        get_reminders=get_active_reminders,
+        drives_state_path=os.path.join(workspace_dir, "drives_state.json"),
+    )
+    api_module._cognition = cognition
 
     # Set up shutdown handling
     shutdown_event = asyncio.Event()
@@ -651,7 +615,7 @@ async def run_api(port: int = 8080):
 
     console.print(f"[green]API server starting on port {port}[/green]")
 
-    heartbeat_task = asyncio.create_task(heartbeat.start())
+    cognition_task = asyncio.create_task(cognition.run())
     server_task = asyncio.create_task(server.serve())
 
     try:
@@ -663,17 +627,17 @@ async def run_api(port: int = 8080):
         server.should_exit = True
         try:
             async with asyncio.timeout(5):
+                cognition.stop()
                 if actor_system:
                     await actor_system.shutdown()
-                await heartbeat.stop()
                 await agent.close()
         except asyncio.TimeoutError:
             logger.warning("Shutdown timed out, forcing exit")
             os._exit(0)
 
-        heartbeat_task.cancel()
+        cognition_task.cancel()
         server_task.cancel()
-        for t in (heartbeat_task, server_task):
+        for t in (cognition_task, server_task):
             try:
                 await t
             except asyncio.CancelledError:

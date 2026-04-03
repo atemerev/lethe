@@ -66,7 +66,7 @@ class TestDMNBasic:
         """DMN has a specific system prompt for background thinking."""
         prompt = get_dmn_system_prompt()
         assert "Default Mode Network" in prompt
-        assert "background" in prompt
+        assert "subconscious" in prompt
         assert "questions.md" in prompt
         assert "terminate" in prompt
         # Verify workspace paths are resolved (no {workspace} placeholders)

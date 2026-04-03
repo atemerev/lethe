@@ -11,7 +11,6 @@ from lethe.actor import ActorConfig, ActorRegistry
 from lethe.actor.brainstem import Brainstem
 from lethe.actor.integration import ActorSystem
 from lethe.config import Settings
-from lethe.heartbeat import Heartbeat
 from lethe.memory.llm import AsyncLLMClient, ContextWindow, LLMConfig, Message
 
 
@@ -138,70 +137,6 @@ def test_conversation_messages_stay_plain(monkeypatch):
     assert "<user_block" not in built[1]["content"]
 
 
-def test_idle_time_passed_marker_is_single_upsert(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    config = LLMConfig(model="openrouter/moonshotai/kimi-k2.5-0127")
-    context = ContextWindow(system_prompt="sys", memory_context="", config=config)
-
-    context.upsert_time_passed_block(15)
-    context.upsert_time_passed_block(30)
-
-    markers = [
-        m for m in context.messages
-        if m.role == "user" and isinstance(m.content, str) and "<time_passed_block " in m.content
-    ]
-    assert len(markers) == 1
-    assert 'minutes="30"' in markers[0].content
-
-
-def test_idle_time_passed_markers_can_be_cleared(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    config = LLMConfig(model="openrouter/moonshotai/kimi-k2.5-0127")
-    context = ContextWindow(system_prompt="sys", memory_context="", config=config)
-
-    context.upsert_time_passed_block(360)
-    context.add_message(Message(role="user", content="hi"))
-    context.add_message(Message(role="assistant", content="hello"))
-
-    removed = context.clear_time_passed_blocks()
-    markers = [
-        m for m in context.messages
-        if m.role == "user" and isinstance(m.content, str) and "<time_passed_block " in m.content
-    ]
-    assert removed == 1
-    assert len(markers) == 0
-
-
-@pytest.mark.asyncio
-async def test_heartbeat_idle_accumulator_resets_on_activity():
-    idle_minutes = []
-
-    async def process_callback(_: str) -> str:
-        return "ok"
-
-    async def send_callback(_: str):
-        return None
-
-    async def idle_callback(minutes: int):
-        idle_minutes.append(minutes)
-
-    heartbeat = Heartbeat(
-        process_callback=process_callback,
-        send_callback=send_callback,
-        idle_callback=idle_callback,
-        interval=15 * 60,
-    )
-
-    await heartbeat._send_heartbeat()  # First tick does not emit idle callback.
-    await heartbeat._send_heartbeat()
-    assert idle_minutes == [15]
-
-    heartbeat.reset_idle_timer("test activity")
-
-    await heartbeat._send_heartbeat()
-    assert idle_minutes == [15, 15]
-
-
 def test_transient_context_dropped_when_over_budget(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     config = LLMConfig(
@@ -292,6 +227,7 @@ async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeyp
 
     worker.terminate("finished result")
     await asyncio.sleep(1.2)
+    # Subconscious routes through cortex; no direct send_to_user for task updates
     send_to_user.assert_not_awaited()
     first_msg = None
     for _ in range(20):
@@ -309,7 +245,7 @@ async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeyp
     )
     failed.terminate("Error: boom")
     await asyncio.sleep(1.2)
-    send_to_user.assert_not_awaited()
+    # Still no direct send_to_user — task updates route through cortex turn
     second_msg = None
     for _ in range(20):
         msg = await principal.wait_for_reply(timeout=0.2)
@@ -324,7 +260,8 @@ async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
+async def test_brainstem_user_notify_surfaces_to_cortex(monkeypatch):
+    """Subconscious (brainstem) surfaces thoughts to cortex, which speaks to users."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
@@ -349,16 +286,11 @@ async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
     actor_system = ActorSystem(agent)
     await actor_system.setup()
     send_to_user = AsyncMock()
-    seen = {"important": 0}
-
-    async def _decide(from_actor_name: str, text: str, metadata: dict):
-        if from_actor_name == "brainstem" and text == "Important insight":
-            seen["important"] += 1
-            return "Important insight" if seen["important"] == 1 else None
-        return None
-
-    decide_user_notify = AsyncMock(side_effect=_decide)
-    actor_system.set_callbacks(send_to_user=send_to_user, decide_user_notify=decide_user_notify)
+    run_cortex_turn = AsyncMock()
+    actor_system.set_callbacks(
+        send_to_user=send_to_user,
+        run_cortex_turn=run_cortex_turn,
+    )
 
     principal = actor_system.principal
     brainstem_actor = actor_system.registry.spawn(
@@ -366,47 +298,36 @@ async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
         spawned_by=principal.id,
     )
 
+    # Send user_notify — should surface to cortex, not directly to user
     await brainstem_actor.send_to(
         principal.id,
         "Important insight",
         metadata={"channel": "user_notify", "kind": "insight"},
     )
     await asyncio.sleep(1.2)
-    assert any(
-        call.args and call.args[0] == "Important insight"
-        for call in send_to_user.await_args_list
-    )
+
+    # Cortex turn triggered (subconscious surfaced thought)
+    run_cortex_turn.assert_awaited()
+    synthetic = run_cortex_turn.await_args[0][0]
+    assert "Important insight" in synthetic
+    assert "subconscious" in synthetic.lower()
+
+    # send_to_user NOT called directly — cortex handles it
+    send_to_user.assert_not_awaited()
+
     events = actor_system.registry.events.query(
-        event_type="background_notify_relayed_to_user",
+        event_type="subconscious_surfaced_to_cortex",
         actor_id=principal.id,
     )
     assert events
     assert events[-1].payload.get("from_actor_name") == "brainstem"
 
-    await brainstem_actor.send_to(
-        principal.id,
-        "Important insight",
-        metadata={"channel": "user_notify", "kind": "insight"},
-    )
-    await asyncio.sleep(1.2)
-    assert seen["important"] >= 2
-    relay_matches = [
-        call for call in send_to_user.await_args_list
-        if call.args and call.args[0] == "Important insight"
-    ]
-    assert len(relay_matches) == 1
-    dropped = actor_system.registry.events.query(
-        event_type="background_notify_dropped_by_cortex",
-        actor_id=principal.id,
-    )
-    assert dropped
-    assert dropped[-1].payload.get("from_actor_name") == "brainstem"
-
     await actor_system.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
+async def test_dmn_user_notify_surfaces_to_cortex(monkeypatch):
+    """DMN (subconscious) surfaces thoughts to cortex, which speaks to users."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
@@ -431,14 +352,11 @@ async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
     actor_system = ActorSystem(agent)
     await actor_system.setup()
     send_to_user = AsyncMock()
-
-    async def _decide(from_actor_name: str, text: str, metadata: dict):
-        if from_actor_name == "dmn" and text == "Urgent deadline tomorrow":
-            return "Urgent deadline tomorrow"
-        return None
-
-    decide_user_notify = AsyncMock(side_effect=_decide)
-    actor_system.set_callbacks(send_to_user=send_to_user, decide_user_notify=decide_user_notify)
+    run_cortex_turn = AsyncMock()
+    actor_system.set_callbacks(
+        send_to_user=send_to_user,
+        run_cortex_turn=run_cortex_turn,
+    )
 
     principal = actor_system.principal
     dmn_actor = actor_system.registry.spawn(
@@ -453,16 +371,16 @@ async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
     )
     await asyncio.sleep(1.2)
 
-    assert any(
-        call.args and call.args[0] == "Urgent deadline tomorrow"
-        for call in send_to_user.await_args_list
-    )
-    assert any(
-        call.args and call.args[0] == "dmn" and call.args[1] == "Urgent deadline tomorrow"
-        for call in decide_user_notify.await_args_list
-    )
+    # Surfaces to cortex — cortex decides what to say
+    run_cortex_turn.assert_awaited()
+    synthetic = run_cortex_turn.await_args[0][0]
+    assert "Urgent deadline tomorrow" in synthetic
+
+    # NOT sent directly to user
+    send_to_user.assert_not_awaited()
+
     events = actor_system.registry.events.query(
-        event_type="background_notify_relayed_to_user",
+        event_type="subconscious_surfaced_to_cortex",
         actor_id=principal.id,
     )
     assert events

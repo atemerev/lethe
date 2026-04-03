@@ -541,7 +541,7 @@ class TestSystemPrompt:
     def test_principal_prompt(self, principal, worker):
         prompt = principal.build_system_prompt()
         assert "cortex" in prompt
-        assert "ONLY actor" in prompt
+        assert "conscious executive" in prompt
         assert "quick tasks" in prompt.lower()  # Handle quick tasks directly
         assert "subagent" in prompt.lower()  # Spawn subagent for long tasks
         assert "spawn" in prompt.lower()
@@ -553,7 +553,7 @@ class TestSystemPrompt:
         assert "subagent" in prompt
         assert "researcher" in prompt
         assert worker.config.goals in prompt
-        assert "CANNOT talk to the user" in prompt
+        assert "subconscious" in prompt
         assert "cortex" in prompt  # Parent name shown
 
     def test_group_awareness_in_prompt(self, principal, worker):

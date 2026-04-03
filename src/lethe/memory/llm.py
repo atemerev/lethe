@@ -85,12 +85,6 @@ SLIDING_WINDOW_KEEP_RATIO = 0.7  # Keep 70% of context after compaction
 COMPACTION_TRIGGER_RATIO = 0.85  # Trigger compaction at 85% capacity
 SUMMARY_MAX_LINES = 30  # Max summary lines (truncate by lines, not chars)
 
-# Minimal heartbeat system prompt (template)
-HEARTBEAT_SYSTEM_PROMPT = load_prompt_template(
-    "llm_heartbeat_system",
-    fallback="You are background reflection. Reply with ok unless urgent.",
-)
-
 # Letta-style summarization prompt (template)
 SUMMARIZE_PROMPT = load_prompt_template(
     "llm_summarize",
@@ -1177,14 +1171,6 @@ class AsyncLLMClient:
         self.context.memory_context = memory_context
         self.context.memory_context_updated_at = datetime.now(timezone.utc)
 
-    def note_idle_interval(self, minutes_passed: int):
-        """Record idle passage of time as a single synthetic user block."""
-        self.context.upsert_time_passed_block(minutes_passed)
-
-    def clear_idle_markers(self) -> int:
-        """Clear synthetic idle-time markers after user-visible activity."""
-        return self.context.clear_time_passed_blocks()
-    
     def set_console_hooks(
         self,
         on_context_build: Optional[Callable] = None,
@@ -1816,92 +1802,6 @@ class AsyncLLMClient:
         self._track_usage(result, source=source, model=kwargs.get("model", self.config.model))
         
         return result["choices"][0]["message"].get("content") or ""
-    
-    async def heartbeat(self, message: str) -> str:
-        """Process heartbeat with minimal context and aux model.
-        
-        Uses lightweight system prompt, no conversation history, and aux model
-        for cost efficiency. Tools are still available for checking tasks.
-        
-        Args:
-            message: Heartbeat message
-            
-        Returns:
-            Response string
-        """
-        # Build minimal messages (just system + heartbeat message)
-        messages = [
-            {"role": "system", "content": HEARTBEAT_SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ]
-        
-        # Get task + file tools for heartbeat (reflection needs file access)
-        task_tools = []
-        heartbeat_keywords = ["todo", "task", "remind", "calendar", "read_file", "write_file", "edit_file", "list_directory", "grep_search"]
-        for name, (func, schema) in self._tools.items():
-            if any(kw in name.lower() for kw in heartbeat_keywords):
-                task_tools.append({"type": "function", "function": schema})
-        
-        kwargs = {
-            "model": self.config.model_aux,  # Use aux model
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 1000,
-        }
-        
-        # Tools disabled for lightweight heartbeat — aux models (Gemini) don't use them reliably
-        # Full context heartbeat (Kimi) has tools via the main chat() method
-        
-        # Simple loop for tool calls (max 5 iterations — read + write + reflect)
-        for _ in range(5):
-            result = await self._call_with_retry(kwargs, "heartbeat")
-            self._track_usage(result, source=f"{self._usage_scope}:heartbeat", model=kwargs.get("model", self.config.model_aux))
-            
-            choice = result["choices"][0]
-            message = choice["message"]
-            tool_calls = message.get("tool_calls")
-            
-            # Check for tool calls
-            if tool_calls:
-                # Execute tools and add results
-                kwargs["messages"].append(message)
-                
-                for tool_call in tool_calls:
-                    func_name = tool_call["function"]["name"].strip()
-                    try:
-                        tool_args = json.loads(tool_call["function"]["arguments"])
-                    except:
-                        tool_args = {}
-                    logger.info(f"Heartbeat tool: {func_name}({tool_args})")
-                    func = self.get_tool(func_name)
-                    
-                    if func:
-                        try:
-                            import json, asyncio
-                            args = json.loads(tool_call["function"]["arguments"])
-                            if asyncio.iscoroutinefunction(func):
-                                tool_result = await func(**args)
-                            else:
-                                tool_result = func(**args)
-                        except Exception as e:
-                            tool_result = f"Error: {e}"
-                    else:
-                        tool_result = f"Unknown tool: {func_name}"
-                    
-                    result_str = str(tool_result)[:2000]
-                    logger.info(f"  Result: {result_str[:100]}...")
-                    kwargs["messages"].append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": result_str,
-                    })
-            else:
-                # No tool calls, return response
-                content = message.get("content") or "ok"
-                logger.info(f"Heartbeat response (no tools): {content[:80]}...")
-                return content
-        
-        return "ok"  # Max iterations reached
     
     async def close(self):
         """Cleanup (no-op with litellm, kept for API compatibility)."""

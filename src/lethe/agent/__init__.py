@@ -34,6 +34,9 @@ class Agent:
         self._actor_context_provider: Optional[Callable[[], str]] = None
         self._principal_actor = None  # Set to the principal Actor by ActorSystem
 
+        # Optional: autonomy system hooks (set by main.py)
+        self._autonomy_context_provider: Optional[Callable[[], str]] = None
+
         # Initialize memory store
         self.memory = MemoryStore(
             data_dir=str(self.settings.memory_dir),
@@ -659,6 +662,15 @@ class Agent:
         if emotional_state:
             transient_parts.append(emotional_state)
 
+        # Inject autonomy context: drives, tensions, relationships, deep identity, experiments
+        if self._autonomy_context_provider:
+            try:
+                autonomy_ctx = self._autonomy_context_provider()
+                if autonomy_ctx:
+                    transient_parts.append(autonomy_ctx)
+            except Exception:
+                pass
+
         if transient_parts:
             self.llm.context.transient_system_context = "\n".join(transient_parts)
         
@@ -676,20 +688,6 @@ class Agent:
         self.llm._notify_status("idle")
         
         return response
-    
-    async def heartbeat(self, message: str) -> str:
-        """Process heartbeat with minimal context and aux model.
-        
-        Uses lightweight context (no full identity, limited history) and
-        aux model for cost efficiency.
-        
-        Args:
-            message: Heartbeat message
-            
-        Returns:
-            Response string
-        """
-        return await self.llm.heartbeat(message)
     
     async def close(self):
         """Clean up resources."""

@@ -83,7 +83,6 @@ class ActorSystem:
         # Callbacks set by main.py
         self._send_to_user: Optional[Callable] = None
         self._get_reminders: Optional[Callable] = None
-        self._decide_user_notify: Optional[Callable[[str, str, dict], Awaitable[Optional[str]]]] = None
         self._run_cortex_turn: Optional[Callable[[str], Awaitable[None]]] = None
 
     def _get_principal_context(self) -> str:
@@ -210,6 +209,7 @@ class ActorSystem:
                 available_tools=self._available_tools,
                 cortex_id=self.principal.id,
                 send_to_user=self._send_to_user or (lambda msg: asyncio.sleep(0)),
+                memory_store=getattr(self.agent, "memory", None),
             )
 
         tool_count = len(self.agent.llm._tools)
@@ -224,16 +224,17 @@ class ActorSystem:
         )
         self._start_principal_monitor()
 
-    # Tools subagents must NOT have — they communicate via actors only
+    # Subconscious actors communicate through cortex, not directly to users.
+    # Only the conscious layer (cortex) has telegram tools.
     SUBAGENT_EXCLUDED_TOOLS = {
         'telegram_send_message', 'telegram_send_file', 'telegram_react',
     }
 
     def _collect_available_tools(self):
         """Collect tools from the agent for subagent use.
-        
-        This runs BEFORE stripping cortex tools, so it captures everything.
-        Subagents can request any tool EXCEPT telegram (they message actors, not users).
+
+        Subconscious actors (subagents, DMN, brainstem) route through cortex
+        for user communication — they don't get telegram tools.
         """
         if hasattr(self.agent, 'llm') and hasattr(self.agent.llm, '_tools'):
             for name, (func, schema) in self.agent.llm._tools.items():
@@ -380,48 +381,33 @@ class ActorSystem:
                 logger.warning("No run_cortex_turn callback; subagent '%s' %s stuck in inbox", sender_name, kind)
             return
 
-        # Background processes can ask cortex to notify the user.
-        # System actors never bypass cortex: relay decision is always cortex-owned.
+        # Subconscious surfaces thoughts to cortex. Cortex speaks to users.
+        # No LLM gatekeeping call — cortex incorporates subconscious signals
+        # naturally in its next cognition cycle or cortex turn.
         if metadata.get("channel") != "user_notify":
             return
-        if sender_name not in {"brainstem", "dmn", "amygdala"}:
-            return
-        if self.principal:
-            self.registry.emit_event(
-                "background_notify_deferred_to_cortex",
-                self.principal,
-                {
-                    "from_actor_id": message.sender,
-                    "from_actor_name": sender_name,
-                    "message_preview": content[:240],
-                },
-            )
-        if not self._decide_user_notify or not self._send_to_user:
+        if not self._run_cortex_turn:
+            # No cortex turn callback yet — subconscious thought is lost
+            logger.info("Subconscious thought dropped (no cortex turn callback): %s", content[:120])
             return
         try:
-            relay_message = await self._decide_user_notify(sender_name, content, metadata)
-            relay_text = (relay_message or "").strip()
-            if not relay_text:
-                if self.principal:
-                    self.registry.emit_event(
-                        "background_notify_dropped_by_cortex",
-                        self.principal,
-                        {
-                            "from_actor_id": message.sender,
-                            "from_actor_name": sender_name,
-                            "message_preview": content[:240],
-                        },
-                    )
-                return
-            await self._send_to_user(relay_text)
+            # Trigger a cortex turn with the subconscious signal as context.
+            # Cortex decides how (and whether) to express this to the user.
+            kind = metadata.get("kind", "thought")
+            synthetic = (
+                f"[Your subconscious surfaced something ({kind} from {sender_name}): "
+                f"{content[:500]}. "
+                f"Express this in your own voice if it's worth sharing, or let it go.]"
+            )
+            await self._run_cortex_turn(synthetic)
             if self.principal:
                 self.registry.emit_event(
-                    "background_notify_relayed_to_user",
+                    "subconscious_surfaced_to_cortex",
                     self.principal,
                     {
                         "from_actor_id": message.sender,
                         "from_actor_name": sender_name,
-                        "message_preview": relay_text[:240],
+                        "message_preview": content[:240],
                     },
                 )
         except Exception as e:
@@ -442,20 +428,17 @@ class ActorSystem:
         self,
         send_to_user: Callable,
         get_reminders: Optional[Callable] = None,
-        decide_user_notify: Optional[Callable[[str, str, dict], Awaitable[Optional[str]]]] = None,
         run_cortex_turn: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
-        """Set callbacks for DMN and actor system.
+        """Set callbacks for actor system.
 
         Args:
-            send_to_user: async Callable(message: str) -> None
+            send_to_user: async Callable(message: str) -> None — direct send (cortex use only)
             get_reminders: async Callable() -> str
-            decide_user_notify: async Callable(from_actor, message, metadata) -> relay message or None
-            run_cortex_turn: async Callable(synthetic_message: str) -> None — triggers a full cortex LLM turn
+            run_cortex_turn: async Callable(synthetic_message: str) -> None — triggers a cortex LLM turn
         """
         self._send_to_user = send_to_user
         self._get_reminders = get_reminders
-        self._decide_user_notify = decide_user_notify
         self._run_cortex_turn = run_cortex_turn
         if self.dmn:
             self.dmn.send_to_user = send_to_user

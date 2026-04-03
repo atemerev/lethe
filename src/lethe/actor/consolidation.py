@@ -151,6 +151,7 @@ class MemoryConsolidation:
         available_tools: list[str],
         cortex_id: str,
         send_to_user: Callable,
+        memory_store=None,
         cadence: int = DEFAULT_CADENCE,
     ):
         self._registry = registry
@@ -158,6 +159,7 @@ class MemoryConsolidation:
         self._available_tools = available_tools
         self._cortex_id = cortex_id
         self.send_to_user = send_to_user
+        self._memory_store = memory_store
         self._cadence = cadence
 
         self._round_count = 0
@@ -234,36 +236,28 @@ class MemoryConsolidation:
     # -- Memory block reading -------------------------------------------------
 
     def _read_memory_blocks(self) -> dict[str, dict]:
-        """Read all memory blocks with metadata from the cortex actor."""
+        """Read all memory blocks with metadata via the memory store."""
         blocks = {}
+        if not self._memory_store:
+            logger.warning("Consolidation: no memory store available")
+            return blocks
+
         try:
-            cortex = self._registry.get(self._cortex_id)
-            if cortex is None:
-                logger.warning("Consolidation: cortex actor not found")
-                return blocks
-
-            # Access memory blocks through the cortex's memory system
-            memory = getattr(cortex, "memory", None)
-            if memory is None:
-                logger.warning("Consolidation: cortex has no memory attribute")
-                return blocks
-
-            for label in memory.list_blocks():
-                try:
-                    block = memory.read_block(label)
-                    metadata = memory.block_metadata(label)
-                    chars_used = len(block) if block else 0
-                    chars_limit = metadata.get("char_limit", 20000) if metadata else 20000
-                    blocks[label] = {
-                        "label": label,
-                        "content": block or "",
-                        "chars_used": chars_used,
-                        "chars_limit": chars_limit,
-                        "ratio": chars_used / chars_limit if chars_limit > 0 else 0,
-                    }
-                except Exception as e:
-                    logger.warning("Consolidation: failed to read block '%s': %s", label, e)
-
+            block_list = self._memory_store.blocks.list_blocks()
+            for block_dict in block_list:
+                label = block_dict.get("label", "")
+                if not label:
+                    continue
+                value = block_dict.get("value", "")
+                chars_used = len(value)
+                chars_limit = block_dict.get("limit", 20000)
+                blocks[label] = {
+                    "label": label,
+                    "content": value,
+                    "chars_used": chars_used,
+                    "chars_limit": chars_limit,
+                    "ratio": chars_used / chars_limit if chars_limit > 0 else 0,
+                }
         except Exception as e:
             logger.warning("Consolidation: failed to read memory blocks: %s", e)
 
@@ -339,16 +333,11 @@ class MemoryConsolidation:
         """Apply consolidation actions: archive then rewrite."""
         stats = {"compressed": 0, "archived": 0, "skipped": 0}
 
-        actions = result.get("actions", [])
-        cortex = self._registry.get(self._cortex_id)
-        if cortex is None:
-            logger.error("Consolidation: cortex not found for applying actions")
+        if not self._memory_store:
+            logger.error("Consolidation: no memory store for applying actions")
             return stats
 
-        memory = getattr(cortex, "memory", None)
-        if memory is None:
-            logger.error("Consolidation: cortex memory not found")
-            return stats
+        actions = result.get("actions", [])
 
         for action in actions:
             block_label = action.get("block", "")
@@ -360,17 +349,17 @@ class MemoryConsolidation:
 
             if action_type == "rewrite":
                 try:
-                    # Step 1: Archive removed content
+                    # Step 1: Archive removed content to archival memory
                     archive_entries = action.get("archive_entries", [])
                     for entry in archive_entries:
                         tagged_entry = f"[consolidation][{block_label}] {entry}"
-                        memory.archival_insert(tagged_entry)
+                        self._memory_store.archival.insert(tagged_entry)
                         stats["archived"] += 1
 
-                    # Step 2: Rewrite the block
+                    # Step 2: Rewrite the block with compressed content
                     new_content = action.get("new_content", "")
                     if new_content and block_label in blocks:
-                        memory.update_block(block_label, new_content)
+                        self._memory_store.blocks.update(block_label, value=new_content)
                         stats["compressed"] += 1
                         logger.info(
                             "Consolidation: compressed '%s' (%d → %d chars)",
@@ -384,8 +373,6 @@ class MemoryConsolidation:
                         "Consolidation: failed to apply action for '%s': %s",
                         block_label, e,
                     )
-
-        return stats
 
     # -- Audit log ------------------------------------------------------------
 

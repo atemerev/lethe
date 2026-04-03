@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _agent = None
 _conversation_manager = None
 _actor_system = None
-_heartbeat = None
+_cognition = None
 _settings = None
 
 # Queue for proactive/heartbeat events (drained by /events SSE)
@@ -60,13 +60,7 @@ async def chat(request: Request) -> StreamingResponse:
         if metadata.get("message_id"):
             set_last_message_id(metadata["message_id"])
 
-        # Mark user activity
-        if _agent:
-            removed = _agent.llm.clear_idle_markers()
-            if removed:
-                logger.info("Cleared %d idle marker(s) on incoming API message", removed)
-            if _heartbeat:
-                _heartbeat.reset_idle_timer("incoming API message")
+        # Activity tracking handled by cognition loop drives
 
         try:
             await event_queue.put({"event": "typing_start", "data": {}})
