@@ -1729,6 +1729,11 @@ class AsyncLLMClient:
         # Never let transient recall force short-term history eviction.
         self.context._drop_transient_if_over_budget()
         messages = self.context.build_messages()
+
+        # Prefill fix: inject [Continue] to prevent "assistant message prefill" error
+        # with Anthropic models. Always on — this is a correctness fix.
+        if messages and messages[-1].get("role") == "assistant":
+            messages.append({"role": "user", "content": "[Continue]"})
         
         # Notify console of context build
         token_count = self.context.count_tokens("".join(str(m) for m in messages))
