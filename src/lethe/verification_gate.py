@@ -59,8 +59,7 @@ Examples of NOT completion (is_completion: false):
 - "Yeah, that was a stale notification." → {"is_completion": false, "has_evidence": false}
 - "Want me to adjust the gate sensitivity?" → {"is_completion": false, "has_evidence": false}"""
 
-# Load verification protocol once
-_PROTOCOL_PATH = Path.home() / "lethe" / "skills" / "verification_mandatory.md"
+# Load verification protocol using the standard prompt template system
 _protocol_cache: str | None = None
 
 
@@ -68,8 +67,9 @@ def _load_protocol() -> str:
     global _protocol_cache
     if _protocol_cache is None:
         try:
-            _protocol_cache = _PROTOCOL_PATH.read_text()
-        except FileNotFoundError:
+            from lethe.prompts import load_prompt_template
+            _protocol_cache = load_prompt_template("verification_mandatory")
+        except Exception:
             _protocol_cache = (
                 "VERIFICATION REQUIRED: Before reporting task completion, you must "
                 "verify the actual result — run the command, check the endpoint, "
