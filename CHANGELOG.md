@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.11.2 - 2026-04-14
+
+### Fixed
+- **Context overflow recovery**: API calls that exceed the context window now auto-compact and retry (up to 3 attempts) instead of crashing. Second retry also truncates oversized tool results with error-aware head+tail preservation.
+- **Tool outcomes lost across sessions**: Tool results were silently dropped on history reload — now extracted as brief outcome annotations and injected into adjacent assistant messages so the model remembers what tools accomplished.
+- **Hippocampus couldn't recall tool outcomes**: Conversation search filtered out all tool messages. Now allows non-search tool results (capped at 2K chars) so hippocampus can surface past tool achievements.
+- **Compaction loses active work context**: Summarization prompt now explicitly preserves active tasks, latest user request, commitments, and partial progress. Recent kept turns are passed to the summarizer to avoid redundancy.
+- **Stale timestamps after compaction**: Summary block now includes a `[Compacted at ...]` temporal anchor that refreshes on each compaction.
+
+### Changed
+- **Proportional message capping**: Message truncation limit is now 30% of context window (floored 2K, capped 400K) instead of fixed 50KB. Truncation is error-aware — allocates more to the tail when it contains error/traceback patterns.
+- **Actual token tracking**: Compaction decisions now use real `prompt_tokens` from API responses when available instead of the `len/4 * 1.3` heuristic.
+- **Auto-archive tool achievements**: After turns with successful state-changing tools (writes, logins, API calls), a brief digest is automatically stored in archival memory for hippocampus discoverability.
+
 ## v0.10.6 - 2026-02-16
 
 ### Fixed

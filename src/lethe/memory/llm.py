@@ -84,6 +84,8 @@ TOKEN_SAFETY_MARGIN = 1.3  # Safety margin for approximate token counting
 SLIDING_WINDOW_KEEP_RATIO = 0.7  # Keep 70% of context after compaction
 COMPACTION_TRIGGER_RATIO = 0.85  # Trigger compaction at 85% capacity
 SUMMARY_MAX_LINES = 30  # Max summary lines (truncate by lines, not chars)
+MAX_OVERFLOW_RETRIES = 3  # Max context overflow recovery attempts
+MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3  # Tool result cap: 30% of context window
 
 # Minimal heartbeat system prompt (template)
 HEARTBEAT_SYSTEM_PROMPT = load_prompt_template(
@@ -251,6 +253,7 @@ class ContextWindow:
     _summarizer: Optional[Callable] = None  # Set by LLMClient
     _tool_reference: str = ""  # Compact tool list for system prompt (non-Anthropic models)
     _tool_schemas_text: str = ""  # Serialized tool schemas for token budget accounting
+    _last_prompt_tokens: int = 0  # Actual prompt tokens from last API response (for calibration)
     
     def count_tokens(self, text: str) -> int:
         """Approximate token count with safety margin.
@@ -376,35 +379,80 @@ class ContextWindow:
         )
         self.transient_system_context = ""
     
+    # Tools whose results should NOT be surfaced as outcome annotations
+    # (search tools return previous results, creating recursive bloat)
+    _OUTCOME_SKIP_TOOLS = {"conversation_search", "archival_search"}
+
     def load_messages(self, messages: List[dict]):
         """Load existing messages from history (e.g., from database).
-        
+
         Args:
             messages: List of dicts with 'role', 'content', 'metadata', and optionally 'created_at' keys
-        
-        Tool messages from history are skipped — they can only be properly paired
-        within the same session. Cross-model tool ID formats are incompatible.
+
+        Tool messages cannot be properly paired with their assistant tool_calls
+        across sessions (ID formats differ between models/sessions). Instead of
+        silently dropping them, we extract a brief outcome annotation and inject
+        it into the next assistant message so the model retains knowledge of what
+        tools accomplished in previous sessions.
         """
         loaded_count = 0
         skipped_empty = 0
         skipped_tool = 0
-        
+        pending_tool_outcomes: List[str] = []  # Collected tool outcomes to inject
+
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             metadata = msg.get("metadata", {})
-            
-            # Skip tool messages from history — they can't be properly paired
-            # and cause the orphan cleaner to strip their parent assistant messages
+
+            # Collect tool message outcomes instead of silently dropping them.
+            # These get injected as annotations into the next assistant message.
             if role == "tool":
                 skipped_tool += 1
+                tool_name = metadata.get("name", "tool")
+                # Skip search tool results (recursive bloat)
+                if tool_name in self._OUTCOME_SKIP_TOOLS:
+                    continue
+                result_text = str(content).strip()
+                if result_text:
+                    # Cap individual outcome preview
+                    preview = result_text[:200]
+                    if len(result_text) > 200:
+                        preview += "..."
+                    pending_tool_outcomes.append(f"{tool_name}: {preview}")
                 continue
-            
+
             # Strip tool_calls from loaded assistant messages — their results
             # aren't in history, so orphan cleanup would destroy these messages
             if role == "assistant" and metadata.get("tool_calls"):
                 metadata = {k: v for k, v in metadata.items() if k != "tool_calls"}
-            
+
+            # Inject pending tool outcomes into the next assistant message
+            if pending_tool_outcomes and role == "assistant":
+                # Cap total outcomes annotation to avoid bloating context
+                outcomes = pending_tool_outcomes[:10]  # Max 10 tool outcomes per group
+                outcomes_text = "; ".join(outcomes)
+                if len(outcomes_text) > 1000:
+                    outcomes_text = outcomes_text[:1000] + "..."
+                annotation = f"[Tool outcomes: {outcomes_text}]"
+                if content:
+                    content = f"{annotation}\n{content}"
+                else:
+                    content = annotation
+                pending_tool_outcomes = []
+            elif pending_tool_outcomes and role == "user":
+                # Tool outcomes before a user message (e.g. tool-only turn with no final response)
+                outcomes = pending_tool_outcomes[:10]
+                outcomes_text = "; ".join(outcomes)
+                if len(outcomes_text) > 1000:
+                    outcomes_text = outcomes_text[:1000] + "..."
+                self.messages.append(Message(
+                    role="assistant",
+                    content=f"[Tool outcomes: {outcomes_text}]",
+                ))
+                loaded_count += 1
+                pending_tool_outcomes = []
+
             # Handle multimodal content - extract text, skip base64
             if isinstance(content, str) and content.startswith("["):
                 try:
@@ -422,16 +470,16 @@ class ContextWindow:
                         content = " ".join(text_parts)
                 except (json.JSONDecodeError, TypeError):
                     pass
-            
+
             # Skip huge messages (likely base64 or other binary content)
             if len(str(content)) > 50000:
                 content = f"[large content: {len(str(content))} chars]"
-            
+
             # Skip assistant messages that have no content and no tool_calls
             if role == "assistant" and not content and not metadata.get("tool_calls"):
                 skipped_empty += 1
                 continue
-            
+
             # Parse created_at from database
             created_at = None
             if msg.get("created_at"):
@@ -439,7 +487,7 @@ class ContextWindow:
                     created_at = datetime.fromisoformat(msg["created_at"].replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
                     created_at = datetime.now(timezone.utc)
-            
+
             # Build message with all metadata
             self.messages.append(Message(
                 role=role,
@@ -450,31 +498,61 @@ class ContextWindow:
                 name=metadata.get("name"),
             ))
             loaded_count += 1
-        
+
+        # Flush any remaining tool outcomes at end of history
+        if pending_tool_outcomes:
+            outcomes = pending_tool_outcomes[:10]
+            outcomes_text = "; ".join(outcomes)
+            if len(outcomes_text) > 1000:
+                outcomes_text = outcomes_text[:1000] + "..."
+            self.messages.append(Message(
+                role="assistant",
+                content=f"[Tool outcomes: {outcomes_text}]",
+            ))
+            loaded_count += 1
+
         logger.info(f"Loaded {loaded_count} messages (skipped: {skipped_tool} tool, {skipped_empty} empty)")
         # Compress if needed after loading
         self._compress_if_needed(include_transient=False)
     
-    def _compress_if_needed(self, include_transient: bool = False):
+    def _compress_if_needed(self, include_transient: bool = False, force: bool = False):
         """Summarize oldest messages using Letta-style sliding window.
-        
+
         Approach:
         1. Trigger when messages exceed COMPACTION_TRIGGER_RATIO (85%) of available tokens
         2. Find cutoff point by TOKEN budget (not message count) to hit SLIDING_WINDOW_KEEP_RATIO
         3. Cutoff must be at assistant message boundary (avoid mid-conversation splits)
         4. Summarize messages before cutoff, keep messages after
+
+        Args:
+            include_transient: Include transient context in budget calculations
+            force: Force compaction regardless of threshold (for overflow recovery)
         """
         available = self.get_available_tokens(include_transient=include_transient)
-        total = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
-        
+
+        # Use actual prompt tokens if available for more accurate budget check
+        if self._last_prompt_tokens > 0:
+            effective_limit = self.config.context_limit - self.config.max_output_tokens
+            actual_utilization = self._last_prompt_tokens / effective_limit if effective_limit > 0 else 1.0
+            # Estimate message tokens from actual usage minus fixed overhead
+            fixed = self.get_fixed_tokens(include_transient=include_transient)
+            total = max(0, self._last_prompt_tokens - fixed)
+            if not force and actual_utilization < COMPACTION_TRIGGER_RATIO:
+                total = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
+        else:
+            total = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
+
         # Check if compaction needed
-        if total <= available * COMPACTION_TRIGGER_RATIO or len(self.messages) <= 4:
+        if not force and (total <= available * COMPACTION_TRIGGER_RATIO or len(self.messages) <= 4):
             return
         
-        logger.info(f"Context compaction triggered: {total} tokens > {available * COMPACTION_TRIGGER_RATIO:.0f} threshold ({len(self.messages)} messages)")
-        
+        trigger_label = "forced (overflow recovery)" if force else "threshold"
+        logger.info(f"Context compaction triggered ({trigger_label}): {total} tokens > {available * COMPACTION_TRIGGER_RATIO:.0f} threshold ({len(self.messages)} messages)")
+
         # Target: keep enough messages to fit within KEEP_RATIO of available tokens
-        target_tokens = int(available * SLIDING_WINDOW_KEEP_RATIO)
+        # Use more aggressive ratio when forced (overflow recovery needs more headroom)
+        keep_ratio = 0.5 if force else SLIDING_WINDOW_KEEP_RATIO
+        target_tokens = int(available * keep_ratio)
         
         # Walk backwards from end, accumulating tokens, to find how many messages to keep
         kept_tokens = 0
@@ -542,7 +620,65 @@ class ContextWindow:
             lines = self.summary.strip().split("\n")
             if len(lines) > SUMMARY_MAX_LINES:
                 self.summary = "\n".join(lines[:SUMMARY_MAX_LINES]) + f"\n[...truncated, {len(lines) - SUMMARY_MAX_LINES} more lines]"
-    
+
+        # Refresh temporal anchor so post-compaction context has current time
+        now = datetime.now(timezone.utc).astimezone()
+        date_line = f"[Compacted at {now.strftime('%a %Y-%m-%d %H:%M %Z')}]"
+        if self.summary and not self.summary.startswith("[Compacted at"):
+            self.summary = f"{date_line}\n{self.summary}"
+        elif self.summary:
+            # Replace existing compaction timestamp
+            lines = self.summary.split("\n", 1)
+            self.summary = f"{date_line}\n{lines[1]}" if len(lines) > 1 else date_line
+
+        # Reset actual token count — context shape changed
+        self._last_prompt_tokens = 0
+
+    def _force_compact(self):
+        """Force compaction for overflow recovery (more aggressive than normal)."""
+        self._compress_if_needed(include_transient=False, force=True)
+
+    def _truncate_oversized_tool_results(self):
+        """Truncate the largest tool results in context to recover space.
+
+        Used as a last resort when compaction alone isn't enough to fit
+        within the context window.
+        """
+        import re
+        # Find tool messages sorted by content size (largest first)
+        tool_entries = [
+            (i, m) for i, m in enumerate(self.messages)
+            if m.role == "tool"
+        ]
+        tool_entries.sort(key=lambda x: len(x[1].get_text_content()), reverse=True)
+
+        truncated = 0
+        for _idx, msg in tool_entries:
+            content = msg.get_text_content()
+            if len(content) <= 2000:
+                break  # Remaining are small enough
+
+            # Preserve error diagnostics in the tail
+            tail_size = 500
+            error_pattern = re.compile(
+                r'\b(error|exception|failed|fatal|traceback|panic|exit code)\b',
+                re.IGNORECASE,
+            )
+            tail_content = content[-1000:]
+            if error_pattern.search(tail_content):
+                tail_size = 1000  # Keep more of the tail when it has errors
+
+            head = content[:1000]
+            tail = content[-tail_size:]
+            omitted = len(content) - 1000 - tail_size
+            msg.content = f"{head}\n\n[... {omitted:,} chars truncated (overflow recovery) ...]\n\n{tail}"
+            truncated += 1
+            if truncated >= 5:
+                break
+
+        if truncated:
+            logger.info(f"Truncated {truncated} oversized tool results for overflow recovery")
+
     def get_stats(self) -> dict:
         """Get context window statistics."""
         message_tokens = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
@@ -861,18 +997,30 @@ class ContextWindow:
             
             # Cap oversized string messages (e.g. large pasted text/PDF dumps).
             # Keep multimodal lists intact; flattening to str would break image payloads.
-            MAX_MESSAGE_CHARS = 50000
+            # Proportional cap: 30% of context window, floored at 2K, capped at 400K.
+            max_message_chars = int(self.config.context_limit * CHARS_PER_TOKEN * MAX_TOOL_RESULT_CONTEXT_SHARE)
+            max_message_chars = max(2000, min(max_message_chars, 400_000))
             if isinstance(content, str):
                 content_str = content
-                if len(content_str) > MAX_MESSAGE_CHARS:
+                if len(content_str) > max_message_chars:
                     original_len = len(content_str)
-                    # Keep first and last portions for context
-                    keep = MAX_MESSAGE_CHARS - 200  # room for notice
-                    head = content_str[:keep // 2]
-                    tail = content_str[-(keep // 2):]
+                    # Keep first and last portions; allocate more to tail if it has errors
+                    import re
+                    keep = max_message_chars - 200  # room for notice
+                    tail_text = content_str[-min(2000, len(content_str)):]
+                    has_error_tail = bool(re.search(
+                        r'\b(error|exception|failed|fatal|traceback|panic|exit code)\b',
+                        tail_text, re.IGNORECASE,
+                    ))
+                    if has_error_tail:
+                        head_share, tail_share = int(keep * 0.6), int(keep * 0.4)
+                    else:
+                        head_share, tail_share = int(keep * 0.7), int(keep * 0.3)
+                    head = content_str[:head_share]
+                    tail = content_str[-tail_share:]
                     content = f"{head}\n\n[... {original_len - keep:,} chars truncated ...]\n\n{tail}"
                     logger.warning(
-                        f"Truncated oversized message ({original_len:,} → {MAX_MESSAGE_CHARS:,} chars)"
+                        f"Truncated oversized message ({original_len:,} → {max_message_chars:,} chars)"
                     )
 
             # Stamp user messages with wall-clock time so the model knows
@@ -1009,7 +1157,11 @@ class AsyncLLMClient:
         
         # Stop flag: set by terminate() tool to prevent extra API calls
         self._stop_after_tool = False
-        
+
+        # Per-turn tool outcome log: populated during chat(), consumed by caller
+        # for auto-archival of significant achievements.
+        self._turn_tool_log: List[Dict[str, str]] = []
+
         # Set up summarizer callback
         self.context._summarizer = self._summarize_messages_sync
         
@@ -1138,16 +1290,36 @@ class AsyncLLMClient:
         return None
     
     def _summarize_messages_sync(self, messages: List[Message], existing_summary: str) -> str:
-        """Summarize messages (sync version for use in async context)."""
-        # Format messages for summarization
+        """Summarize messages (sync version for use in async context).
+
+        Work-aware: preserves active task state, commitments, and the latest
+        user request so the model doesn't lose track after compaction.
+        """
+        # Format messages for summarization — cap each to avoid blowing the aux model's context
         formatted = []
         for m in messages:
-            formatted.append(f"{m.role}: {m.get_text_content()}")
+            text = m.get_text_content()
+            # Truncate very long tool results in the summarization input
+            if m.role == "tool" and len(text) > 500:
+                text = text[:300] + f"\n[...{len(text) - 500} chars omitted...]\n" + text[-200:]
+            elif len(text) > 1000:
+                text = text[:800] + f"\n[...{len(text) - 1000} chars omitted...]\n" + text[-200:]
+            formatted.append(f"{m.role}: {text}")
         conversation = "\n".join(formatted)
-        
+
+        # Include the kept messages (recent turns) as context so the summarizer
+        # knows what's already preserved and can avoid redundancy
+        kept_preview = ""
+        if self.context.messages:
+            recent = self.context.messages[-3:]
+            kept_texts = [f"{m.role}: {m.get_text_content()[:150]}" for m in recent]
+            kept_preview = "\n\nRecent turns (already kept, don't repeat):\n" + "\n".join(kept_texts)
+
         if existing_summary:
-            conversation = f"Previous summary: {existing_summary}\n\nNew messages to incorporate:\n{conversation}"
-        
+            conversation = f"Previous summary: {existing_summary}\n\nNew messages to incorporate:\n{conversation}{kept_preview}"
+        else:
+            conversation = f"{conversation}{kept_preview}"
+
         # Use litellm for summarization
         try:
             response = completion(
@@ -1210,6 +1382,11 @@ class AsyncLLMClient:
         """Track token usage and cache stats from API response."""
         usage = result.get("usage", {})
         total = usage.get("total_tokens", 0)
+
+        # Store actual prompt tokens for calibrated budget decisions
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        if prompt_tokens > 0:
+            self.context._last_prompt_tokens = prompt_tokens
         source_name = source or self._usage_scope
         model_name = model or result.get("model", "") or self.config.model
         if total and hasattr(self, "_on_token_usage") and self._on_token_usage:
@@ -1327,7 +1504,10 @@ class AsyncLLMClient:
         no_progress_turns = 0
         last_tool_signature = ""
         circuit_breaker_reason = ""
-        
+
+        # Reset per-turn tool log (consumed by Agent for auto-archival)
+        self._turn_tool_log = []
+
         # Add user message
         self.context.add_message(Message(role="user", content=message))
         
@@ -1422,12 +1602,25 @@ class AsyncLLMClient:
                             result = f"Unknown tool: {tool_name}"
                         
                         logger.info(f"  Result: {str(result)[:100]}...")
+                        result_str_preview = str(result)[:200]
+                        is_error = isinstance(result, str) and (
+                            result.startswith("Error:") or result.startswith("Unknown tool:")
+                        )
                         if isinstance(result, str) and result.startswith("Error:"):
                             total_tool_errors += 1
                         elif isinstance(result, str) and result.startswith("Unknown tool:"):
                             total_tool_errors += 1
                         else:
                             turn_had_successful_tool = True
+
+                        # Log tool outcome for auto-archival by caller
+                        if tool_name not in self._SKIP_PERSIST_TOOLS:
+                            self._turn_tool_log.append({
+                                "name": tool_name,
+                                "args": json.dumps(tool_args, ensure_ascii=False)[:100],
+                                "result": result_str_preview,
+                                "success": not is_error,
+                            })
                         
                         # Check for image attachment in result (send to user)
                         if isinstance(result, dict) and "_image_attachment" in result:
@@ -1702,6 +1895,20 @@ class AsyncLLMClient:
         return any(x in error_str for x in ["rate_limit", "rate limit", "429", "too many requests"])
 
     @staticmethod
+    def _is_context_overflow_error(error_str: str) -> bool:
+        """Detect context window overflow errors (non-retryable by _call_with_retry)."""
+        overflow_markers = [
+            "request_too_large", "request too large",
+            "prompt is too long", "prompt too long",
+            "context window exceeded", "context length exceeded",
+            "maximum context length", "max_tokens",
+            "too many tokens", "token limit exceeded",
+            "content too large", "input is too long",
+        ]
+        error_lower = error_str.lower()
+        return any(marker in error_lower for marker in overflow_markers)
+
+    @staticmethod
     def _is_transient_error(error_str: str) -> bool:
         transient_markers = [
             "timeout",
@@ -1723,71 +1930,117 @@ class AsyncLLMClient:
         return any(x in error_str for x in transient_markers)
     
     async def _call_api(self, source: str = "") -> Dict:
-        """Make API call via litellm (or OAuth if enabled)."""
-        # Pre-flight: compact based on stable context only.
-        self.context._compress_if_needed(include_transient=False)
-        # Never let transient recall force short-term history eviction.
-        self.context._drop_transient_if_over_budget()
-        messages = self.context.build_messages()
-        
-        # Notify console of context build
-        token_count = self.context.count_tokens("".join(str(m) for m in messages))
-        self._notify_context(messages, token_count)
-        self._notify_status("thinking")
-        
-        logger.debug(f"API call: {len(messages)} messages, {len(self.tools)} tools")
-        
-        kwargs = await self._get_api_kwargs()
-        kwargs["messages"] = messages
-        
-        if self.tools:
-            tools = [t.copy() for t in self.tools]
-            # Anthropic prompt caching: mark last tool for 1-hour caching
-            is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
-            if is_anthropic and tools:
-                tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
-            kwargs["tools"] = tools
+        """Make API call via litellm (or OAuth if enabled).
 
-        debug_ts = None
-        if LLM_DEBUG:
-            try:
-                debug_path = Path("logs/llm")
-                debug_path.mkdir(parents=True, exist_ok=True)
-                debug_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                (debug_path / f"{debug_ts}_request.json").write_text(
-                    json.dumps(kwargs, indent=2, default=str)
-                )
-            except Exception as e:
-                logger.warning(f"Failed to write debug request log: {e}")
-        
-        result = await self._call_with_retry(kwargs, "chat")
-        self._track_usage(result, source=source or self._usage_scope, model=kwargs.get("model", self.config.model))
+        Includes reactive overflow recovery: if the API rejects the request
+        because the context is too large, auto-compact and retry (up to
+        MAX_OVERFLOW_RETRIES times).
+        """
+        for overflow_attempt in range(MAX_OVERFLOW_RETRIES + 1):
+            # Pre-flight: compact based on stable context only.
+            self.context._compress_if_needed(include_transient=False)
+            # Never let transient recall force short-term history eviction.
+            self.context._drop_transient_if_over_budget()
+            messages = self.context.build_messages()
 
-        if LLM_DEBUG and debug_ts:
+            # Notify console of context build
+            token_count = self.context.count_tokens("".join(str(m) for m in messages))
+            self._notify_context(messages, token_count)
+            self._notify_status("thinking")
+
+            logger.debug(f"API call: {len(messages)} messages, {len(self.tools)} tools")
+
+            kwargs = await self._get_api_kwargs()
+            kwargs["messages"] = messages
+
+            if self.tools:
+                tools = [t.copy() for t in self.tools]
+                # Anthropic prompt caching: mark last tool for 1-hour caching
+                is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
+                if is_anthropic and tools:
+                    tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+                kwargs["tools"] = tools
+
+            debug_ts = None
+            if LLM_DEBUG:
+                try:
+                    debug_path = Path("logs/llm")
+                    debug_path.mkdir(parents=True, exist_ok=True)
+                    debug_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    (debug_path / f"{debug_ts}_request.json").write_text(
+                        json.dumps(kwargs, indent=2, default=str)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write debug request log: {e}")
+
             try:
-                debug_path = Path("logs/llm")
-                (debug_path / f"{debug_ts}_response.json").write_text(
-                    json.dumps(result, indent=2, default=str)
-                )
+                result = await self._call_with_retry(kwargs, "chat")
             except Exception as e:
-                logger.warning(f"Failed to write debug response log: {e}")
-        
-        return result
+                if self._is_context_overflow_error(str(e)) and overflow_attempt < MAX_OVERFLOW_RETRIES:
+                    logger.warning(
+                        f"Context overflow detected (attempt {overflow_attempt + 1}/{MAX_OVERFLOW_RETRIES}), "
+                        f"recovering: {str(e)[:120]}"
+                    )
+                    if overflow_attempt == 0:
+                        # First attempt: force aggressive compaction
+                        self.context._force_compact()
+                    else:
+                        # Subsequent attempts: also truncate oversized tool results
+                        self.context._truncate_oversized_tool_results()
+                        self.context._force_compact()
+                    continue
+                raise
+
+            self._track_usage(result, source=source or self._usage_scope, model=kwargs.get("model", self.config.model))
+
+            if LLM_DEBUG and debug_ts:
+                try:
+                    debug_path = Path("logs/llm")
+                    (debug_path / f"{debug_ts}_response.json").write_text(
+                        json.dumps(result, indent=2, default=str)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write debug response log: {e}")
+
+            return result
+
+        # Should not reach here, but just in case
+        raise RuntimeError("Context overflow recovery exhausted")
     
     async def _call_api_no_tools(self, source: str = "") -> Dict:
-        """Make API call without tools (for final response after hitting limit)."""
-        self.context._compress_if_needed(include_transient=False)
-        self.context._drop_transient_if_over_budget()
-        messages = self.context.build_messages()
-        
-        logger.debug(f"API call (no tools): {len(messages)} messages")
-        
-        kwargs = await self._get_api_kwargs()
-        kwargs["messages"] = messages
-        
-        result = await self._call_with_retry(kwargs, "chat_no_tools")
-        self._track_usage(result, source=source or f"{self._usage_scope}:no_tools", model=kwargs.get("model", self.config.model))
-        return result
+        """Make API call without tools (for final response after hitting limit).
+
+        Includes the same overflow recovery as _call_api.
+        """
+        for overflow_attempt in range(MAX_OVERFLOW_RETRIES + 1):
+            self.context._compress_if_needed(include_transient=False)
+            self.context._drop_transient_if_over_budget()
+            messages = self.context.build_messages()
+
+            logger.debug(f"API call (no tools): {len(messages)} messages")
+
+            kwargs = await self._get_api_kwargs()
+            kwargs["messages"] = messages
+
+            try:
+                result = await self._call_with_retry(kwargs, "chat_no_tools")
+            except Exception as e:
+                if self._is_context_overflow_error(str(e)) and overflow_attempt < MAX_OVERFLOW_RETRIES:
+                    logger.warning(
+                        f"Context overflow in no-tools call (attempt {overflow_attempt + 1}), recovering"
+                    )
+                    if overflow_attempt == 0:
+                        self.context._force_compact()
+                    else:
+                        self.context._truncate_oversized_tool_results()
+                        self.context._force_compact()
+                    continue
+                raise
+
+            self._track_usage(result, source=source or f"{self._usage_scope}:no_tools", model=kwargs.get("model", self.config.model))
+            return result
+
+        raise RuntimeError("Context overflow recovery exhausted")
     
     async def complete(self, prompt: str, use_aux: bool = False, usage_tag: str = "") -> str:
         """Simple completion without tools or context management.

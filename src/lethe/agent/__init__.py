@@ -668,13 +668,17 @@ class Agent:
         finally:
             # Never carry transient per-turn context into subsequent turns.
             self.llm.context.transient_system_context = ""
-        
+
         # Store assistant response in history
         self.memory.messages.add("assistant", response)
-        
+
+        # Auto-archive significant tool achievements so they survive
+        # session restarts and are discoverable by hippocampus.
+        self._auto_archive_tool_outcomes()
+
         # Notify console of idle status
         self.llm._notify_status("idle")
-        
+
         return response
     
     async def heartbeat(self, message: str) -> str:
@@ -691,6 +695,53 @@ class Agent:
         """
         return await self.llm.heartbeat(message)
     
+    # Tools that represent queries/reads — not worth archiving as "achievements"
+    _TRIVIAL_TOOLS = {
+        "conversation_search", "archival_search", "archival_insert",
+        "memory_read", "memory_update", "memory_append",
+        "grep_search", "list_directory", "read_file",
+        "telegram_send_message", "telegram_send_file", "telegram_react",
+        "send_message", "user_notify", "terminate",
+        "ping_actor", "wait_for_response", "discover_actors",
+        "spawn_actor", "kill_actor",
+        "todo_list", "todo_add", "todo_done", "todo_remove",
+    }
+
+    def _auto_archive_tool_outcomes(self):
+        """Archive significant tool achievements to archival memory.
+
+        Runs after each chat turn. Only archives when there were successful
+        non-trivial tool calls (state-changing tools like writes, logins,
+        API calls, etc.) so hippocampus can recall them in future sessions.
+        """
+        tool_log = self.llm._turn_tool_log
+        if not tool_log:
+            return
+
+        # Filter to significant outcomes
+        significant = [
+            t for t in tool_log
+            if t["success"] and t["name"] not in self._TRIVIAL_TOOLS
+        ]
+        if not significant:
+            return
+
+        # Build a brief digest
+        now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+        lines = []
+        for t in significant[:5]:  # Cap at 5 to avoid noise
+            result_preview = t["result"][:150]
+            lines.append(f"- {t['name']}: {result_preview}")
+
+        digest = f"[{now}] Tool achievements:\n" + "\n".join(lines)
+
+        # Store in archival memory (fire-and-forget, don't block response)
+        try:
+            self.memory.archival.add(digest)
+            logger.info(f"Auto-archived {len(significant)} tool outcomes ({len(digest)} chars)")
+        except Exception as e:
+            logger.warning(f"Failed to auto-archive tool outcomes: {e}")
+
     async def close(self):
         """Clean up resources."""
         await self.llm.close()

@@ -456,21 +456,38 @@ class Hippocampus:
             logger.warning(f"Conversation search failed: {e}")
             return []
 
+    # Search/query tools whose results should never be recalled
+    # (they contain previous search results, creating recursive bloat)
+    _RECALL_SKIP_TOOLS = {"conversation_search", "archival_search"}
+
     def _conversation_entry_allowed(self, msg: dict) -> bool:
         """Filter noisy conversation recall entries.
 
-        We skip tool-role messages and assistant tool-call scaffolding to avoid
-        recalling large tool transcripts into the main prompt.
+        Tool messages from search tools are skipped to avoid recursive bloat.
+        Other tool messages (e.g. bash, file edits, API calls) are allowed
+        with capped content so the hippocampus can recall what tools accomplished.
         """
         role = str(msg.get("role", "")).strip().lower()
         metadata = msg.get("metadata", {}) or {}
         content = msg.get("content", "")
+
         if role == "tool":
-            return False
-        if metadata.get("tool_call_id") or metadata.get("name"):
+            tool_name = metadata.get("name", "")
+            # Skip search tools (recursive bloat)
+            if tool_name in self._RECALL_SKIP_TOOLS:
+                return False
+            # Allow other tool results with a tighter size cap
+            if not isinstance(content, str):
+                content = str(content)
+            return len(content) <= 2000
+
+        # Skip assistant tool-call scaffolding (the tool_calls structure itself
+        # is noise; the tool result content is what matters)
+        if metadata.get("tool_call_id"):
             return False
         if role == "assistant" and metadata.get("tool_calls"):
             return False
+
         if not isinstance(content, str):
             content = str(content)
         if len(content) > MAX_CONVERSATION_RECALL_ENTRY_CHARS:
