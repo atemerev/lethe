@@ -442,16 +442,40 @@ class Hippocampus:
         limit: int = 5,
         exclude_recent: int = 5,
     ) -> list[dict]:
-        """Search conversation history, excluding very recent messages."""
+        """Search conversation history, excluding very recent messages.
+
+        Results are re-ranked with a recency boost so that recent memories
+        about the same topic outrank older ones with marginally better
+        vector similarity.
+        """
         try:
-            results = self.memory.messages.search(query, limit=limit + exclude_recent)
+            # Fetch more candidates than needed to allow recency re-ranking
+            results = self.memory.messages.search(query, limit=(limit + exclude_recent) * 2)
             # Skip the most recent messages (they're already in context)
             candidates = results[exclude_recent:] if len(results) > exclude_recent else []
             filtered = [m for m in candidates if self._conversation_entry_allowed(m)]
             dropped = len(candidates) - len(filtered)
             if dropped > 0:
                 logger.info("Hippocampus: dropped %s tool/oversized conversation entries", dropped)
-            return filtered
+
+            # Recency boost: recent results get a score bump so that a
+            # recent lower-similarity match outranks an old higher-similarity one.
+            # This prevents stale failures from outranking recent resolutions.
+            if filtered:
+                now = datetime.now(timezone.utc)
+                for m in filtered:
+                    base_score = m.get("score", 0.5)
+                    created = self._parse_created_at(m.get("created_at", ""))
+                    if created:
+                        age_hours = max(0, (now - created).total_seconds() / 3600)
+                        # Boost: 0.15 for messages < 1h old, decaying to 0 over 7 days
+                        recency_boost = 0.15 * max(0, 1.0 - age_hours / 168)
+                    else:
+                        recency_boost = 0
+                    m["_boosted_score"] = base_score + recency_boost
+                filtered.sort(key=lambda m: m.get("_boosted_score", 0), reverse=True)
+
+            return filtered[:limit]
         except Exception as e:
             logger.warning(f"Conversation search failed: {e}")
             return []

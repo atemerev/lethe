@@ -9,10 +9,11 @@ RECALLED MEMORIES (oldest first):
 {memories}
 
 Instructions:
-1. DISCARD memories whose state claims are clearly superseded by newer information — either within the recalled set or by current context. E.g., old "failed to connect" is stale if a newer memory shows "connected successfully."
-2. KEEP events, decisions, learnings, credentials, and configuration details — these remain valid regardless of age.
-3. For ambiguous state claims you cannot verify, add "(as of [date])" to flag uncertainty.
-4. When multiple memories describe the same topic, synthesize into the most recent known state.
-5. PRESERVE exactly: timestamps, URLs, file paths, credentials, IDs, code snippets, commands, names.
+1. DISCARD state claims superseded by newer information — either within the recalled set or by current context. "Failed to connect" from last week is stale if a newer memory or current context shows it was later resolved.
+2. DISCARD old failure/error events when a LATER memory shows the same problem was resolved or a different approach succeeded. Failed attempts are only useful if there is NO subsequent resolution. When resolution exists, keep ONLY the resolution.
+3. When multiple memories describe the same topic at different times, keep ONLY the most recent state. Do not include the journey — just the destination.
+4. KEEP: decisions and their rationale, credentials/config details, learnings that remain useful.
+5. For claims you cannot verify against current context, add "(as of [date])".
+6. PRESERVE exactly: timestamps, URLs, file paths, credentials, IDs, code snippets, commands, names.
 
-Output a dense, factual summary of what's still relevant. Most recent state last. No preamble.
+Output a dense, factual summary of what's CURRENTLY true. Most recent information last. No preamble.
