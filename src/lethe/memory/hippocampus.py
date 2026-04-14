@@ -82,7 +82,7 @@ SALIENCE_USER_PROMPT = load_prompt_template(
 
 
 # Warning added to recall block
-ACAUSAL_WARNING = """WARNING: This recall is acausal - these memories may be from the past and do not reflect current state. Do NOT use recalled memories to determine what is done or pending. Use conversation history, todo tools, and memory blocks for current state."""
+ACAUSAL_WARNING = """NOTE: These memories are from past sessions. State claims (e.g. "X is configured", "Y is broken") may be outdated — verify via tools or conversation history before acting on them. Events, decisions, and credentials are reliable."""
 
 class Hippocampus:
     """Pattern completion memory retrieval with LLM-guided search.
@@ -273,9 +273,9 @@ class Hippocampus:
             )
             return None
         
-        # Step 3: Summarize if we have a summarizer
+        # Step 3: Summarize (and review for stale state) if we have a summarizer
         if self.summarizer:
-            result = await self._summarize(memories)
+            result = await self._summarize(memories, recent_messages)
             result = self._cap_recall_payload(result)
             self._stats["recalls"] += 1
             self._stats["last_recall_chars"] = len(result or "")
@@ -676,23 +676,38 @@ class Hippocampus:
         
         return "\n\n".join(sections)
     
-    async def _summarize(self, memories: str) -> str:
-        """Summarize memories using the configured summarizer."""
+    async def _summarize(
+        self,
+        memories: str,
+        recent_messages: Optional[list[dict]] = None,
+    ) -> str:
+        """Review and summarize recalled memories using the configured summarizer.
+
+        Passes recent conversation context so the reviewer can identify stale
+        state claims and discard them rather than faithfully preserving outdated
+        information.
+        """
+        # Build current context snippet for the reviewer
+        current_context = self._build_current_context(recent_messages)
+
         try:
-            prompt = SUMMARIZE_PROMPT.format(memories=memories)
+            prompt = SUMMARIZE_PROMPT.format(
+                memories=memories,
+                current_context=current_context,
+            )
             summary = await self.summarizer(prompt)
-            
+
             if summary:
-                logger.info(f"Summarized {len(memories)} -> {len(summary)} chars")
+                logger.info(f"Reviewed+summarized {len(memories)} -> {len(summary)} chars")
                 return (
-                    "<associative_memory_recall summarized=\"true\">\n"
+                    "<associative_memory_recall reviewed=\"true\">\n"
                     + ACAUSAL_WARNING + "\n\n"
                     + summary.strip()
                     + "\n</associative_memory_recall>"
                 )
         except Exception as e:
-            logger.warning(f"Summarization failed: {e}")
-        
+            logger.warning(f"Memory review/summarization failed: {e}")
+
         # Fallback to unsummarized
         return (
             "<associative_memory_recall>\n"
@@ -700,6 +715,32 @@ class Hippocampus:
             + memories
             + "\n</associative_memory_recall>"
         )
+
+    def _build_current_context(self, recent_messages: Optional[list[dict]] = None) -> str:
+        """Build a current-state snippet for the memory reviewer.
+
+        Includes recent conversation turns so the LLM can detect when a recalled
+        memory's state claim has been superseded by more recent events.
+        """
+        parts = []
+
+        # Recent conversation turns (most recent state)
+        if recent_messages:
+            for msg in recent_messages[-5:]:
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                content = str(content)[:300]
+                parts.append(f"{role}: {content}")
+
+        if not parts:
+            return "(no recent context available)"
+
+        return "\n".join(parts)
 
     def _cap_recall_payload(self, text: Optional[str]) -> str:
         """Cap recall payload to a fixed approximate token budget."""

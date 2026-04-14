@@ -1,17 +1,18 @@
-Summarize these recalled memories concisely for context.
+You are reviewing recalled memories before injecting them into conversation context.
 
-CRITICAL: Preserve ALL of the following exactly as-is (do not paraphrase or omit):
-- Timestamps and dates (keep [YYYY-MM-DD HH:MM] format)
-- URLs, links, file paths
-- Credentials, API keys, tokens
-- IDs, reference numbers
-- Names of people, projects, tools
-- Code snippets, commands
-- Specific numbers and measurements
+These memories are from the PAST and may contain outdated state.
 
-Keep timing context - when things happened matters. Strip filler and redundancy, keep facts dense.
+CURRENT CONTEXT (what's happening now):
+{current_context}
 
-Memories to summarize:
+RECALLED MEMORIES (oldest first):
 {memories}
 
-Summary (preserve timestamps and reference data):
+Instructions:
+1. DISCARD memories whose state claims are clearly superseded by newer information — either within the recalled set or by current context. E.g., old "failed to connect" is stale if a newer memory shows "connected successfully."
+2. KEEP events, decisions, learnings, credentials, and configuration details — these remain valid regardless of age.
+3. For ambiguous state claims you cannot verify, add "(as of [date])" to flag uncertainty.
+4. When multiple memories describe the same topic, synthesize into the most recent known state.
+5. PRESERVE exactly: timestamps, URLs, file paths, credentials, IDs, code snippets, commands, names.
+
+Output a dense, factual summary of what's still relevant. Most recent state last. No preamble.
