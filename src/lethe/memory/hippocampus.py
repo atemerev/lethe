@@ -260,20 +260,14 @@ class Hippocampus:
 
         logger.info(f"Hippocampus: searching with query '{search_query}' (reason: {analysis.get('reason')})")
         
-        # Step 2: Search with LLM-generated query
+        # Step 2: Search (no LLM — vector + FTS only)
         archival_results = self._search_archival(search_query)
         conversation_results = self._search_conversations(search_query, exclude_recent=5)
         note_results = self._search_notes(search_query)
 
-        # Step 2.5: Filter for relevance (batch LLM call)
-        if self.analyzer and (archival_results or conversation_results):
-            archival_results, conversation_results = await self._filter_relevant(
-                message, archival_results, conversation_results
-            )
-
-        # Combine and format results (notes are pre-distilled, always included)
+        # Combine and format results (notes first — pre-distilled, highest signal)
         memories = self._format_memories(archival_results, conversation_results, max_lines, note_results)
-        
+
         if not memories:
             logger.info("Hippocampus: no memories found for query")
             self._stats["misses"] += 1
@@ -289,49 +283,36 @@ class Hippocampus:
                 }
             )
             return None
-        
-        # Step 3: Summarize (and review for stale state) if we have a summarizer
-        if self.summarizer:
+
+        # Step 3: Summarize only if recall is large (>2K chars).
+        # Small recalls (notes + a few conversation hits) don't need an extra LLM call.
+        SUMMARIZE_THRESHOLD = 2000
+        if self.summarizer and len(memories) > SUMMARIZE_THRESHOLD:
             result = await self._summarize(memories, recent_messages)
-            result = self._cap_recall_payload(result)
-            self._stats["recalls"] += 1
-            self._stats["last_recall_chars"] = len(result or "")
-            self._stats["last_reason"] = analysis.get("reason", "")
-            self._stats["last_recall_preview"] = (result or "")[:800]
-            self._trace.append(
-                {
-                    "at": call_started.isoformat(),
-                    "decision": "recall",
-                    "reason": analysis.get("reason", ""),
-                    "query": search_query,
-                    "result_chars": len(result or ""),
-                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
-                }
-            )
-            return result
         else:
             result = (
-                "<associative_memory_recall>\n"
+                "<associative_memory_recall reviewed=\"false\">\n"
                 + ACAUSAL_WARNING + "\n\n"
                 + memories
                 + "\n</associative_memory_recall>"
             )
-            result = self._cap_recall_payload(result)
-            self._stats["recalls"] += 1
-            self._stats["last_recall_chars"] = len(result)
-            self._stats["last_reason"] = analysis.get("reason", "")
-            self._stats["last_recall_preview"] = result[:800]
-            self._trace.append(
-                {
-                    "at": call_started.isoformat(),
-                    "decision": "recall",
-                    "reason": analysis.get("reason", ""),
-                    "query": search_query,
-                    "result_chars": len(result),
-                    "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
-                }
-            )
-            return result
+
+        result = self._cap_recall_payload(result)
+        self._stats["recalls"] += 1
+        self._stats["last_recall_chars"] = len(result or "")
+        self._stats["last_reason"] = analysis.get("reason", "")
+        self._stats["last_recall_preview"] = (result or "")[:800]
+        self._trace.append(
+            {
+                "at": call_started.isoformat(),
+                "decision": "recall",
+                "reason": analysis.get("reason", ""),
+                "query": search_query,
+                "result_chars": len(result or ""),
+                "latency_ms": int((datetime.now(timezone.utc) - call_started).total_seconds() * 1000),
+            }
+        )
+        return result
     
     async def _analyze_for_recall(
         self,
