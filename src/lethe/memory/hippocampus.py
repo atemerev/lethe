@@ -490,6 +490,10 @@ class Hippocampus:
         Tool messages from search tools are skipped to avoid recursive bloat.
         Other tool messages (e.g. bash, file edits, API calls) are allowed
         with capped content so the hippocampus can recall what tools accomplished.
+
+        Assistant messages with tool_calls are KEPT but condensed — they contain
+        valuable procedural memory ("how did we do X?") showing which tools
+        were called and with what intent.
         """
         role = str(msg.get("role", "")).strip().lower()
         metadata = msg.get("metadata", {}) or {}
@@ -505,12 +509,31 @@ class Hippocampus:
                 content = str(content)
             return len(content) <= 2000
 
-        # Skip assistant tool-call scaffolding (the tool_calls structure itself
-        # is noise; the tool result content is what matters)
+        # Tool-call-id messages are response scaffolding — skip
         if metadata.get("tool_call_id"):
             return False
+
+        # Assistant messages with tool_calls: KEEP them but condense.
+        # These show what tools were invoked and the assistant's reasoning,
+        # which is critical for "how did we do X?" recall.
         if role == "assistant" and metadata.get("tool_calls"):
-            return False
+            tool_calls = metadata["tool_calls"]
+            # Condense: keep the assistant's text + tool call names/args summary
+            text = str(content) if content else ""
+            tool_summary = []
+            for tc in tool_calls[:5]:  # cap at 5 calls
+                func = tc.get("function", {})
+                name = func.get("name", "?")
+                args = func.get("arguments", "")
+                # Truncate long args
+                if len(args) > 100:
+                    args = args[:100] + "..."
+                tool_summary.append(f"{name}({args})")
+            summary = "; ".join(tool_summary)
+            # Replace content with condensed version
+            condensed = f"{text}\n[Called: {summary}]" if text else f"[Called: {summary}]"
+            msg["content"] = condensed[:1500]
+            return True
 
         if not isinstance(content, str):
             content = str(content)
