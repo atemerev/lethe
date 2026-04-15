@@ -81,8 +81,34 @@ SALIENCE_USER_PROMPT = load_prompt_template(
 )
 
 
-# Warning added to recall block
-ACAUSAL_WARNING = """NOTE: These memories are from past sessions. State claims (e.g. "X is configured", "Y is broken") may be outdated — verify via tools or conversation history before acting on them. Events, decisions, and credentials are reliable."""
+# Recall block headers and warnings — loaded from config/prompts/hippocampus_recall_headers.md
+def _load_recall_headers() -> dict:
+    """Load recall section headers from prompt file. Returns dict of key→text."""
+    raw = load_prompt_template("hippocampus_recall_headers")
+    headers = {}
+    for line in raw.strip().split("\n"):
+        if ": " in line:
+            key, _, val = line.partition(": ")
+            headers[key.strip()] = val.strip()
+    return headers
+
+_RECALL_HEADERS = _load_recall_headers()
+ACAUSAL_WARNING = _RECALL_HEADERS.get(
+    "acausal_warning",
+    "NOTE: These memories are from past sessions. Verify state claims before acting on them.",
+)
+NOTES_HEADER = _RECALL_HEADERS.get(
+    "notes_header",
+    "**From notes (skills/conventions):**",
+)
+ARCHIVAL_HEADER = _RECALL_HEADERS.get(
+    "archival_header",
+    "**From long-term memory:**",
+)
+CONVERSATION_HEADER = _RECALL_HEADERS.get(
+    "conversation_header",
+    "**From past conversations:**",
+)
 
 class Hippocampus:
     """Pattern completion memory retrieval with LLM-guided search.
@@ -739,8 +765,7 @@ class Hippocampus:
 
             if note_lines:
                 sections.append(
-                    "**From notes (skills/conventions)** — use this information directly. "
-                    "For full details, `read_file` the noted file path.\n" + "\n".join(note_lines)
+                    NOTES_HEADER + "\n" + "\n".join(note_lines)
                 )
 
         # Preserve timeline semantics inside each recall section.
@@ -769,7 +794,7 @@ class Hippocampus:
                 total_lines += entry_lines
 
             if archival_lines:
-                sections.append("**From long-term memory:**\n" + "\n".join(archival_lines))
+                sections.append(ARCHIVAL_HEADER + "\n" + "\n".join(archival_lines))
 
         # Format conversation memories
         if conversations and total_lines < max_lines:
@@ -788,7 +813,7 @@ class Hippocampus:
                 total_lines += entry_lines
 
             if conv_lines:
-                sections.append("**From past conversations:**\n" + "\n".join(conv_lines))
+                sections.append(CONVERSATION_HEADER + "\n" + "\n".join(conv_lines))
 
         if not sections:
             return None
