@@ -40,14 +40,6 @@ CORTEX_TOOL_NAMES = {
 
 # Tools that request_tool() can activate for cortex (kept in CORTEX_TOOL_NAMES
 # so they survive the stripping phase, but only registered on demand)
-CORTEX_EXTENDED_TOOL_NAMES = {
-    'fetch_webpage', 'telegram_send_file', 'telegram_react',
-    'browser_open', 'browser_snapshot', 'browser_click', 'browser_fill',
-    'memory_append', 'archival_search', 'archival_insert', 'conversation_search',
-    'kill_actor', 'ping_actor', 'terminate',
-    'note_list',
-    'view_image', 'send_image',
-}
 
 # Tools that ALL subagents always get (CLI + file are fundamental)
 SUBAGENT_DEFAULT_TOOLS = {
