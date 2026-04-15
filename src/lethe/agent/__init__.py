@@ -661,12 +661,21 @@ class Agent:
         if quota_block:
             transient_parts.append(quota_block)
 
-        # Inject principal actor context (inbox, visible actors) if actor system is active.
+        # Inject principal actor context only when there's something worth showing
+        # (active subagents or inbox messages). Skip ~1K tokens of overhead otherwise.
         if self._actor_context_provider:
             try:
-                actor_ctx = self._actor_context_provider()
-                if actor_ctx:
-                    transient_parts.append(actor_ctx)
+                actor = self._principal_actor
+                if actor:
+                    has_inbox = any(m.sender != actor.id for m in actor._messages[-8:])
+                    has_subagents = any(
+                        a.state.value == "running"
+                        for a in actor.registry.get_children(actor.id)
+                    )
+                    if has_inbox or has_subagents:
+                        actor_ctx = self._actor_context_provider()
+                        if actor_ctx:
+                            transient_parts.append(actor_ctx)
             except Exception:
                 pass
 
