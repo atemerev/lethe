@@ -29,27 +29,26 @@ logger = logging.getLogger(__name__)
 
 # Tools the cortex keeps (hybrid mode: actor + quick CLI/file + memory + telegram)
 CORTEX_TOOL_NAMES = {
-    # Actor tools (added by actor system)
-    # NOTE: wait_for_response deliberately excluded — cortex should NOT poll.
-    # Subagent completions are delivered automatically via the principal monitor.
-    'send_message', 'discover_actors',
-    'terminate', 'spawn_actor', 'kill_actor', 'ping_actor',
-    # CLI + file tools (cortex handles quick tasks directly)
+    # Core tools (always registered — keep under 15 for Gemma 4)
     'bash', 'read_file', 'write_file', 'edit_file',
     'list_directory', 'grep_search',
-    # Web + browser tools (cortex can handle quick online tasks directly)
-    'web_search', 'fetch_webpage',
-    'browser_open', 'browser_snapshot', 'browser_click', 'browser_fill',
-    # Memory tools (cortex manages its own memory)
-    'memory_read', 'memory_update', 'memory_append',
-    'archival_search', 'archival_insert', 'conversation_search',
-    # Notes (persistent knowledge)
-    'note_search', 'note_create', 'note_list',
-    # Dynamic tool loading
+    'web_search', 'note_search', 'note_create',
+    'telegram_send_message',
     'request_tool',
-    # Telegram tools (cortex talks to user)
-    'telegram_send_message', 'telegram_send_file', 'telegram_react',
-    # Local image inspection/sending
+    # Actor essentials
+    'spawn_actor', 'send_message', 'discover_actors',
+    # Memory essentials
+    'memory_read', 'memory_update',
+}
+
+# Tools that request_tool() can activate for cortex (kept in CORTEX_TOOL_NAMES
+# so they survive the stripping phase, but only registered on demand)
+CORTEX_EXTENDED_TOOL_NAMES = {
+    'fetch_webpage', 'telegram_send_file', 'telegram_react',
+    'browser_open', 'browser_snapshot', 'browser_click', 'browser_fill',
+    'memory_append', 'archival_search', 'archival_insert', 'conversation_search',
+    'kill_actor', 'ping_actor', 'terminate',
+    'note_list',
     'view_image', 'send_image',
 }
 
@@ -135,13 +134,24 @@ class ActorSystem:
         # Collect all agent tools BEFORE stripping them
         self._collect_available_tools()
         
-        # Strip tools cortex doesn't need — keeps memory + telegram
+        # Strip tools cortex doesn't need. Keep core (always registered) + extended
+        # (available via request_tool). Only core tools get schemas sent to the LLM.
+        all_allowed = CORTEX_TOOL_NAMES | CORTEX_EXTENDED_TOOL_NAMES
         if hasattr(self.agent, 'llm') and hasattr(self.agent.llm, '_tools'):
+            # Stash extended tools for request_tool() before removing them
+            from lethe.tools import _EXTENDED_TOOLS, function_to_schema
+            for name in list(self.agent.llm._tools.keys()):
+                if name in CORTEX_EXTENDED_TOOL_NAMES and name not in _EXTENDED_TOOLS:
+                    func, schema = self.agent.llm._tools[name]
+                    _EXTENDED_TOOLS[name] = (func, schema.get("name", name) if isinstance(schema, dict) else None)
+
             to_strip = [name for name in self.agent.llm._tools if name not in CORTEX_TOOL_NAMES]
             for name in to_strip:
                 del self.agent.llm._tools[name]
             if to_strip:
-                logger.info(f"Stripped {len(to_strip)} tools from cortex: {to_strip}")
+                logger.info(f"Stripped {len(to_strip)} tools from cortex (available via request_tool): {sorted(to_strip)}")
+            self.agent.llm._update_tool_budget()
+            logger.info(f"Cortex tools: {len(self.agent.llm._tools)}")
         
         # Create principal actor
         self.principal = self.registry.spawn(

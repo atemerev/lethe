@@ -1774,7 +1774,7 @@ class AsyncLLMClient:
                 
                 # No tool calls — check if model intended to continue but forgot to act.
                 # Use a fast LLM call to detect narrated-but-not-executed intent.
-                if content and not self._nudged_this_turn and total_tool_calls > 0:
+                if content and not self._nudged_this_turn:
                     if await self._should_nudge(content):
                         logger.info("Nudging: model narrated intent without tool call")
                         self.context.add_message(Message(role="assistant", content=content))
