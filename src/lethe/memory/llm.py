@@ -6,6 +6,7 @@ Handles context preparation, token counting, and tool calling.
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -80,12 +81,15 @@ DEFAULT_CONTEXT_LIMIT = 128000  # tokens
 DEFAULT_MAX_OUTPUT = 8000  # tokens
 
 # Context budget management (Letta-style)
-TOKEN_SAFETY_MARGIN = 1.3  # Safety margin for approximate token counting
+TOKEN_SAFETY_MARGIN = 1.1  # Safety margin for approximate token counting (calibrated: 1.3 was ~30% over)
 SLIDING_WINDOW_KEEP_RATIO = 0.7  # Keep 70% of context after compaction
 COMPACTION_TRIGGER_RATIO = 0.85  # Trigger compaction at 85% capacity
-SUMMARY_MAX_LINES = 30  # Max summary lines (truncate by lines, not chars)
+SUMMARY_MAX_LINES = 60  # Max summary lines (increased from 30 for better continuity)
 MAX_OVERFLOW_RETRIES = 3  # Max context overflow recovery attempts
 MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3  # Tool result cap: 30% of context window
+
+# Tool result archival — old tool results are saved to temp files so the model can re-read them
+_TOOL_ARCHIVE_DIR = os.path.join(tempfile.gettempdir(), "lethe_tool_archive")
 
 # Minimal heartbeat system prompt (template)
 HEARTBEAT_SYSTEM_PROMPT = load_prompt_template(
@@ -515,14 +519,68 @@ class ContextWindow:
         # Compress if needed after loading
         self._compress_if_needed(include_transient=False)
     
-    def _compress_if_needed(self, include_transient: bool = False, force: bool = False):
-        """Summarize oldest messages using Letta-style sliding window.
+    @staticmethod
+    def _archive_tool_result(msg: 'Message') -> str:
+        """Archive a tool result to a temp file, return the file path."""
+        os.makedirs(_TOOL_ARCHIVE_DIR, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        tool_name = msg.name or "tool"
+        filename = f"{timestamp}_{tool_name}.txt"
+        filepath = os.path.join(_TOOL_ARCHIVE_DIR, filename)
+        content = msg.get_text_content()
+        with open(filepath, "w") as f:
+            f.write(content)
+        return filepath
 
-        Approach:
-        1. Trigger when messages exceed COMPACTION_TRIGGER_RATIO (85%) of available tokens
-        2. Find cutoff point by TOKEN budget (not message count) to hit SLIDING_WINDOW_KEEP_RATIO
-        3. Cutoff must be at assistant message boundary (avoid mid-conversation splits)
-        4. Summarize messages before cutoff, keep messages after
+    def _skim_old_tool_results(self) -> int:
+        """Pass 1: Archive old tool results to temp files, replace with compact references.
+
+        Only the LAST tool_call group keeps full content. Older tool results are
+        archived to disk and replaced with a short reference + preview. The model
+        can read_file the archived path if it needs the full content.
+
+        Returns number of tool results archived.
+        """
+        # Find the last tool_call group
+        last_tool_assistant_idx = None
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i].role == "assistant" and self.messages[i].tool_calls:
+                last_tool_assistant_idx = i
+                break
+
+        last_tool_ids = set()
+        if last_tool_assistant_idx is not None:
+            for tc in self.messages[last_tool_assistant_idx].tool_calls:
+                last_tool_ids.add(tc.get("id", ""))
+
+        archived = 0
+        for msg in self.messages:
+            if msg.role != "tool" or not msg.tool_call_id:
+                continue
+            # Keep the last group's results intact
+            if msg.tool_call_id in last_tool_ids:
+                continue
+            content = msg.get_text_content()
+            # Only archive if large enough to matter
+            if len(content) <= 500:
+                continue
+            # Archive to temp file
+            filepath = self._archive_tool_result(msg)
+            tool_name = msg.name or "tool"
+            preview = content[:150].replace("\n", " ")
+            msg.content = f"[{tool_name} result archived: {filepath}]\nPreview: {preview}..."
+            archived += 1
+
+        if archived:
+            logger.info(f"Archived {archived} old tool results to {_TOOL_ARCHIVE_DIR}")
+        return archived
+
+    def _compress_if_needed(self, include_transient: bool = False, force: bool = False):
+        """Two-pass context compaction with priority-based retention.
+
+        Pass 1: Archive old tool results to temp files (cheap, recovers most space)
+        Pass 2: If still over budget, summarize old conversation turns
+                (preserves user messages as long as possible)
 
         Args:
             include_transient: Include transient context in budget calculations
@@ -545,89 +603,89 @@ class ContextWindow:
         # Check if compaction needed
         if not force and (total <= available * COMPACTION_TRIGGER_RATIO or len(self.messages) <= 4):
             return
-        
+
         trigger_label = "forced (overflow recovery)" if force else "threshold"
         logger.info(f"Context compaction triggered ({trigger_label}): {total} tokens > {available * COMPACTION_TRIGGER_RATIO:.0f} threshold ({len(self.messages)} messages)")
 
-        # Target: keep enough messages to fit within KEEP_RATIO of available tokens
-        # Use more aggressive ratio when forced (overflow recovery needs more headroom)
+        # --- Pass 1: Archive old tool results to temp files ---
+        archived = self._skim_old_tool_results()
+
+        # Re-check budget after archival
+        total = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
+        if not force and total <= available * COMPACTION_TRIGGER_RATIO:
+            logger.info(f"Pass 1 sufficient: archived {archived} tool results, now {total} tokens (threshold {available * COMPACTION_TRIGGER_RATIO:.0f})")
+            return
+
+        # --- Pass 2: Summarize old conversation turns with priority retention ---
         keep_ratio = 0.5 if force else SLIDING_WINDOW_KEEP_RATIO
         target_tokens = int(available * keep_ratio)
-        
-        # Walk backwards from end, accumulating tokens, to find how many messages to keep
+
+        # Walk backwards, accumulating tokens. User messages get a "discount" so
+        # they survive longer — count them at 1/3 their actual size for budget purposes.
         kept_tokens = 0
-        keep_from = len(self.messages)  # Start from end
+        keep_from = len(self.messages)
         for i in range(len(self.messages) - 1, -1, -1):
-            msg_tokens = self.count_tokens(self.messages[i].get_text_content())
-            if kept_tokens + msg_tokens > target_tokens:
+            msg = self.messages[i]
+            msg_tokens = self.count_tokens(msg.get_text_content())
+            # User messages are high-priority: count at reduced weight
+            effective_tokens = msg_tokens // 3 if msg.role == "user" else msg_tokens
+            if kept_tokens + effective_tokens > target_tokens:
                 keep_from = i + 1
                 break
-            kept_tokens += msg_tokens
+            kept_tokens += effective_tokens
         else:
             keep_from = 0
-        
+
         # Ensure we keep at least 2 messages
         keep_from = min(keep_from, len(self.messages) - 2)
-        
+
         # Adjust cutoff to a clean boundary: must not split tool_call/tool_result pairs.
-        # A safe cutoff is a position where:
-        # - The message BEFORE cutoff is NOT an assistant with tool_calls (would orphan results)
-        # - The message AT cutoff is NOT a tool result (would orphan from its assistant)
         cutoff = keep_from
         while cutoff > 0 and cutoff < len(self.messages):
             msg_at = self.messages[cutoff]
             msg_before = self.messages[cutoff - 1]
-            
-            # NOT safe: cutting right after an assistant with tool_calls (results follow)
+
             if msg_before.role == "assistant" and msg_before.tool_calls:
                 cutoff -= 1
                 continue
-            # NOT safe: cutting where a tool result would be separated from its assistant
             if msg_at.role == "tool":
                 cutoff -= 1
                 continue
-            # Safe: clean boundary (user msg, plain assistant, etc.)
             break
-        
+
         if cutoff <= 0:
-            cutoff = keep_from  # Fallback if no clean boundary found
-        
+            cutoff = keep_from
+
         to_summarize = self.messages[:cutoff]
         self.messages = self.messages[cutoff:]
-        
+
         kept_tokens_actual = sum(self.count_tokens(m.get_text_content()) for m in self.messages)
         logger.info(f"Compaction: {total} → {kept_tokens_actual} tokens (removed {len(to_summarize)} messages, kept {len(self.messages)})")
-        
-        logger.info(f"Compacting: summarizing {len(to_summarize)} messages, keeping {len(self.messages)}")
-        
+
         if self._summarizer and to_summarize:
             new_summary = self._summarizer(to_summarize, self.summary)
             if new_summary:
-                # Truncate by lines if too long
                 lines = new_summary.strip().split("\n")
                 if len(lines) > SUMMARY_MAX_LINES:
                     new_summary = "\n".join(lines[:SUMMARY_MAX_LINES]) + f"\n[...truncated, {len(lines) - SUMMARY_MAX_LINES} more lines]"
                 self.summary = new_summary
                 logger.info(f"Summary updated: {len(self.summary)} chars, {len(lines)} lines")
         else:
-            # Fallback: text-based summary
             old_text = "\n".join(f"{m.role}: {m.get_text_content()[:200]}" for m in to_summarize[-5:])
             if self.summary:
                 self.summary = f"{self.summary}\n[+{len(to_summarize)} messages]\n{old_text}"
             else:
                 self.summary = f"[Summary of {len(to_summarize)} messages]\n{old_text}"
-            # Truncate by lines
             lines = self.summary.strip().split("\n")
             if len(lines) > SUMMARY_MAX_LINES:
                 self.summary = "\n".join(lines[:SUMMARY_MAX_LINES]) + f"\n[...truncated, {len(lines) - SUMMARY_MAX_LINES} more lines]"
 
-        # Refresh temporal anchor so post-compaction context has current time
+        # Refresh temporal anchor
         now = datetime.now(timezone.utc).astimezone()
         date_line = f"[Compacted at {now.strftime('%a %Y-%m-%d %H:%M %Z')}]"
         if self.summary and not self.summary.startswith("[Compacted at"):
             self.summary = f"{date_line}\n{self.summary}"
         elif self.summary:
-            # Replace existing compaction timestamp
             lines = self.summary.split("\n", 1)
             self.summary = f"{date_line}\n{lines[1]}" if len(lines) > 1 else date_line
 
@@ -1329,7 +1387,7 @@ class AsyncLLMClient:
                     {"role": "user", "content": conversation},
                 ],
                 temperature=0.3,
-                max_tokens=500,
+                max_tokens=1500,  # Increased from 500 for better continuity after compaction
             )
             return response.choices[0].message.content or ""
         except Exception as e:
