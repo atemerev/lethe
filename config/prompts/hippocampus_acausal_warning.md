@@ -1,0 +1,1 @@
+NOTE: These memories are from past sessions. State claims (e.g. "X is configured", "Y is broken") may be outdated — verify via tools or conversation history before acting on them. Events, decisions, and credentials are reliable.

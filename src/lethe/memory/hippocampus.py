@@ -81,33 +81,22 @@ SALIENCE_USER_PROMPT = load_prompt_template(
 )
 
 
-# Recall block headers and warnings — loaded from config/prompts/hippocampus_recall_headers.md
-def _load_recall_headers() -> dict:
-    """Load recall section headers from prompt file. Returns dict of key→text."""
-    raw = load_prompt_template("hippocampus_recall_headers")
-    headers = {}
-    for line in raw.strip().split("\n"):
-        if ": " in line:
-            key, _, val = line.partition(": ")
-            headers[key.strip()] = val.strip()
-    return headers
-
-_RECALL_HEADERS = _load_recall_headers()
-ACAUSAL_WARNING = _RECALL_HEADERS.get(
-    "acausal_warning",
-    "NOTE: These memories are from past sessions. Verify state claims before acting on them.",
+# Recall block headers and warnings — loaded from config/prompts/
+ACAUSAL_WARNING = load_prompt_template(
+    "hippocampus_acausal_warning",
+    fallback="NOTE: These memories are from past sessions. Verify state claims before acting on them.",
 )
-NOTES_HEADER = _RECALL_HEADERS.get(
-    "notes_header",
-    "**From notes (skills/conventions):**",
+NOTES_HEADER = load_prompt_template(
+    "hippocampus_notes_header",
+    fallback="**From notes (skills/conventions):**",
 )
-ARCHIVAL_HEADER = _RECALL_HEADERS.get(
-    "archival_header",
-    "**From long-term memory:**",
+ARCHIVAL_HEADER = load_prompt_template(
+    "hippocampus_archival_header",
+    fallback="**From long-term memory:**",
 )
-CONVERSATION_HEADER = _RECALL_HEADERS.get(
-    "conversation_header",
-    "**From past conversations:**",
+CONVERSATION_HEADER = load_prompt_template(
+    "hippocampus_conversation_header",
+    fallback="**From past conversations:**",
 )
 
 class Hippocampus:
