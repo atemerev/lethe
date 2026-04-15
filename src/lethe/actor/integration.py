@@ -43,6 +43,10 @@ CORTEX_TOOL_NAMES = {
     # Memory tools (cortex manages its own memory)
     'memory_read', 'memory_update', 'memory_append',
     'archival_search', 'archival_insert', 'conversation_search',
+    # Notes (persistent knowledge)
+    'note_search', 'note_create', 'note_list',
+    # Dynamic tool loading
+    'request_tool',
     # Telegram tools (cortex talks to user)
     'telegram_send_message', 'telegram_send_file', 'telegram_react',
     # Local image inspection/sending
