@@ -709,6 +709,12 @@ class Agent:
         # session restarts and are discoverable by hippocampus.
         self._auto_archive_tool_outcomes()
 
+        # Auto-extract skills/conventions into notes when applicable.
+        try:
+            await self._auto_extract_notes()
+        except Exception as e:
+            logger.debug(f"Auto-extract notes failed (non-fatal): {e}")
+
         # Notify console of idle status
         self.llm._notify_status("idle")
 
@@ -774,6 +780,81 @@ class Agent:
             logger.info(f"Auto-archived {len(significant)} tool outcomes ({len(digest)} chars)")
         except Exception as e:
             logger.warning(f"Failed to auto-archive tool outcomes: {e}")
+
+    # Tools that indicate external system interaction (skill candidates)
+    _EXTERNAL_TOOLS = {"bash", "web_search", "fetch_webpage", "browser_open", "browser_click", "browser_fill"}
+
+    async def _auto_extract_notes(self):
+        """Check if the completed turn produced a skill or convention worth noting.
+
+        Criteria:
+        - Skill: 3+ successful non-trivial tool calls including external system interaction
+        - Convention: user correction detected in the message
+
+        Uses a fast aux LLM call to decide and extract.
+        """
+        tool_log = self.llm._turn_tool_log
+        if not tool_log:
+            return
+
+        significant = [t for t in tool_log if t["success"] and t["name"] not in self._TRIVIAL_TOOLS]
+        external = [t for t in significant if t["name"] in self._EXTERNAL_TOOLS]
+
+        # Only consider extraction if there were 3+ significant calls with external interaction
+        if len(significant) < 3 or not external:
+            return
+
+        extract_prompt = load_prompt_template(
+            "notes_extract",
+            fallback="Did this tool sequence accomplish something worth saving as a note? Respond with JSON.",
+        )
+
+        # Build tool sequence summary for the LLM
+        lines = []
+        for t in significant[:8]:
+            lines.append(f"- {t['name']}: {t['result'][:150]}")
+        tool_summary = "\n".join(lines)
+
+        # Include existing tags for consistency
+        existing_tags = sorted(self.notes.all_tags()) if self.notes else []
+        tag_hint = f"\nExisting tags: {', '.join(existing_tags)}" if existing_tags else ""
+
+        try:
+            response = await self.llm.complete(
+                f"{extract_prompt}{tag_hint}\n\nTool sequence:\n{tool_summary}",
+                use_aux=True,
+                usage_tag="note_extract",
+            )
+            if not response:
+                return
+
+            import re
+            response = response.strip()
+            if response.startswith("```"):
+                response = re.sub(r'^```\w*\n?', '', response)
+                response = re.sub(r'\n?```$', '', response)
+
+            result = json.loads(response)
+            if not result.get("save"):
+                return
+
+            title = result.get("title", "")
+            tags = result.get("tags", [])
+            content = result.get("content", "")
+            if not title or not content:
+                return
+
+            # Normalize tags
+            from lethe.memory.organizer import _normalize_tags
+            tags = _normalize_tags(tags, set(existing_tags))
+
+            filepath = self.notes.create(title, content, tags)
+            logger.info(f"Auto-extracted note: '{title}' -> {filepath}")
+
+        except json.JSONDecodeError:
+            pass  # LLM didn't return valid JSON — not worth logging
+        except Exception as e:
+            logger.debug(f"Note extraction failed: {e}")
 
     async def close(self):
         """Clean up resources."""
