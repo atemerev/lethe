@@ -75,18 +75,30 @@ PROVIDERS = {
 
 DEFAULT_PROVIDER = "openrouter"
 
-# Context limits (chars, roughly 4 chars per token)
+# Context budget management
+#
+# Budget layout (for 96K context):
+#   System prompt (fixed)     ~1800 tokens  — identity + instructions + tools
+#   Memory blocks (fixed)     ~200 tokens   — human, project
+#   Summary (semi-fixed)      ~500 tokens   — compressed old conversation
+#   Output reserve            8000 tokens   — max generation
+#   ─────────────────────────────────────
+#   Available for messages    ~85K tokens   — conversation + tool results
+#
+# Compaction: two-pass
+#   Pass 1: archive old tool results to temp files (cheap, recovers most space)
+#   Pass 2: summarize old conversation (user messages weighted 3x for retention)
+
 CHARS_PER_TOKEN = 4
 DEFAULT_CONTEXT_LIMIT = 128000  # tokens
 DEFAULT_MAX_OUTPUT = 8000  # tokens
+TOKEN_SAFETY_MARGIN = 1.1  # char/4 * 1.1 approximation
 
-# Context budget management (Letta-style)
-TOKEN_SAFETY_MARGIN = 1.1  # Safety margin for approximate token counting (calibrated: 1.3 was ~30% over)
-SLIDING_WINDOW_KEEP_RATIO = 0.7  # Keep 70% of context after compaction
-COMPACTION_TRIGGER_RATIO = 0.85  # Trigger compaction at 85% capacity
-SUMMARY_MAX_LINES = 60  # Max summary lines (increased from 30 for better continuity)
-MAX_OVERFLOW_RETRIES = 3  # Max context overflow recovery attempts
-MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3  # Tool result cap: 30% of context window
+COMPACTION_TRIGGER_RATIO = 0.85  # compact when messages exceed 85% of available
+SLIDING_WINDOW_KEEP_RATIO = 0.7  # keep 70% of available after compaction
+SUMMARY_MAX_LINES = 60  # max lines in conversation summary
+MAX_OVERFLOW_RETRIES = 3  # max recovery attempts on context overflow
+MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3  # single tool result capped at 30% of context
 
 # Tool result archival — old tool results are saved to temp files so the model can re-read them
 _TOOL_ARCHIVE_DIR = os.path.join(tempfile.gettempdir(), "lethe_tool_archive")
