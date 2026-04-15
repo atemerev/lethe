@@ -13,6 +13,7 @@ from typing import Callable, Optional, Any
 from lethe.config import Settings, get_settings
 from lethe.memory import MemoryStore, AsyncLLMClient, LLMConfig, Hippocampus
 from lethe.memory.notes import NoteStore
+from lethe.memory.organizer import organize as organize_memories
 from lethe.prompts import load_prompt_template
 from lethe.tools import get_all_tools, function_to_schema, set_note_store
 
@@ -108,10 +109,17 @@ class Agent:
         logger.info(f"Agent initialized with model {self.settings.llm_model}")
     
     async def initialize(self):
-        """Async initialization - load message history with summarization."""
+        """Async initialization - load message history, organize memories."""
         if self._initialized:
             return
         await self._load_message_history()
+        # Organize archival memory → notes on every startup
+        try:
+            stats = organize_memories(self.notes, self.memory.archival)
+            if stats["processed"] > 0:
+                logger.info(f"Memory organizer: {stats}")
+        except Exception as e:
+            logger.error(f"Memory organizer failed (non-fatal): {e}")
         self._initialized = True
     
     async def _load_message_history(self):
