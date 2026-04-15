@@ -49,31 +49,37 @@ def _normalize_tags(tags: list[str], existing_tags: set[str]) -> list[str]:
     """Normalize LLM-suggested tags against existing vocabulary.
 
     Handles common inconsistencies: plurals, case, hyphens vs underscores.
-    If an existing tag is close enough, use it instead.
+    If an existing tag is close enough, use it instead. All tags are lowercased.
     """
     normalized = []
+    seen = set()
     for tag in tags:
         tag = tag.lower().strip()
-        if not tag:
+        if not tag or tag in seen:
             continue
         # Exact match
         if tag in existing_tags:
             normalized.append(tag)
+            seen.add(tag)
             continue
         # Try singular/plural variants
         if tag.endswith("s") and tag[:-1] in existing_tags:
             normalized.append(tag[:-1])
+            seen.add(tag[:-1])
             continue
-        if tag + "s" in existing_tags:
-            normalized.append(tag + "s")  # keep the existing plural form
+        if not tag.endswith("s") and tag + "s" in existing_tags:
+            normalized.append(tag + "s")
+            seen.add(tag + "s")
             continue
         # Try hyphen/underscore swap
         swapped = tag.replace("-", "_") if "-" in tag else tag.replace("_", "-")
         if swapped in existing_tags:
             normalized.append(swapped)
+            seen.add(swapped)
             continue
         # New tag — use as-is
         normalized.append(tag)
+        seen.add(tag)
     return normalized
 
 
@@ -154,12 +160,16 @@ def organize(note_store: NoteStore, archival_memory, dry_run: bool = False) -> d
     Args:
         note_store: NoteStore instance to create notes in
         archival_memory: ArchivalMemory instance to read/delete from
-        dry_run: If True, don't actually create notes or delete entries
+        dry_run: If True, only evaluate and log — do NOT create notes or delete entries.
+                 Safe to call with production data.
 
     Returns:
         Stats dict: {processed, kept, discarded, errors}
     """
-    # Get all archival entries
+    if dry_run:
+        logger.info("Organizer: DRY RUN — no notes will be created, no entries deleted")
+
+    # Get all archival entries (read-only snapshot)
     table = archival_memory._get_table()
     all_entries = table.to_pandas().to_dict("records")
 
