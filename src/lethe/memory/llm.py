@@ -1565,7 +1565,6 @@ class AsyncLLMClient:
 
         # Reset per-turn state
         self._turn_tool_log = []
-        self._nudged_this_turn = False
 
         # Add user message
         self.context.add_message(Message(role="user", content=message))
@@ -1772,24 +1771,9 @@ class AsyncLLMClient:
                     
                     continue  # Loop to get next response
                 
-                # No tool calls — check if model intended to continue but forgot to act.
-                # Use a fast LLM call to detect narrated-but-not-executed intent.
-                if content and not self._nudged_this_turn:
-                    if await self._should_nudge(content):
-                        logger.info("Nudging: model narrated intent without tool call")
-                        self.context.add_message(Message(role="assistant", content=content))
-                        nudge_text = load_prompt_template(
-                            "llm_nudge_act",
-                            fallback="[You described what you would do but didn't call any tool. Execute the action now.]",
-                        )
-                        self.context.add_message(Message(role="user", content=nudge_text))
-                        self._nudged_this_turn = True
-                        continue
-
-                # Final response
+                # Final response (no tool calls)
                 if content:
                     self.context.add_message(Message(role="assistant", content=content))
-                    self._nudged_this_turn = False
                     return content
                 
                 # Empty response — model stuck
@@ -1964,35 +1948,6 @@ class AsyncLLMClient:
         logger.error(f"OAuth call failed after {max_retries} attempts: {last_error}")
         raise last_error
 
-    async def _should_nudge(self, content: str) -> bool:
-        """Fast LLM call to detect if the model narrated an action without executing it."""
-        detect_prompt = load_prompt_template(
-            "llm_nudge_detect",
-            fallback="Did the assistant intend to perform an action but fail to call a tool? Respond yes or no.",
-        )
-        # Include last few messages for context
-        recent = []
-        for m in self.context.messages[-4:]:
-            text = m.get_text_content()[:200]
-            recent.append(f"{m.role}: {text}")
-        recent_ctx = "\n".join(recent)
-
-        try:
-            resp = completion(
-                model=self.config.model_aux,
-                messages=[
-                    {"role": "system", "content": detect_prompt},
-                    {"role": "user", "content": f"Recent context:\n{recent_ctx}\n\nAssistant's latest response:\n{content[:500]}"},
-                ],
-                temperature=0,
-                max_tokens=5,
-                **({"api_base": self.config.api_base} if self.config.api_base else {}),
-            )
-            answer = (resp.choices[0].message.content or "").strip().lower()
-            return answer.startswith("yes")
-        except Exception as e:
-            logger.debug(f"Nudge detection failed: {e}")
-            return False
 
     @staticmethod
     def _is_rate_limit_error(error_str: str) -> bool:
