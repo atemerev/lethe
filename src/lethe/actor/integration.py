@@ -32,10 +32,12 @@ CORTEX_TOOL_NAMES = {
     # Core tools (15 — under Gemma 4's recommended limit)
     'bash', 'read_file', 'write_file', 'edit_file',
     'note_search', 'note_create', 'note_list',
-    'telegram_send_message', 'telegram_react',
+    'telegram_react', 'telegram_send_file',
     'conversation_search',
     'spawn_actor', 'send_message', 'discover_actors', 'kill_actor',
     'request_tool',
+    # telegram_send_message moved to extended — model was using it for normal
+    # responses instead of returning text, causing infinite send loops
 }
 
 # Tools that request_tool() can activate for cortex (kept in CORTEX_TOOL_NAMES
