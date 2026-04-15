@@ -36,6 +36,47 @@ def _get_llm_config():
     return model, api_base
 
 
+def _collect_existing_tags(note_store: NoteStore) -> set[str]:
+    """Collect all tags currently used across notes."""
+    tags = set()
+    for note in note_store.list_notes():
+        for tag in note.get("tags", []):
+            tags.add(tag.lower().strip())
+    return tags
+
+
+def _normalize_tags(tags: list[str], existing_tags: set[str]) -> list[str]:
+    """Normalize LLM-suggested tags against existing vocabulary.
+
+    Handles common inconsistencies: plurals, case, hyphens vs underscores.
+    If an existing tag is close enough, use it instead.
+    """
+    normalized = []
+    for tag in tags:
+        tag = tag.lower().strip()
+        if not tag:
+            continue
+        # Exact match
+        if tag in existing_tags:
+            normalized.append(tag)
+            continue
+        # Try singular/plural variants
+        if tag.endswith("s") and tag[:-1] in existing_tags:
+            normalized.append(tag[:-1])
+            continue
+        if tag + "s" in existing_tags:
+            normalized.append(tag + "s")  # keep the existing plural form
+            continue
+        # Try hyphen/underscore swap
+        swapped = tag.replace("-", "_") if "-" in tag else tag.replace("_", "-")
+        if swapped in existing_tags:
+            normalized.append(swapped)
+            continue
+        # New tag — use as-is
+        normalized.append(tag)
+    return normalized
+
+
 def _format_batch(entries: list[dict]) -> str:
     """Format a batch of archival entries for the LLM prompt."""
     parts = []
@@ -49,7 +90,7 @@ def _format_batch(entries: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def _evaluate_batch(entries: list[dict]) -> list[dict]:
+def _evaluate_batch(entries: list[dict], existing_tags: set[str]) -> list[dict]:
     """Ask the LLM to evaluate a batch of entries. Returns list of decisions."""
     model, api_base = _get_llm_config()
     if not model:
@@ -58,10 +99,16 @@ def _evaluate_batch(entries: list[dict]) -> list[dict]:
 
     batch_text = _format_batch(entries)
 
+    # Include existing tags in prompt so LLM reuses them
+    tag_hint = ""
+    if existing_tags:
+        sorted_tags = sorted(existing_tags)
+        tag_hint = f"\n\nExisting tags (reuse these when applicable, don't create synonyms): {', '.join(sorted_tags)}"
+
     kwargs = {
         "model": model,
         "messages": [
-            {"role": "system", "content": EVALUATE_PROMPT},
+            {"role": "system", "content": EVALUATE_PROMPT + tag_hint},
             {"role": "user", "content": f"Evaluate these {len(entries)} entries:\n\n{batch_text}"},
         ],
         "temperature": 0.2,
@@ -125,13 +172,17 @@ def organize(note_store: NoteStore, archival_memory, dry_run: bool = False) -> d
 
     logger.info(f"Organizer: processing {len(entries)} archival entries in batches of {BATCH_SIZE}")
 
+    # Collect existing tags for consistency (updated as new notes are created)
+    existing_tags = _collect_existing_tags(note_store)
+    logger.info(f"Organizer: existing tag vocabulary ({len(existing_tags)}): {sorted(existing_tags)}")
+
     stats = {"processed": 0, "kept": 0, "discarded": 0, "errors": 0}
     ids_to_delete = []
 
     # Process in batches
     for batch_start in range(0, len(entries), BATCH_SIZE):
         batch = entries[batch_start:batch_start + BATCH_SIZE]
-        decisions = _evaluate_batch(batch)
+        decisions = _evaluate_batch(batch, existing_tags)
 
         for entry, decision in zip(batch, decisions):
             stats["processed"] += 1
@@ -139,7 +190,7 @@ def organize(note_store: NoteStore, archival_memory, dry_run: bool = False) -> d
 
             if decision.get("keep"):
                 title = decision.get("title", "Untitled")
-                tags = decision.get("tags", [])
+                tags = _normalize_tags(decision.get("tags", []), existing_tags)
                 content = decision.get("content", "")
 
                 if not content:
@@ -152,6 +203,8 @@ def organize(note_store: NoteStore, archival_memory, dry_run: bool = False) -> d
                         filepath = note_store.create(title, content, tags)
                         logger.info(f"Organizer: created note '{title}' -> {filepath}")
                         stats["kept"] += 1
+                        # Update tag vocabulary for subsequent batches
+                        existing_tags.update(t.lower() for t in tags)
                     except Exception as e:
                         logger.error(f"Organizer: failed to create note '{title}': {e}")
                         stats["errors"] += 1
@@ -159,6 +212,7 @@ def organize(note_store: NoteStore, archival_memory, dry_run: bool = False) -> d
                 else:
                     logger.info(f"Organizer [dry-run]: would create note '{title}' (tags: {tags})")
                     stats["kept"] += 1
+                    existing_tags.update(t.lower() for t in tags)
             else:
                 stats["discarded"] += 1
 

@@ -22,4 +22,7 @@ note_search, note_create
 ## Notes
 Persistent knowledge lives in `~/lethe/notes/` as tagged markdown files.
 Use **note_search** to find skills, conventions, and procedures from past sessions.
-Use **note_create** to save new knowledge. Common tags: `skill`, `convention`.
+Use **note_create** to save new knowledge.
+
+### Note Tags
+Known tags: skill, convention, email, graph-api, microsoft, unige, fundraising, investors, education, PhD, academic
