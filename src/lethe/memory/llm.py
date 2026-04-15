@@ -1563,8 +1563,9 @@ class AsyncLLMClient:
         last_tool_signature = ""
         circuit_breaker_reason = ""
 
-        # Reset per-turn tool log (consumed by Agent for auto-archival)
+        # Reset per-turn state
         self._turn_tool_log = []
+        self._nudged_this_turn = False
 
         # Add user message
         self.context.add_message(Message(role="user", content=message))
@@ -1771,9 +1772,30 @@ class AsyncLLMClient:
                     
                     continue  # Loop to get next response
                 
-                # No tool calls - we have final response
+                # No tool calls — check if model intended to continue but forgot to call a tool.
+                # Detect "narrating without acting" pattern and nudge once.
+                if content and not getattr(self, '_nudged_this_turn', False):
+                    import re
+                    intent_pattern = re.compile(
+                        r"\b(let me|i'll|i will|starting to|going to|about to|checking|searching|looking)\b",
+                        re.IGNORECASE,
+                    )
+                    if intent_pattern.search(content) and total_tool_calls > 0:
+                        # Model narrated an action instead of performing it — nudge
+                        logger.info("Nudging: model narrated intent without tool call")
+                        self.context.add_message(Message(role="assistant", content=content))
+                        nudge_text = load_prompt_template(
+                            "llm_nudge_act",
+                            fallback="[You described what you would do but didn't call any tool. Execute the action now.]",
+                        )
+                        self.context.add_message(Message(role="user", content=nudge_text))
+                        self._nudged_this_turn = True
+                        continue
+
+                # Final response
                 if content:
                     self.context.add_message(Message(role="assistant", content=content))
+                    self._nudged_this_turn = False
                     return content
                 
                 # Empty response — model stuck
