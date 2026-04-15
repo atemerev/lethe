@@ -15,7 +15,7 @@ from lethe.memory import MemoryStore, AsyncLLMClient, LLMConfig, Hippocampus
 from lethe.memory.notes import NoteStore
 from lethe.memory.organizer import organize as organize_memories
 from lethe.prompts import load_prompt_template
-from lethe.tools import get_all_tools, function_to_schema, set_note_store
+from lethe.tools import get_core_tools, get_all_tools, function_to_schema, set_note_store, set_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +94,10 @@ class Agent:
         # Add internal memory tools
         self._add_memory_tools()
         
-        # Add external tools (file, bash, browser)
-        self.llm.add_tools(get_all_tools())
+        # Add core tools (under Gemma 4's recommended 15-tool limit)
+        # Extended tools available on demand via request_tool()
+        set_llm_client(self.llm)
+        self.llm.add_tools(get_core_tools())
         
         # For non-Anthropic models: embed tool reference in system prompt
         # (Kimi K2.5 needs tools visible in context text, not just tools parameter)

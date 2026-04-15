@@ -159,47 +159,117 @@ def function_to_schema(func: Callable) -> dict:
     }
 
 
+# Core tools — always registered with full schemas (~12 tools, under Gemma 4's recommended limit)
+_CORE_TOOLS = [
+    # CLI & files
+    (bash, None),
+    (read_file, None),
+    (write_file, None),
+    (edit_file, None),
+    (list_directory, None),
+    (grep_search, None),
+    # Web
+    (web_search, None),
+    (fetch_webpage, None),
+    # Notes
+    (note_search, None),
+    (note_create, None),
+    # Telegram
+    (telegram_send_message, "telegram_send_message"),
+    (telegram_send_file, "telegram_send_file"),
+]
+
+# Extended tools — available on demand via request_tool()
+_EXTENDED_TOOLS = {
+    "browser_open": (browser_open, "browser_open"),
+    "browser_snapshot": (browser_snapshot, "browser_snapshot"),
+    "browser_click": (browser_click, "browser_click"),
+    "browser_fill": (browser_fill, "browser_fill"),
+    "telegram_react": (telegram_react, "telegram_react"),
+    "note_list": (note_list, None),
+}
+
+# LLM client reference — set by agent at init time for dynamic tool registration
+_llm_client = None
+
+
+def set_llm_client(client):
+    """Set the LLM client for dynamic tool registration."""
+    global _llm_client
+    _llm_client = client
+
+
+def _is_tool(func):
+    func._is_tool = True
+    return func
+
+
+@_is_tool
+def request_tool(name: str) -> str:
+    """Request an extended tool to be made available for this conversation.
+
+    Core tools (bash, read_file, write_file, edit_file, list_directory,
+    grep_search, web_search, fetch_webpage, note_search, note_create,
+    telegram_send_message, telegram_send_file) are always available.
+
+    Extended tools that can be requested:
+    - browser_open, browser_snapshot, browser_click, browser_fill — Browser automation
+    - telegram_react — React to messages with emoji
+    - note_list — List all notes
+
+    Args:
+        name: Name of the tool to request
+
+    Returns:
+        Confirmation that the tool is now available, or error if not found
+    """
+    if name not in _EXTENDED_TOOLS:
+        available = ", ".join(sorted(_EXTENDED_TOOLS.keys()))
+        return f"Unknown tool: {name}. Available extended tools: {available}"
+
+    if not _llm_client:
+        return f"Error: tool registration not available"
+
+    func, name_override = _EXTENDED_TOOLS[name]
+    schema = function_to_schema(func)
+    if name_override:
+        schema["name"] = name_override
+
+    # Check if already registered
+    if _llm_client.get_tool(name):
+        return f"Tool '{name}' is already available. You can use it now."
+
+    _llm_client.add_tool(func, schema)
+    desc = schema.get("description", "")[:100]
+    return f"Tool '{name}' is now available. {desc}"
+
+
+def get_core_tools() -> list[tuple[Callable, dict]]:
+    """Get core tools (always registered) as (function, schema) tuples."""
+    result = []
+    for func, name_override in _CORE_TOOLS:
+        schema = function_to_schema(func)
+        if name_override:
+            schema["name"] = name_override
+        result.append((func, schema))
+    # Add request_tool itself
+    result.append((request_tool, function_to_schema(request_tool)))
+    return result
+
+
 def get_all_tools() -> list[tuple[Callable, dict]]:
-    """Get all available tools as (function, schema) tuples."""
-    # Tools with optional name override (for async imports)
-    tools = [
-        # CLI
-        (bash, None),
-        
-        # File tools
-        (read_file, None),
-        (write_file, None),
-        (edit_file, None),
-        (list_directory, None),
-        (grep_search, None),
+    """Get ALL tools (core + extended) as (function, schema) tuples.
 
-        # Browser
-        (browser_open, "browser_open"),
-        (browser_snapshot, "browser_snapshot"),
-        (browser_click, "browser_click"),
-        (browser_fill, "browser_fill"),
-        
-        # Web
-        (web_search, None),
-        (fetch_webpage, None),
-
-        # Notes (skills, conventions, persistent knowledge)
-        (note_search, None),
-        (note_create, None),
-        (note_list, None),
-        
-        # Telegram
-        (telegram_react, "telegram_react"),
-        (telegram_send_message, "telegram_send_message"),
-        (telegram_send_file, "telegram_send_file"),
-    ]
-    
+    Used for subagents or contexts where tool count doesn't matter.
+    """
+    tools = _CORE_TOOLS + list(_EXTENDED_TOOLS.values())
     result = []
     for func, name_override in tools:
         schema = function_to_schema(func)
         if name_override:
             schema["name"] = name_override
         result.append((func, schema))
+    result.append((request_tool, function_to_schema(request_tool)))
     return result
 
 

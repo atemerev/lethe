@@ -1,23 +1,23 @@
 # Tools
 
-## Your Tools (cortex)
+## Core Tools (always available)
+- **bash** — Run shell commands
+- **read_file** / **write_file** / **edit_file** — File operations
+- **list_directory** / **grep_search** — File discovery
+- **web_search** / **fetch_webpage** — Web research
+- **note_search** / **note_create** — Persistent notes (skills, conventions)
+- **telegram_send_message** / **telegram_send_file** — Telegram I/O
+- **request_tool** — Load an extended tool (see below)
+
+## Extended Tools (use `request_tool(name)` to activate)
+- **browser_open**, **browser_snapshot**, **browser_click**, **browser_fill** — Browser automation
+- **telegram_react** — React to messages with emoji
+- **note_list** — List all notes
+
+## Actor Tools (available in actor context)
 - **spawn_actor** / **kill_actor** / **ping_actor** — Manage subagents
 - **send_message** / **wait_for_response** / **discover_actors** — Actor communication
 - **terminate** — End your own execution
-- **memory_read** / **memory_update** / **memory_append** — Core memory blocks
-- **archival_search** / **archival_insert** / **conversation_search** — Long-term memory
-- **telegram_send_message** / **telegram_send_file** — Telegram I/O
-- **web_search** / **fetch_webpage** — Quick web research and content retrieval
-- **browser_open** / **browser_snapshot** / **browser_click** / **browser_fill** — Browser automation for quick tasks
-- **note_search** / **note_create** / **note_list** — Persistent notes (skills, conventions, procedures)
-
-## Subagent Default Tools (always available to spawned actors)
-bash, read_file, write_file, edit_file, list_directory, grep_search
-
-## Subagent Extra Tools (specify in spawn_actor tools= parameter)
-web_search, fetch_webpage, browser_open, browser_click, browser_fill, browser_snapshot,
-memory_read, memory_update, memory_append, archival_search, archival_insert, conversation_search,
-note_search, note_create
 
 ## Notes
 Persistent knowledge lives in `~/lethe/notes/` as tagged markdown files.
