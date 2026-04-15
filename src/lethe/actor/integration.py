@@ -38,7 +38,7 @@ CORTEX_TOOL_NAMES = {
     # Actor essentials
     'spawn_actor', 'send_message', 'discover_actors',
     # Memory essentials
-    'memory_read', 'memory_update',
+    'memory_read',
 }
 
 # Tools that request_tool() can activate for cortex (kept in CORTEX_TOOL_NAMES
@@ -131,28 +131,9 @@ class ActorSystem:
         3. Create principal actor
         4. Register actor tools with the agent
         """
-        # Collect all agent tools BEFORE stripping them
+        # Collect all agent tools BEFORE stripping them (for subagent use)
         self._collect_available_tools()
-        
-        # Strip tools cortex doesn't need. Keep core (always registered) + extended
-        # (available via request_tool). Only core tools get schemas sent to the LLM.
-        all_allowed = CORTEX_TOOL_NAMES | CORTEX_EXTENDED_TOOL_NAMES
-        if hasattr(self.agent, 'llm') and hasattr(self.agent.llm, '_tools'):
-            # Stash extended tools for request_tool() before removing them
-            from lethe.tools import _EXTENDED_TOOLS, function_to_schema
-            for name in list(self.agent.llm._tools.keys()):
-                if name in CORTEX_EXTENDED_TOOL_NAMES and name not in _EXTENDED_TOOLS:
-                    func, schema = self.agent.llm._tools[name]
-                    _EXTENDED_TOOLS[name] = (func, schema.get("name", name) if isinstance(schema, dict) else None)
 
-            to_strip = [name for name in self.agent.llm._tools if name not in CORTEX_TOOL_NAMES]
-            for name in to_strip:
-                del self.agent.llm._tools[name]
-            if to_strip:
-                logger.info(f"Stripped {len(to_strip)} tools from cortex (available via request_tool): {sorted(to_strip)}")
-            self.agent.llm._update_tool_budget()
-            logger.info(f"Cortex tools: {len(self.agent.llm._tools)}")
-        
         # Create principal actor
         self.principal = self.registry.spawn(
             ActorConfig(
@@ -170,7 +151,22 @@ class ActorSystem:
         actor_tools = create_actor_tools(self.principal, self.registry)
         for func, _ in actor_tools:
             self.agent.add_tool(func)
-        
+
+        # Strip tools down to CORTEX_TOOL_NAMES (keep under 15 for Gemma 4).
+        # Stash stripped tools in _EXTENDED_TOOLS so request_tool() can activate them.
+        if hasattr(self.agent, 'llm') and hasattr(self.agent.llm, '_tools'):
+            from lethe.tools import _EXTENDED_TOOLS
+            for name in list(self.agent.llm._tools.keys()):
+                if name not in CORTEX_TOOL_NAMES:
+                    func, schema = self.agent.llm._tools[name]
+                    if name not in _EXTENDED_TOOLS:
+                        _EXTENDED_TOOLS[name] = (func, None)
+            to_strip = [name for name in self.agent.llm._tools if name not in CORTEX_TOOL_NAMES]
+            for name in to_strip:
+                del self.agent.llm._tools[name]
+            self.agent.llm._update_tool_budget()
+            logger.info(f"Cortex tools: {len(self.agent.llm._tools)} (stripped {len(to_strip)}: {sorted(to_strip)})")
+
         # Wire principal actor into the agent so it can drain inbox and see actor context.
         self.agent._principal_actor = self.principal
         def _principal_actor_context() -> str:
