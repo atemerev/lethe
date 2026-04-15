@@ -132,7 +132,7 @@ class MemoryStore:
                     target_meta.write_text(meta_file.read_text())
     
     # Blocks that rarely change — eligible for long-lived cache (1h)
-    STABLE_BLOCKS = {"human", "tools"}
+    STABLE_BLOCKS = {"human"}
 
     @staticmethod
     def _parse_iso_timestamp(raw: str):

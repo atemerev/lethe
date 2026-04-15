@@ -227,30 +227,39 @@ class Agent:
         return ""
     
     def _build_system_prompt(self) -> str:
-        """Build system prompt from identity memory block.
-        
-        Identity block should contain:
-        - Who you are (role, name, background)
-        - Behavioral cues and roleplay instructions  
-        - Communication style and output format rules
+        """Build system prompt from identity (workspace) + instructions (config).
+
+        Identity block (workspace) = persona, user-customizable, survives updates.
+        Instructions (config/prompts/) = system behavior, always up to date.
+        Tools documentation (config/prompts/) = tool reference, always up to date.
         """
-        # Load identity from memory block (preferred)
+        parts = []
+
+        # 1. Identity / persona from workspace (user-customizable)
         identity_block = self.memory.blocks.get("identity")
         if identity_block:
-            return identity_block.get("value", "") or ""
-        
-        # Fallback to legacy persona block
-        persona_block = self.memory.blocks.get("persona")
-        if persona_block:
-            logger.warning("Using legacy 'persona' block as system prompt. Consider migrating to 'identity' block (second person).")
-            return persona_block.get("value", "") or ""
-        
-        # Final fallback if no identity or persona block exists
-        logger.warning("No 'identity' or 'persona' memory block found, using minimal fallback")
-        return load_prompt_template(
-            "agent_system_fallback",
-            fallback="You are an AI assistant with persistent memory.",
-        )
+            parts.append(identity_block.get("value", ""))
+        else:
+            persona_block = self.memory.blocks.get("persona")
+            if persona_block:
+                parts.append(persona_block.get("value", ""))
+            else:
+                parts.append(load_prompt_template(
+                    "agent_system_fallback",
+                    fallback="You are an AI assistant with persistent memory.",
+                ))
+
+        # 2. System instructions from config (always current after updates)
+        instructions = load_prompt_template("agent_instructions")
+        if instructions:
+            parts.append(instructions)
+
+        # 3. Tools documentation from config (always current after updates)
+        tools_doc = load_prompt_template("agent_tools")
+        if tools_doc:
+            parts.append(tools_doc)
+
+        return "\n\n".join(p for p in parts if p.strip())
     
     async def _summarize_memories(self, prompt: str) -> str:
         """Summarize memories using LLM (for hippocampus)."""
