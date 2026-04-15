@@ -9,14 +9,17 @@
 - **telegram_send_message** / **telegram_send_file** — Telegram I/O
 - **web_search** / **fetch_webpage** — Quick web research and content retrieval
 - **browser_open** / **browser_snapshot** / **browser_click** / **browser_fill** — Browser automation for quick tasks
+- **note_search** / **note_create** / **note_list** — Persistent notes (skills, conventions, procedures)
 
 ## Subagent Default Tools (always available to spawned actors)
 bash, read_file, write_file, edit_file, list_directory, grep_search
 
 ## Subagent Extra Tools (specify in spawn_actor tools= parameter)
 web_search, fetch_webpage, browser_open, browser_click, browser_fill, browser_snapshot,
-memory_read, memory_update, memory_append, archival_search, archival_insert, conversation_search
+memory_read, memory_update, memory_append, archival_search, archival_insert, conversation_search,
+note_search, note_create
 
-## Skills
-Extended capabilities are documented as skill files in `~/lethe/skills/`.
-Tell subagents to check `~/lethe/skills/` for relevant skill docs.
+## Notes
+Persistent knowledge lives in `~/lethe/notes/` as tagged markdown files.
+Use **note_search** to find skills, conventions, and procedures from past sessions.
+Use **note_create** to save new knowledge. Common tags: `skill`, `convention`.

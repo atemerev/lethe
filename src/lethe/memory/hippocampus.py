@@ -117,6 +117,7 @@ class Hippocampus:
         self.analyzer = analyzer
         self.salience_classifier = salience_classifier
         self.enabled = enabled
+        self.note_store = None  # Set by agent after init
         self._stats = {
             "enabled": enabled,
             "calls": 0,
@@ -247,15 +248,16 @@ class Hippocampus:
         # Step 2: Search with LLM-generated query
         archival_results = self._search_archival(search_query)
         conversation_results = self._search_conversations(search_query, exclude_recent=5)
-        
+        note_results = self._search_notes(search_query)
+
         # Step 2.5: Filter for relevance (batch LLM call)
         if self.analyzer and (archival_results or conversation_results):
             archival_results, conversation_results = await self._filter_relevant(
                 message, archival_results, conversation_results
             )
-        
-        # Combine and format results
-        memories = self._format_memories(archival_results, conversation_results, max_lines)
+
+        # Combine and format results (notes are pre-distilled, always included)
+        memories = self._format_memories(archival_results, conversation_results, max_lines, note_results)
         
         if not memories:
             logger.info("Hippocampus: no memories found for query")
@@ -434,6 +436,16 @@ class Hippocampus:
             return [r for r in results if r.get("score", 0) >= MIN_SCORE_THRESHOLD]
         except Exception as e:
             logger.warning(f"Archival search failed: {e}")
+            return []
+
+    def _search_notes(self, query: str, limit: int = 3) -> list[dict]:
+        """Search persistent notes (skills, conventions)."""
+        if not self.note_store:
+            return []
+        try:
+            return self.note_store.search(query, limit=limit)
+        except Exception as e:
+            logger.warning(f"Note search failed: {e}")
             return []
     
     def _search_conversations(
@@ -663,13 +675,40 @@ class Hippocampus:
         archival: list[dict],
         conversations: list[dict],
         max_lines: int,
+        notes: Optional[list[dict]] = None,
     ) -> Optional[str]:
-        """Format retrieved memories into a context block."""
-        if not archival and not conversations:
+        """Format retrieved memories into a context block.
+
+        Notes (skills/conventions) come first since they're pre-distilled
+        and highest signal. Then archival, then conversation.
+        """
+        notes = notes or []
+        if not archival and not conversations and not notes:
             return None
-        
+
         sections = []
         total_lines = 0
+
+        # Format notes first (highest priority — pre-distilled knowledge)
+        if notes:
+            note_lines = []
+            for note in notes:
+                if total_lines >= max_lines:
+                    break
+                title = note.get("title", "")
+                tags = ", ".join(note.get("tags", []))
+                preview = note.get("preview", "")
+                filepath = note.get("file_path", "")
+
+                entry = f"- **{title}** [{tags}]: {preview}"
+                if filepath:
+                    entry += f"\n  (Full note: {filepath})"
+                entry_lines = entry.count("\n") + 1
+                note_lines.append(entry)
+                total_lines += entry_lines
+
+            if note_lines:
+                sections.append("**From notes (skills/conventions):**\n" + "\n".join(note_lines))
 
         # Preserve timeline semantics inside each recall section.
         archival = sorted(
@@ -680,47 +719,47 @@ class Hippocampus:
             conversations,
             key=lambda m: self._parse_created_at(m.get("created_at", "")) or datetime.fromtimestamp(0, tz=timezone.utc),
         )
-        
+
         # Format archival memories
-        if archival:
+        if archival and total_lines < max_lines:
             archival_lines = []
             for mem in archival:
                 if total_lines >= max_lines:
                     break
-                    
+
                 text = self._trim_entry(mem.get("text", ""))
                 created = self._format_created_at(mem.get("created_at", ""))
-                
+
                 entry = f"- [{created}] {text}"
                 entry_lines = entry.count("\n") + 1
                 archival_lines.append(entry)
                 total_lines += entry_lines
-            
+
             if archival_lines:
                 sections.append("**From long-term memory:**\n" + "\n".join(archival_lines))
-        
+
         # Format conversation memories
         if conversations and total_lines < max_lines:
             conv_lines = []
             for msg in conversations:
                 if total_lines >= max_lines:
                     break
-                    
+
                 role = msg.get("role", "?")
                 content = self._trim_entry(msg.get("content", ""))
                 created = self._format_created_at(msg.get("created_at", ""))
-                
+
                 entry = f"- [{created}] {role}: {content}"
                 entry_lines = entry.count("\n") + 1
                 conv_lines.append(entry)
                 total_lines += entry_lines
-            
+
             if conv_lines:
                 sections.append("**From past conversations:**\n" + "\n".join(conv_lines))
-        
+
         if not sections:
             return None
-        
+
         return "\n\n".join(sections)
     
     async def _summarize(

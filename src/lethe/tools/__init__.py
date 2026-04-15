@@ -33,6 +33,13 @@ from lethe.tools.web_search import (
     is_available as web_search_available,
 )
 
+from lethe.tools.notes import (
+    note_search,
+    note_create,
+    note_list,
+    set_store as set_note_store,
+)
+
 from lethe.tools.browser_agent import (
     browser_open_async as browser_open,
     browser_snapshot_async as browser_snapshot,
@@ -175,6 +182,11 @@ def get_all_tools() -> list[tuple[Callable, dict]]:
         # Web
         (web_search, None),
         (fetch_webpage, None),
+
+        # Notes (skills, conventions, persistent knowledge)
+        (note_search, None),
+        (note_create, None),
+        (note_list, None),
         
         # Telegram
         (telegram_react, "telegram_react"),

@@ -12,8 +12,9 @@ from typing import Callable, Optional, Any
 
 from lethe.config import Settings, get_settings
 from lethe.memory import MemoryStore, AsyncLLMClient, LLMConfig, Hippocampus
+from lethe.memory.notes import NoteStore
 from lethe.prompts import load_prompt_template
-from lethe.tools import get_all_tools, function_to_schema
+from lethe.tools import get_all_tools, function_to_schema, set_note_store
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ class Agent:
             config_dir=str(self.settings.lethe_config_dir),
         )
         
+        # Initialize notes system (skills, conventions, persistent knowledge)
+        self.notes = NoteStore(db=self.memory.db)
+        set_note_store(self.notes)
+
         # Initialize LLM client (provider auto-detected from env vars)
         # Only pass model if explicitly set in env/settings (otherwise use provider default)
         llm_config = LLMConfig(
@@ -83,7 +88,8 @@ class Agent:
             salience_classifier=self._classify_salience,
             enabled=hippocampus_enabled,
         )
-        
+        self.hippocampus.note_store = self.notes
+
         # Add internal memory tools
         self._add_memory_tools()
         

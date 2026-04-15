@@ -54,3 +54,13 @@ emotional_tags.md
 .dmn_state_reset_v1
 epost/
 browser/
+
+# Private data directories (never commit)
+data-split/
+outputs/
+unsloth_compiled_cache/
+workspace-split/
+
+# Junk files with weird names
+,
+": true, "
