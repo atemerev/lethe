@@ -625,17 +625,16 @@ class Agent:
         Returns:
             Final assistant response
         """
-        # Drain principal actor inbox — subagent results, progress updates, etc.
-        # These get prepended to the user message so the cortex sees them naturally.
+        # Drain principal actor inbox — results go to system prompt's <inbox_block>,
+        # NOT prepended to user message (that pollutes conversation history with
+        # brainstem notifications and makes real user messages unfindable on reload).
         if self._actor_context_provider:
             try:
-                inbox_text = self._drain_actor_inbox()
-                if inbox_text:
-                    message = f"{inbox_text}\n\n{message}"
+                self._drain_actor_inbox()  # drain queue; messages shown via actor_context_provider
             except Exception:
                 pass
 
-        # Store user message in history (original, without recall)
+        # Store user message in history (clean, without inbox or recall prepended)
         self.memory.messages.add("user", message)
 
         # Recall relevant memories (unless disabled)
