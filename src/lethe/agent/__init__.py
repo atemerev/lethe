@@ -518,9 +518,10 @@ class Agent:
             return "\n".join(output)
         
         # Add memory tools (keep minimal — too many tools overwhelms some models)
-        for func in [memory_read, memory_update, memory_append, 
+        # send_image removed (use telegram_send_file), list_tools removed (stale categories)
+        for func in [memory_read, memory_update, memory_append,
                      archival_search, archival_insert, conversation_search,
-                     send_image, view_image, list_tools]:
+                     view_image]:
             self.llm.add_tool(func)
     
     def add_tool(self, func: Callable):

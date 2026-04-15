@@ -221,7 +221,7 @@ def request_tool(name: str) -> str:
     - memory_append — Append to memory blocks
     - kill_actor, ping_actor, terminate — Actor management
     - note_list — List all notes
-    - view_image, send_image — Image tools
+    - view_image — View image in LLM context
 
     Args:
         name: Name of the tool to request
