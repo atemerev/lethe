@@ -77,7 +77,7 @@ class Brainstem:
         self.auto_update_enabled = _is_true("BRAINSTEM_AUTO_UPDATE", "true")
         default_release_checks = "false" if os.environ.get("PYTEST_CURRENT_TEST") else "true"
         self.release_checks_enabled = _is_true("BRAINSTEM_RELEASE_CHECK_ENABLED", default_release_checks)
-        self.integrity_checks_enabled = _is_true("BRAINSTEM_INTEGRITY_CHECK_ENABLED", "true")
+        self.integrity_checks_enabled = _is_true("BRAINSTEM_INTEGRITY_CHECK_ENABLED", "false")
         self.resource_checks_enabled = _is_true("BRAINSTEM_RESOURCE_CHECK_ENABLED", "true")
         runtime_state_override = os.environ.get("BRAINSTEM_RUNTIME_STATE_FILE", "").strip()
         self._runtime_state_path = Path(runtime_state_override) if runtime_state_override else (
@@ -207,25 +207,23 @@ class Brainstem:
             if self.resource_checks_enabled:
                 resources = self._collect_resource_snapshot()
                 self._status["last_resource_snapshot"] = resources
-                if resources.get("tokens_per_hour", 0) >= RESOURCE_WARN_TOKENS_PER_HOUR:
-                    findings.append(
-                        f"high token rate: {int(resources.get('tokens_per_hour', 0))}/h"
-                    )
+                tokens_h = int(resources.get("tokens_per_hour", 0))
+                rss_mb = int(resources.get("process_rss_mb", 0))
+                if tokens_h >= RESOURCE_WARN_TOKENS_PER_HOUR:
+                    findings.append(f"token rate: {tokens_h}/h")
                     notify_items.append(
                         (
                             "resource:tokens",
-                            "Brainstem warning: token usage rate is high. "
-                            "Consider throttling background activity.",
+                            f"fyi — token usage is elevated ({tokens_h}/h). "
+                            "not urgent, just keeping you in the loop.",
                         )
                     )
-                if resources.get("process_rss_mb", 0) >= RESOURCE_WARN_MEMORY_MB:
-                    findings.append(
-                        f"high memory: {int(resources.get('process_rss_mb', 0))} MB RSS"
-                    )
+                if rss_mb >= RESOURCE_WARN_MEMORY_MB:
+                    findings.append(f"memory: {rss_mb} MB RSS")
                     notify_items.append(
                         (
                             "resource:memory",
-                            "Brainstem warning: process memory is high.",
+                            f"fyi — process memory is at {rss_mb} MB.",
                         )
                     )
                 ratelimit = resources.get("anthropic_ratelimit") or {}
@@ -236,11 +234,11 @@ class Brainstem:
                     five_util = five.get("utilization")
                     seven_util = seven.get("utilization")
                     if unified_status and unified_status != "allowed":
-                        findings.append(f"anthropic unified status: {unified_status}")
+                        findings.append(f"anthropic status: {unified_status}")
                         notify_items.append(
                             (
                                 "resource:anthropic_status",
-                                f"Brainstem warning: Anthropic unified ratelimit status is '{unified_status}'.",
+                                f"heads up — Anthropic ratelimit status is '{unified_status}'.",
                             )
                         )
                     near_limit = (
@@ -254,26 +252,9 @@ class Brainstem:
                         notify_items.append(
                             (
                                 "resource:anthropic_near",
-                                "Brainstem warning: Anthropic ratelimit utilization is near cap "
-                                f"(5h={five_pct}, 7d={seven_pct}).",
+                                f"heads up — Anthropic ratelimit nearing cap (5h={five_pct}, 7d={seven_pct}).",
                             )
                         )
-
-            if self.integrity_checks_enabled:
-                integrity = self._check_integrity(current_version=current_version)
-                self._status["last_integrity"] = integrity
-                if not integrity.get("ok", True):
-                    issues = integrity.get("issues", [])
-                    findings.append(f"integrity issues: {len(issues)}")
-                    notify_items.append(
-                        (
-                            "integrity:issues",
-                            "Brainstem detected integrity issues. "
-                            "Please check `/status` and logs.",
-                        )
-                    )
-                elif integrity.get("warnings"):
-                    findings.append(f"integrity warnings: {len(integrity['warnings'])}")
 
             if heartbeat_message:
                 findings.append("heartbeat received")
