@@ -118,7 +118,7 @@ cmake --build build --target llama-server -j$(nproc)
     --split-mode tensor \
     --ctx-size 98304 \
     --flash-attn on \
-    --parallel 4 \
+    --parallel 2 \
     --cache-ram 32768 \
     --slot-save-path /path/to/slots \
     --jinja \
@@ -132,7 +132,7 @@ Key flags:
 - `--split-mode tensor` — true tensor parallelism across GPUs (~51 tok/s vs ~25 with layer split). Requires `-fit off`.
 - `--jinja` — required for Gemma 4's native tool calling format (peg-gemma4 parser).
 - `--reasoning-budget 4096` — enables thinking mode for better tool selection accuracy.
-- `--parallel 4` — 4 concurrent slots for cortex, DMN, hippocampus, brainstem.
+- `--parallel 2` — 2 concurrent slots (cortex + aux). Use 4 only if VRAM allows (~20GB free after model).
 - `--cache-ram 32768` — 32GB prompt cache so different prompts don't evict each other.
 - `--spec-type ngram-mod` — lightweight speculative decoding, shared across all slots.
 
