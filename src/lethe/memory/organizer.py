@@ -37,11 +37,24 @@ def _get_llm_config():
 
 
 def _collect_existing_tags(note_store: NoteStore) -> set[str]:
-    """Collect all tags currently used across notes."""
+    """Collect all tags currently used across notes, from the lancedb index."""
     tags = set()
-    for note in note_store.list_notes():
-        for tag in note.get("tags", []):
-            tags.add(tag.lower().strip())
+    try:
+        table = note_store._get_table()
+        df = table.to_pandas()
+        for raw in df["tags"]:
+            if not raw or raw == "[]":
+                continue
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            for tag in parsed:
+                t = str(tag).lower().strip()
+                if t:
+                    tags.add(t)
+    except Exception as e:
+        logger.warning(f"Organizer: failed to collect tags from index, falling back to files: {e}")
+        for note in note_store.list_notes():
+            for tag in note.get("tags", []):
+                tags.add(tag.lower().strip())
     return tags
 
 

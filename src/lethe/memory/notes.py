@@ -273,6 +273,24 @@ class NoteStore:
             })
         return notes
 
+    def all_tags(self) -> list[str]:
+        """Get all unique tags from the index, sorted alphabetically."""
+        tags = set()
+        try:
+            table = self._get_table()
+            df = table.to_pandas()
+            for raw in df["tags"]:
+                if not raw or raw == "[]":
+                    continue
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                for tag in parsed:
+                    t = str(tag).lower().strip()
+                    if t:
+                        tags.add(t)
+        except Exception:
+            pass
+        return sorted(tags)
+
     def reindex(self) -> int:
         """Rebuild the lancedb index from note files on disk.
 
