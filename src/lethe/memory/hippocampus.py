@@ -738,7 +738,10 @@ class Hippocampus:
                 total_lines += entry_lines
 
             if note_lines:
-                sections.append("**From notes (skills/conventions):**\n" + "\n".join(note_lines))
+                sections.append(
+                    "**From notes (skills/conventions)** — use this information directly. "
+                    "For full details, `read_file` the noted file path.\n" + "\n".join(note_lines)
+                )
 
         # Preserve timeline semantics inside each recall section.
         archival = sorted(
