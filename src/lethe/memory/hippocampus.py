@@ -441,9 +441,16 @@ class Hippocampus:
     def _search_notes(self, query: str, limit: int = 3) -> list[dict]:
         """Search persistent notes (skills, conventions)."""
         if not self.note_store:
+            logger.debug("Hippocampus: note_store not set, skipping note search")
             return []
         try:
-            return self.note_store.search(query, limit=limit)
+            results = self.note_store.search(query, limit=limit)
+            if results:
+                titles = [r.get("title", "?") for r in results]
+                logger.info(f"Hippocampus: found {len(results)} notes: {titles}")
+            else:
+                logger.info("Hippocampus: no matching notes found")
+            return results
         except Exception as e:
             logger.warning(f"Note search failed: {e}")
             return []
@@ -690,6 +697,8 @@ class Hippocampus:
         total_lines = 0
 
         # Format notes first (highest priority — pre-distilled knowledge)
+        # Notes are already concise; include full content so the model can act
+        # without needing a separate read_file call.
         if notes:
             note_lines = []
             for note in notes:
@@ -697,12 +706,33 @@ class Hippocampus:
                     break
                 title = note.get("title", "")
                 tags = ", ".join(note.get("tags", []))
-                preview = note.get("preview", "")
                 filepath = note.get("file_path", "")
 
-                entry = f"- **{title}** [{tags}]: {preview}"
+                # Read the full note file (notes are small, pre-distilled)
+                full_content = ""
                 if filepath:
-                    entry += f"\n  (Full note: {filepath})"
+                    try:
+                        from pathlib import Path
+                        raw = Path(filepath).read_text()
+                        _, body = raw.split("---", 2)[2].strip(), raw.split("---", 2)[2].strip() if raw.count("---") >= 2 else ("", raw)
+                        # Parse frontmatter away, keep body
+                        parts = raw.split("---")
+                        if len(parts) >= 3:
+                            full_content = "---".join(parts[2:]).strip()
+                        else:
+                            full_content = raw
+                        # Cap at reasonable size
+                        if len(full_content) > 2000:
+                            full_content = full_content[:2000] + "\n[...truncated, see full note]"
+                    except Exception:
+                        full_content = note.get("preview", "")
+
+                if not full_content:
+                    full_content = note.get("preview", "")
+
+                entry = f"- **{title}** [{tags}]:\n{full_content}"
+                if filepath:
+                    entry += f"\n  File: {filepath}"
                 entry_lines = entry.count("\n") + 1
                 note_lines.append(entry)
                 total_lines += entry_lines
