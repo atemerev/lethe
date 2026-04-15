@@ -29,16 +29,13 @@ logger = logging.getLogger(__name__)
 
 # Tools the cortex keeps (hybrid mode: actor + quick CLI/file + memory + telegram)
 CORTEX_TOOL_NAMES = {
-    # Core tools (always registered — keep under 15 for Gemma 4)
+    # Core tools (15 — under Gemma 4's recommended limit)
     'bash', 'read_file', 'write_file', 'edit_file',
-    'list_directory', 'grep_search',
-    'web_search', 'note_search', 'note_create',
-    'telegram_send_message',
+    'note_search', 'note_create', 'note_list',
+    'telegram_send_message', 'telegram_react',
+    'conversation_search',
+    'spawn_actor', 'send_message', 'discover_actors', 'kill_actor',
     'request_tool',
-    # Actor essentials
-    'spawn_actor', 'send_message', 'discover_actors',
-    # Memory essentials
-    'memory_read',
 }
 
 # Tools that request_tool() can activate for cortex (kept in CORTEX_TOOL_NAMES
