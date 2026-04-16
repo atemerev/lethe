@@ -206,17 +206,19 @@ class Agent:
         workspace = self.settings.workspace_dir
         skills_dir = workspace / "skills"
         
-        # Determine which rules to load based on model name
+        # Determine which rules to load based on model name.
+        # Only load model-specific files when that model is actually in use;
+        # unrelated rules (e.g. Kimi's walls-of-text guardrails) actively harm
+        # other models' behavior if loaded indiscriminately.
         model_lower = model.lower()
         if "kimi" in model_lower:
             rules_file = skills_dir / "communication-kimi.md"
         elif "claude" in model_lower or "anthropic" in model_lower:
             rules_file = skills_dir / "communication-anthropic.md"
+        elif "gemma" in model_lower:
+            rules_file = skills_dir / "communication-gemma.md"
         else:
-            # Try generic, then kimi as fallback (most restrictive)
             rules_file = skills_dir / "communication.md"
-            if not rules_file.exists():
-                rules_file = skills_dir / "communication-kimi.md"
         
         if rules_file.exists():
             content = rules_file.read_text().strip()
