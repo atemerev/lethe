@@ -107,10 +107,12 @@ class SignalClient:
         Returns:
             dict with 'timestamp' of sent message
         """
-        params = {
-            "recipient": [recipient],
-            "message": message,
-        }
+        params: dict = {"message": message}
+        # Use note-to-self when sending to own account (correct Note to Self routing)
+        if self.account and recipient == self.account:
+            params["note-to-self"] = True
+        else:
+            params["recipient"] = [recipient]
         if self.account:
             params["account"] = self.account
         if attachments:
