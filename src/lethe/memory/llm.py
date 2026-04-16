@@ -6,6 +6,7 @@ Handles context preparation, token counting, and tool calling.
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -32,6 +33,44 @@ litellm.modify_params = True
 # Debug logging for LLM interactions
 LLM_DEBUG = os.environ.get("LLM_DEBUG", "false").lower() == "true"
 LLM_DEBUG_DIR = Path(os.environ.get("LLM_DEBUG_DIR", "logs/llm"))
+
+
+def _extract_text_tool_calls(content: str) -> list[dict] | None:
+    """Extract Gemma-style tool calls embedded as text in model output.
+
+    Gemma 4 / llama.cpp sometimes emits tool calls as text when mixing
+    conversational content with tool use in one response:
+        <tool_call:read_file{file_path:<|"|>/path/to/file<|"|>}>
+
+    Returns a list of OpenAI-format tool_call dicts, or None if none found.
+    """
+    import uuid as _uuid
+    pattern = r'<tool_call:(\w+)\{(.+?)\}>'
+    matches = re.findall(pattern, content, re.DOTALL)
+    if not matches:
+        return None
+
+    tool_calls = []
+    for func_name, raw_args in matches:
+        # Parse args: key:<|"|>value<|"|> or key:value
+        clean = raw_args.replace('<|"|>', '"')
+        # Match key:"value" pairs
+        arg_pairs = re.findall(r'(\w+):"([^"]*)"', clean)
+        if not arg_pairs:
+            # Try unquoted: key:value (single arg)
+            arg_pairs = re.findall(r'(\w+):(.+?)(?:,\s*(?=\w+:)|$)', clean)
+        args_dict = {k.strip(): v.strip() for k, v in arg_pairs}
+
+        tool_calls.append({
+            "id": f"call-{_uuid.uuid4().hex[:12]}",
+            "type": "function",
+            "function": {
+                "name": func_name,
+                "arguments": json.dumps(args_dict),
+            },
+        })
+
+    return tool_calls if tool_calls else None
 
 
 def _log_llm_interaction(request: Dict, response: Dict, label: str = "chat"):
@@ -1605,7 +1644,17 @@ class AsyncLLMClient:
                 
                 # Handle tool calls
                 tool_calls = assistant_msg.get("tool_calls")
-                
+
+                # Fallback: extract tool calls embedded as text by Gemma 4 / llama.cpp
+                # when the model mixes conversational text with tool calls in one response.
+                # Format: <tool_call:func_name{arg:value, arg2:<|"|>value<|"|>}>
+                if not tool_calls and content and "<tool_call:" in content:
+                    tool_calls = _extract_text_tool_calls(content)
+                    if tool_calls:
+                        # Strip the tool call text from the content
+                        content = re.sub(r'\s*<tool_call:\w+\{.+?\}>', '', content, flags=re.DOTALL).strip()
+                        logger.info(f"Recovered {len(tool_calls)} tool call(s) from text content")
+
                 if tool_calls:
                     import uuid
                     empty_count = 0  # Reset on actual tool use
