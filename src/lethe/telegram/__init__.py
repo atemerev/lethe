@@ -40,9 +40,9 @@ class TelegramBot:
         )
         self.dp = Dispatcher()
         self._running = False
-        self._typing_tasks: dict[int, asyncio.Task] = {}
+        self._typing_tasks: dict[str, asyncio.Task] = {}
         self._last_message_id: Optional[int] = None
-        self._last_chat_id: Optional[int] = None
+        self._last_chat_id: Optional[str] = None
 
         self._setup_handlers()
 
@@ -71,7 +71,7 @@ class TelegramBot:
             if not self._is_authorized(message.from_user.id):
                 return
 
-            chat_id = message.chat.id
+            chat_id = str(message.chat.id)
             is_processing = self.conversation_manager.is_processing(chat_id) if self.conversation_manager else False
             is_debouncing = self.conversation_manager.is_debouncing(chat_id) if self.conversation_manager else False
             pending = self.conversation_manager.get_pending_count(chat_id) if self.conversation_manager else 0
@@ -134,7 +134,7 @@ class TelegramBot:
                 return
 
             if self.conversation_manager:
-                cancelled = await self.conversation_manager.cancel(message.chat.id)
+                cancelled = await self.conversation_manager.cancel(str(message.chat.id))
                 if cancelled:
                     await message.answer("Processing cancelled.")
                 else:
@@ -184,12 +184,12 @@ class TelegramBot:
 
             # Store last message ID for reactions
             self._last_message_id = message.message_id
-            self._last_chat_id = message.chat.id
-            
+            self._last_chat_id = str(message.chat.id)
+
             # Add message to conversation manager
             await self.conversation_manager.add_message(
-                chat_id=message.chat.id,
-                user_id=message.from_user.id,
+                chat_id=str(message.chat.id),
+                user_id=str(message.from_user.id),
                 content=message.text,
                 metadata={
                     "username": message.from_user.username,
@@ -246,8 +246,8 @@ class TelegramBot:
                 
                 # Add message to conversation manager with multimodal content
                 await self.conversation_manager.add_message(
-                    chat_id=message.chat.id,
-                    user_id=message.from_user.id,
+                    chat_id=str(message.chat.id),
+                    user_id=str(message.from_user.id),
                     content=multimodal_content,  # Pass as list for multimodal
                     metadata={
                         "username": message.from_user.username,
@@ -298,8 +298,8 @@ class TelegramBot:
                 
                 # Add message to conversation manager
                 await self.conversation_manager.add_message(
-                    chat_id=message.chat.id,
-                    user_id=message.from_user.id,
+                    chat_id=str(message.chat.id),
+                    user_id=str(message.from_user.id),
                     content=content,
                     metadata={
                         "username": message.from_user.username,
@@ -451,7 +451,7 @@ class TelegramBot:
         allowed = self.settings.allowed_user_ids
         return not allowed or user_id in allowed
 
-    async def send_message(self, chat_id: int, text: str, parse_mode: str = "Markdown"):
+    async def send_message(self, chat_id: str, text: str, parse_mode: str = "Markdown"):
         """Send a message, splitting on --- for natural pauses."""
         # Skip empty messages (some models return empty responses)
         if not text or not text.strip():
@@ -483,10 +483,10 @@ class TelegramBot:
             
             for chunk in chunks:
                 try:
-                    await self.bot.send_message(chat_id, chunk, parse_mode=parse_mode)
+                    await self.bot.send_message(int(chat_id), chunk, parse_mode=parse_mode)
                 except Exception:
                     # Fallback to no parsing if markdown fails
-                    await self.bot.send_message(chat_id, chunk, parse_mode=None)
+                    await self.bot.send_message(int(chat_id), chunk, parse_mode=None)
                 await asyncio.sleep(0.1)
 
             # Human-like pause: think time + typing time + jitter
@@ -498,22 +498,22 @@ class TelegramBot:
                 pause *= random.uniform(0.8, 1.3)  # ±jitter
                 await asyncio.sleep(pause)
 
-    async def send_photo(self, chat_id: int, photo_path: str, caption: str = ""):
+    async def send_photo(self, chat_id: str, photo_path: str, caption: str = ""):
         """Send a photo to chat."""
         from aiogram.types import FSInputFile
         try:
             photo = FSInputFile(photo_path)
-            await self.bot.send_photo(chat_id, photo, caption=caption[:1024] if caption else None)
+            await self.bot.send_photo(int(chat_id), photo, caption=caption[:1024] if caption else None)
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
             await self.send_message(chat_id, f"[Image: {photo_path}]")
     
-    async def react_to_message(self, chat_id: int, message_id: int, emoji: str = "👍"):
+    async def react_to_message(self, chat_id: str, message_id: int, emoji: str = "👍"):
         """React to a message with an emoji."""
         from aiogram.types import ReactionTypeEmoji
         try:
             await self.bot.set_message_reaction(
-                chat_id=chat_id,
+                chat_id=int(chat_id),
                 message_id=message_id,
                 reaction=[ReactionTypeEmoji(emoji=emoji)]
             )
@@ -528,7 +528,7 @@ class TelegramBot:
         else:
             logger.warning("No last message to react to")
 
-    async def start_typing(self, chat_id: int):
+    async def start_typing(self, chat_id: str):
         """Start showing typing indicator."""
         if chat_id in self._typing_tasks:
             return
@@ -536,7 +536,7 @@ class TelegramBot:
         async def typing_loop():
             while True:
                 try:
-                    await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
+                    await self.bot.send_chat_action(int(chat_id), ChatAction.TYPING)
                     await asyncio.sleep(4)
                 except asyncio.CancelledError:
                     break
@@ -545,7 +545,7 @@ class TelegramBot:
 
         self._typing_tasks[chat_id] = asyncio.create_task(typing_loop())
 
-    async def stop_typing(self, chat_id: int):
+    async def stop_typing(self, chat_id: str):
         """Stop showing typing indicator."""
         task = self._typing_tasks.pop(chat_id, None)
         if task:

@@ -31,6 +31,27 @@ class Settings(BaseSettings):
             return []
         return [int(x.strip()) for x in self.telegram_allowed_user_ids.split(",") if x.strip()]
 
+    # Signal
+    signal_cli_url: str = Field(
+        default="http://localhost:8080",
+        description="signal-cli REST daemon URL",
+    )
+    signal_account: str = Field(
+        default="",
+        description="Signal phone number in E.164 format (e.g. +15551234567)",
+    )
+    signal_allowed_numbers: str = Field(
+        default="",
+        description="Comma-separated allowed Signal phone numbers (empty = allow all)",
+    )
+
+    @property
+    def signal_allowed_number_list(self) -> list[str]:
+        """Parse allowed Signal numbers from comma-separated string."""
+        if not self.signal_allowed_numbers.strip():
+            return []
+        return [x.strip() for x in self.signal_allowed_numbers.split(",") if x.strip()]
+
     # LLM
     openrouter_api_key: Optional[str] = Field(
         default=None,

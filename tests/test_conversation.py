@@ -23,7 +23,7 @@ class TestConversationState:
     """Tests for ConversationState."""
 
     def test_add_message_when_not_processing(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         
         interrupted_proc, interrupted_debounce = state.add_message("hello")
         
@@ -33,7 +33,7 @@ class TestConversationState:
         assert state.pending_messages[0].content == "hello"
 
     def test_add_message_when_processing_triggers_interrupt(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         state.is_processing = True
         
         interrupted_proc, _ = state.add_message("hello")
@@ -42,7 +42,7 @@ class TestConversationState:
         assert state.interrupt_event.is_set()
 
     def test_add_message_when_debouncing_triggers_debounce_event(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         state.is_debouncing = True
         
         _, interrupted_debounce = state.add_message("hello")
@@ -51,7 +51,7 @@ class TestConversationState:
         assert state.debounce_event.is_set()
 
     def test_get_combined_message_single(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         state.add_message("hello", {"user": "test"})
         
         content, metadata = state.get_combined_message()
@@ -61,7 +61,7 @@ class TestConversationState:
         assert len(state.pending_messages) == 0  # Cleared
 
     def test_get_combined_message_multiple(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         state.add_message("first", {"a": 1})
         state.add_message("second", {"b": 2})
         state.add_message("third", {"a": 3})  # Overrides a
@@ -75,7 +75,7 @@ class TestConversationState:
         assert len(state.pending_messages) == 0
 
     def test_get_combined_message_empty(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         
         content, metadata = state.get_combined_message()
         
@@ -83,7 +83,7 @@ class TestConversationState:
         assert metadata == {}
 
     def test_check_interrupt_clears_event(self):
-        state = ConversationState(chat_id=123, user_id=456)
+        state = ConversationState(chat_id="123", user_id="456")
         state.interrupt_event.set()
         
         assert state.check_interrupt() is True
@@ -103,11 +103,11 @@ class TestConversationManagerDebounce:
         async def process_callback(chat_id, user_id, message, metadata, interrupt_check):
             processed.append(message)
         
-        await manager.add_message(123, 456, "hello", process_callback=process_callback)
+        await manager.add_message("123", "456", "hello", process_callback=process_callback)
         
         # Should start processing immediately, not debouncing
-        assert not manager.is_debouncing(123)
-        assert manager.is_processing(123)
+        assert not manager.is_debouncing("123")
+        assert manager.is_processing("123")
         
         await asyncio.sleep(0.1)
         assert processed == ["hello"]
@@ -128,11 +128,11 @@ class TestConversationManagerDebounce:
             processed.append(f"done:{message[:5]}")
         
         # First message - processes immediately
-        await manager.add_message(123, 456, "first", process_callback=process_callback)
+        await manager.add_message("123", "456", "first", process_callback=process_callback)
         await asyncio.sleep(0.1)  # Let it start
         
         # Interrupt with second message
-        await manager.add_message(123, 456, "second", process_callback=process_callback)
+        await manager.add_message("123", "456", "second", process_callback=process_callback)
         
         # Should now be debouncing (after interrupt)
         await asyncio.sleep(0.05)
@@ -158,13 +158,13 @@ class TestConversationManagerDebounce:
                     return
         
         # First message
-        await manager.add_message(123, 456, "first", process_callback=process_callback)
+        await manager.add_message("123", "456", "first", process_callback=process_callback)
         await asyncio.sleep(0.1)
         
         # Interrupt and send multiple rapid messages
-        await manager.add_message(123, 456, "second", process_callback=process_callback)
+        await manager.add_message("123", "456", "second", process_callback=process_callback)
         await asyncio.sleep(0.05)
-        await manager.add_message(123, 456, "third", process_callback=process_callback)
+        await manager.add_message("123", "456", "third", process_callback=process_callback)
         
         # Wait for debounce and processing
         await asyncio.sleep(0.5)
@@ -195,14 +195,14 @@ class TestConversationManagerInterrupt:
             processed.append(f"done:{message[:10]}")
         
         # Start first message (will go through debounce first)
-        await manager.add_message(123, 456, "first_msg", process_callback=process_callback)
+        await manager.add_message("123", "456", "first_msg", process_callback=process_callback)
         
         # Wait for debounce
         await asyncio.sleep(0.3)
         
         # Now processing, send another message
         await asyncio.sleep(0.1)  # Let processing start
-        await manager.add_message(123, 456, "second_msg", process_callback=process_callback)
+        await manager.add_message("123", "456", "second_msg", process_callback=process_callback)
         
         # Wait for everything to complete
         await asyncio.sleep(1)
@@ -221,19 +221,19 @@ class TestConversationManagerInterrupt:
             await asyncio.sleep(10)
             processed.append("finished")
         
-        await manager.add_message(123, 456, "hello", process_callback=process_callback)
+        await manager.add_message("123", "456", "hello", process_callback=process_callback)
         
         await asyncio.sleep(0.1)
         # First message processes immediately (no debounce)
-        assert manager.is_processing(123)
+        assert manager.is_processing("123")
         assert "started" in processed
         
         # Cancel during processing
-        cancelled = await manager.cancel(123)
+        cancelled = await manager.cancel("123")
         
         assert cancelled
-        assert not manager.is_debouncing(123)
-        assert not manager.is_processing(123)
+        assert not manager.is_debouncing("123")
+        assert not manager.is_processing("123")
         assert "finished" not in processed
 
 
@@ -243,26 +243,26 @@ class TestConversationManagerBasic:
     def test_get_or_create_state(self):
         manager = ConversationManager()
         
-        state1 = manager.get_or_create_state(123, 456)
-        state2 = manager.get_or_create_state(123, 456)
-        state3 = manager.get_or_create_state(789, 456)
+        state1 = manager.get_or_create_state("123", "456")
+        state2 = manager.get_or_create_state("123", "456")
+        state3 = manager.get_or_create_state("789", "456")
         
         assert state1 is state2  # Same chat
         assert state1 is not state3  # Different chat
 
     def test_is_processing_false_when_not_started(self):
         manager = ConversationManager()
-        assert not manager.is_processing(123)
-        assert not manager.is_debouncing(123)
+        assert not manager.is_processing("123")
+        assert not manager.is_debouncing("123")
 
     def test_get_pending_count(self):
         manager = ConversationManager()
-        state = manager.get_or_create_state(123, 456)
+        state = manager.get_or_create_state("123", "456")
         state.add_message("one")
         state.add_message("two")
         
-        assert manager.get_pending_count(123) == 2
-        assert manager.get_pending_count(999) == 0  # Non-existent chat
+        assert manager.get_pending_count("123") == 2
+        assert manager.get_pending_count("999") == 0  # Non-existent chat
 
     @pytest.mark.asyncio
     async def test_error_in_callback_does_not_crash_loop(self):
@@ -274,7 +274,7 @@ class TestConversationManagerBasic:
             if call_count[0] == 1:
                 raise ValueError("Intentional error")
         
-        state = manager.get_or_create_state(123, 456)
+        state = manager.get_or_create_state("123", "456")
         state.add_message("first")
         
         await manager._process_loop(state, process_callback)

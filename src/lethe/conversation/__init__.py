@@ -30,8 +30,8 @@ class PendingMessage:
 @dataclass
 class ConversationState:
     """State for a single chat conversation."""
-    chat_id: int
-    user_id: int
+    chat_id: str
+    user_id: str
     pending_messages: list[PendingMessage] = field(default_factory=list)
     is_processing: bool = False
     is_debouncing: bool = False
@@ -116,7 +116,7 @@ class ConversationManager:
         self._lock = asyncio.Lock()
         self.debounce_seconds = debounce_seconds
     
-    def get_or_create_state(self, chat_id: int, user_id: int) -> ConversationState:
+    def get_or_create_state(self, chat_id: str, user_id: str) -> ConversationState:
         """Get or create conversation state for a chat."""
         if chat_id not in self._states:
             self._states[chat_id] = ConversationState(chat_id=chat_id, user_id=user_id)
@@ -124,17 +124,17 @@ class ConversationManager:
     
     async def add_message(
         self,
-        chat_id: int,
-        user_id: int,
+        chat_id: str,
+        user_id: str,
         content: str,
         metadata: Optional[dict] = None,
         process_callback: Optional[Callable] = None,
     ) -> bool:
         """Add a message and start/restart debounce timer.
-        
+
         Args:
-            chat_id: Telegram chat ID
-            user_id: Telegram user ID
+            chat_id: Chat identifier (Telegram numeric ID or Signal phone number)
+            user_id: User identifier
             content: Message content
             metadata: Optional metadata (username, attachments, etc.)
             process_callback: Async function to call for processing
@@ -267,22 +267,22 @@ class ConversationManager:
             state.current_task = None
             logger.info(f"Chat {state.chat_id}: Processing loop finished")
     
-    def is_processing(self, chat_id: int) -> bool:
+    def is_processing(self, chat_id: str) -> bool:
         """Check if a chat is currently being processed."""
         state = self._states.get(chat_id)
         return state.is_processing if state else False
     
-    def is_debouncing(self, chat_id: int) -> bool:
+    def is_debouncing(self, chat_id: str) -> bool:
         """Check if a chat is currently in debounce period."""
         state = self._states.get(chat_id)
         return state.is_debouncing if state else False
     
-    def get_pending_count(self, chat_id: int) -> int:
+    def get_pending_count(self, chat_id: str) -> int:
         """Get number of pending messages for a chat."""
         state = self._states.get(chat_id)
         return len(state.pending_messages) if state else 0
     
-    async def cancel(self, chat_id: int) -> bool:
+    async def cancel(self, chat_id: str) -> bool:
         """Cancel processing and debouncing for a chat.
         
         Returns True if there was something to cancel.

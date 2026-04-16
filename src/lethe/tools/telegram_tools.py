@@ -13,10 +13,10 @@ from typing import Any, Optional
 
 # Context variables set by worker before tool execution
 _current_bot: ContextVar[Any] = ContextVar('current_bot', default=None)
-_current_chat_id: ContextVar[Optional[int]] = ContextVar('current_chat_id', default=None)
+_current_chat_id: ContextVar[Optional[str]] = ContextVar('current_chat_id', default=None)
 
 
-def set_telegram_context(bot: Any, chat_id: int):
+def set_telegram_context(bot: Any, chat_id: str):
     """Set the Telegram context for tool execution.
     
     Called by worker before processing a task.

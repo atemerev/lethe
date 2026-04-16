@@ -134,80 +134,94 @@ async def run():
         if heartbeat:
             heartbeat.reset_idle_timer(reason)
 
-    # Message processing callback
-    async def process_message(chat_id: int, user_id: int, message: str, metadata: dict, interrupt_check):
-        """Process a message from Telegram."""
-        from lethe.tools import set_telegram_context, set_last_message_id, clear_telegram_context
-        
-        logger.info(f"Processing message from {user_id}: {message[:50]}...")
-        mark_user_visible_activity("incoming user message")
-        
-        # Set telegram context for tools (reactions, sending messages)
-        set_telegram_context(telegram_bot.bot, chat_id)
-        if metadata.get("message_id"):
-            set_last_message_id(metadata["message_id"])
-        
-        # Start typing indicator
-        await telegram_bot.start_typing(chat_id)
-        
-        try:
-            # Callback for intermediate messages (reasoning/thinking)
-            async def on_intermediate(content: str):
-                """Send intermediate updates while agent is working."""
-                if not content or len(content) < 10:
-                    return
-                # Check for interrupt before sending
-                if interrupt_check():
-                    return
-                # Send thinking/reasoning as-is (no emoji prefix)
-                await telegram_bot.send_message(chat_id, content)
-                mark_user_visible_activity("intermediate assistant update")
-            
-            # Callback for image attachments (screenshots, etc.)
-            async def on_image(image_path: str):
-                """Send image to user."""
-                if interrupt_check():
-                    return
-                await telegram_bot.send_photo(chat_id, image_path)
-                mark_user_visible_activity("assistant image update")
-            
-            # Get response from agent
-            response = await agent.chat(message, on_message=on_intermediate, on_image=on_image)
-            
-            # Check for interrupt
-            if interrupt_check():
-                logger.info("Processing interrupted")
-                return
-            
-            # Send response
-            logger.info(f"Sending response ({len(response)} chars): {response[:80]}...")
-            await telegram_bot.send_message(chat_id, response)
-            mark_user_visible_activity("assistant final response")
-            
-        except Exception as e:
-            logger.exception(f"Error processing message: {e}")
-            await telegram_bot.send_message(chat_id, f"Error: {e}")
-            mark_user_visible_activity("assistant error response")
-        finally:
-            await telegram_bot.stop_typing(chat_id)
-            clear_telegram_context()
+    # --- Transport-agnostic message processing ---
 
-    # Initialize Telegram bot
-    telegram_bot = TelegramBot(
-        settings,
-        conversation_manager=conversation_manager,
-        process_callback=process_message,
-    )
-    telegram_bot.agent = agent  # For /model, /aux commands
-    # heartbeat_callback will be set below after Heartbeat is created
+    def make_process_callback(bot, adapter):
+        """Create a process_message closure for a specific transport."""
+        async def process_message(chat_id: str, user_id: str, message: str, metadata: dict, interrupt_check):
+            from lethe.tools import set_telegram_context, set_last_message_id, clear_telegram_context
+
+            logger.info(f"Processing message from {user_id}: {message[:50]}...")
+            mark_user_visible_activity("incoming user message")
+
+            set_telegram_context(adapter, chat_id)
+            if metadata.get("message_id"):
+                set_last_message_id(metadata["message_id"])
+
+            await bot.start_typing(chat_id)
+
+            try:
+                async def on_intermediate(content: str):
+                    if not content or len(content) < 10:
+                        return
+                    if interrupt_check():
+                        return
+                    await bot.send_message(chat_id, content)
+                    mark_user_visible_activity("intermediate assistant update")
+
+                async def on_image(image_path: str):
+                    if interrupt_check():
+                        return
+                    await bot.send_photo(chat_id, image_path)
+                    mark_user_visible_activity("assistant image update")
+
+                response = await agent.chat(message, on_message=on_intermediate, on_image=on_image)
+
+                if interrupt_check():
+                    logger.info("Processing interrupted")
+                    return
+
+                logger.info(f"Sending response ({len(response)} chars): {response[:80]}...")
+                await bot.send_message(chat_id, response)
+                mark_user_visible_activity("assistant final response")
+
+            except Exception as e:
+                logger.exception(f"Error processing message: {e}")
+                await bot.send_message(chat_id, f"Error: {e}")
+                mark_user_visible_activity("assistant error response")
+            finally:
+                await bot.stop_typing(chat_id)
+                clear_telegram_context()
+
+        return process_message
+
+    # --- Initialize transports ---
+    # Each entry: (bot, adapter, heartbeat_chat_id, name)
+    transports: list[tuple] = []
+    allowed_ids = settings.telegram_allowed_user_ids
+
+    if settings.telegram_bot_token:
+        telegram_bot = TelegramBot(settings, conversation_manager=conversation_manager)
+        telegram_bot.agent = agent
+        telegram_bot.process_callback = make_process_callback(telegram_bot, telegram_bot.bot)
+        tg_heartbeat_id = allowed_ids.split(",")[0].strip() if allowed_ids else None
+        transports.append((telegram_bot, telegram_bot.bot, tg_heartbeat_id, "telegram"))
+        console.print("[cyan]Telegram[/cyan] transport enabled")
+    else:
+        telegram_bot = None
+
+    if settings.signal_account:
+        from lethe.signal import SignalBot
+        signal_bot = SignalBot(settings, conversation_manager=conversation_manager)
+        signal_bot.agent = agent
+        signal_bot.process_callback = make_process_callback(signal_bot, signal_bot.adapter)
+        transports.append((signal_bot, signal_bot.adapter, settings.signal_account, "signal"))
+        console.print("[cyan]Signal[/cyan] transport enabled")
+    else:
+        signal_bot = None
+
+    if not transports:
+        console.print("[red]No transports configured.[/red] Set TELEGRAM_BOT_TOKEN or SIGNAL_ACCOUNT in .env")
+        sys.exit(1)
+
+    # For backward compatibility, pick first available heartbeat_chat_id
+    heartbeat_chat_id = next((t[2] for t in transports if t[2]), None)
+    # Pick first bot for backward compat references
+    primary_bot = transports[0][0]
 
     # Initialize heartbeat
     heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 60 * 60))  # Default 1 hour
     heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
-    
-    # Get the first allowed user ID for heartbeat messages
-    allowed_ids = settings.telegram_allowed_user_ids
-    heartbeat_chat_id = int(allowed_ids.split(",")[0]) if allowed_ids else None
     
     async def heartbeat_process(message: str) -> str:
         """Process heartbeat — triggers background rounds if actor system is active."""
@@ -254,12 +268,19 @@ async def run():
         _proactive_sends.append(time.time())
 
     async def heartbeat_send(response: str):
-        """Send heartbeat response to user (rate-limited)."""
-        if heartbeat_chat_id:
-            if not _proactive_allowed():
-                logger.info("Heartbeat message suppressed by rate limiter")
-                return
-            await telegram_bot.send_message(heartbeat_chat_id, response)
+        """Send heartbeat response to all active transports (rate-limited)."""
+        if not _proactive_allowed():
+            logger.info("Heartbeat message suppressed by rate limiter")
+            return
+        sent = False
+        for bot, adapter, hb_chat_id, name in transports:
+            if hb_chat_id:
+                try:
+                    await bot.send_message(hb_chat_id, response)
+                    sent = True
+                except Exception as e:
+                    logger.warning(f"Heartbeat send failed on {name}: {e}")
+        if sent:
             _proactive_record()
             mark_user_visible_activity("proactive outbound message")
     
@@ -370,35 +391,47 @@ async def run():
         enabled=heartbeat_enabled and heartbeat_chat_id is not None,
     )
     
-    # Set heartbeat trigger on telegram bot for /heartbeat command
-    telegram_bot.heartbeat_callback = heartbeat.trigger
+    # Set heartbeat trigger on all transport bots for /heartbeat command
+    for bot, adapter, hb_chat_id, name in transports:
+        bot.heartbeat_callback = heartbeat.trigger
     
-    # Wire actor system into telegram bot for /status command
+    # Wire actor system into all transport bots for /status command
     if actor_system:
-        telegram_bot.actor_system = actor_system
-    
+        for bot, adapter, hb_chat_id, name in transports:
+            bot.actor_system = actor_system
+
     async def run_cortex_turn(synthetic_message: str):
         """Trigger a full cortex LLM turn with a synthetic system message.
 
         Used when a subagent finishes so the cortex can process the result
-        and respond to the user proactively.
+        and respond to the user proactively. Sends to all active transports.
         """
-        if not heartbeat_chat_id:
-            logger.warning("run_cortex_turn: no chat_id configured")
-            return
-        # No rate limiting — subagent results are responses to user-initiated tasks.
         from lethe.tools import set_telegram_context, clear_telegram_context
-        set_telegram_context(telegram_bot.bot, heartbeat_chat_id)
+
+        # Use first transport with a heartbeat chat_id for the LLM context
+        target = next(((b, a, c) for b, a, c, n in transports if c), (None, None, None))
+        bot, adapter, chat_id = target
+        if not bot or not chat_id:
+            logger.warning("run_cortex_turn: no transport configured")
+            return
+
+        set_telegram_context(adapter, chat_id)
         try:
-            await telegram_bot.start_typing(heartbeat_chat_id)
+            await bot.start_typing(chat_id)
             response = await agent.chat(synthetic_message)
             if response and response.strip():
-                await telegram_bot.send_message(heartbeat_chat_id, response)
+                # Send to all transports
+                for b, a, hb_id, name in transports:
+                    if hb_id:
+                        try:
+                            await b.send_message(hb_id, response)
+                        except Exception as e:
+                            logger.warning(f"cortex_turn send failed on {name}: {e}")
                 mark_user_visible_activity("cortex subagent followup")
         except Exception as e:
             logger.exception("run_cortex_turn failed: %s", e)
         finally:
-            await telegram_bot.stop_typing(heartbeat_chat_id)
+            await bot.stop_typing(chat_id)
             clear_telegram_context()
 
     # Wire DMN callbacks (send_to_user, get_reminders)
@@ -465,7 +498,9 @@ async def run():
     # Start services
     console.print("[green]Starting services...[/green]")
 
-    bot_task = asyncio.create_task(telegram_bot.start())
+    bot_tasks = []
+    for bot, adapter, hb_chat_id, name in transports:
+        bot_tasks.append(asyncio.create_task(bot.start(), name=f"{name}-bot"))
     heartbeat_task = asyncio.create_task(heartbeat.start())
 
     try:
@@ -474,7 +509,7 @@ async def run():
         pass
     finally:
         console.print("\n[yellow]Shutting down...[/yellow]")
-        
+
         # Shutdown with timeout to avoid hanging on native threads
         try:
             async with asyncio.timeout(5):
@@ -487,23 +522,26 @@ async def run():
                 if actor_system:
                     await actor_system.shutdown()
                 await heartbeat.stop()
-                await telegram_bot.stop()
+                for bot, adapter, hb_chat_id, name in transports:
+                    await bot.stop()
                 await agent.close()
         except asyncio.TimeoutError:
             logger.warning("Shutdown timed out, forcing exit")
             os._exit(0)  # Force exit - LanceDB/OpenBLAS threads don't respect Python shutdown
-        
-        bot_task.cancel()
+
+        for task in bot_tasks:
+            task.cancel()
         heartbeat_task.cancel()
-        try:
-            await bot_task
-        except asyncio.CancelledError:
-            pass
+        for task in bot_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         try:
             await heartbeat_task
         except asyncio.CancelledError:
             pass
-        
+
         console.print("[green]Shutdown complete.[/green]")
 
 

@@ -40,7 +40,7 @@ class ProxyBot:
 
     async def send_message(
         self,
-        chat_id: int,
+        chat_id,
         text: str,
         parse_mode: Optional[str] = None,
         **kwargs,
@@ -54,7 +54,7 @@ class ProxyBot:
 
     async def send_photo(
         self,
-        chat_id: int,
+        chat_id,
         photo: Any,
         caption: Optional[str] = None,
         **kwargs,
@@ -68,7 +68,7 @@ class ProxyBot:
 
     async def send_animation(
         self,
-        chat_id: int,
+        chat_id,
         animation: Any,
         caption: Optional[str] = None,
         **kwargs,
@@ -82,7 +82,7 @@ class ProxyBot:
 
     async def send_video(
         self,
-        chat_id: int,
+        chat_id,
         video: Any,
         caption: Optional[str] = None,
         **kwargs,
@@ -96,7 +96,7 @@ class ProxyBot:
 
     async def send_voice(
         self,
-        chat_id: int,
+        chat_id,
         voice: Any,
         caption: Optional[str] = None,
         **kwargs,
@@ -110,7 +110,7 @@ class ProxyBot:
 
     async def send_audio(
         self,
-        chat_id: int,
+        chat_id,
         audio: Any,
         caption: Optional[str] = None,
         **kwargs,
@@ -124,7 +124,7 @@ class ProxyBot:
 
     async def send_document(
         self,
-        chat_id: int,
+        chat_id,
         document: Any,
         caption: Optional[str] = None,
         **kwargs,
@@ -136,12 +136,12 @@ class ProxyBot:
         })
         return MockMessage(message_id=mid)
 
-    async def send_chat_action(self, chat_id: int, action: Any, **kwargs):
+    async def send_chat_action(self, chat_id, action: Any, **kwargs):
         await self._put({"event": "typing", "data": {}})
 
     async def set_message_reaction(
         self,
-        chat_id: int,
+        chat_id,
         message_id: int,
         reaction: list,
         **kwargs,

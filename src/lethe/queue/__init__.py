@@ -24,8 +24,8 @@ class Task:
     """A task to be processed by the agent."""
 
     id: str
-    chat_id: int
-    user_id: int
+    chat_id: str
+    user_id: str
     message: str
     status: TaskStatus = TaskStatus.PENDING
     result: Optional[str] = None
@@ -117,8 +117,8 @@ class TaskQueue:
 
     async def enqueue(
         self,
-        chat_id: int,
-        user_id: int,
+        chat_id: str,
+        user_id: str,
         message: str,
         metadata: Optional[dict] = None,
     ) -> Task:
