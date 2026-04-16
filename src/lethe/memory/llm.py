@@ -453,74 +453,65 @@ class ContextWindow:
         Args:
             messages: List of dicts with 'role', 'content', 'metadata', and optionally 'created_at' keys
 
-        Tool messages cannot be properly paired with their assistant tool_calls
-        across sessions (ID formats differ between models/sessions). Instead of
-        silently dropping them, we extract a brief outcome annotation and inject
-        it into the next assistant message so the model retains knowledge of what
-        tools accomplished in previous sessions.
+        Tool call/result pairs are preserved as proper messages with regenerated
+        matching IDs (pi-mono approach). This prevents the model from seeing tool
+        results as text annotations and learning to fabricate them.
         """
+        import uuid as _uuid
+
         loaded_count = 0
         skipped_empty = 0
-        skipped_tool = 0
-        pending_tool_outcomes: List[str] = []  # Collected tool outcomes to inject
+
+        # First pass: collect all messages, regenerate tool_call IDs so
+        # assistant tool_calls and their tool results share consistent IDs.
+        # Old IDs may not match across sessions/models.
+        raw_messages: List[dict] = []
+        id_map: Dict[str, str] = {}  # old_tool_call_id -> new_tool_call_id
 
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             metadata = msg.get("metadata", {})
 
-            # Collect tool message outcomes instead of silently dropping them.
-            # These get injected as annotations into the next assistant message.
-            if role == "tool":
-                skipped_tool += 1
-                tool_name = metadata.get("name", "tool")
-                # Skip search tool results (recursive bloat)
-                if tool_name in self._OUTCOME_SKIP_TOOLS:
-                    continue
-                result_text = str(content).strip()
-                if result_text:
-                    # Short summary only — long previews teach the model to
-                    # fabricate tool results as text instead of calling tools.
-                    # Use first line or 80 chars, whichever is shorter.
-                    first_line = result_text.split("\n", 1)[0][:80]
-                    pending_tool_outcomes.append(f"{tool_name}: {first_line}")
+            # Skip search tool results (recursive bloat)
+            if role == "tool" and metadata.get("name") in self._OUTCOME_SKIP_TOOLS:
                 continue
 
-            # Strip tool_calls from loaded assistant messages — their results
-            # aren't in history, so orphan cleanup would destroy these messages
+            # Regenerate IDs on assistant tool_calls
             if role == "assistant" and metadata.get("tool_calls"):
-                metadata = {k: v for k, v in metadata.items() if k != "tool_calls"}
+                tool_calls = []
+                for tc in metadata["tool_calls"]:
+                    old_id = tc.get("id", "")
+                    new_id = f"call-{_uuid.uuid4().hex[:12]}"
+                    if old_id:
+                        id_map[old_id] = new_id
+                    new_tc = dict(tc)
+                    new_tc["id"] = new_id
+                    tool_calls.append(new_tc)
+                metadata = {**metadata, "tool_calls": tool_calls}
 
-            # Inject pending tool outcomes into the next assistant message
-            if pending_tool_outcomes and role == "assistant":
-                # Cap total outcomes annotation to avoid bloating context
-                outcomes = pending_tool_outcomes[:10]  # Max 10 tool outcomes per group
-                outcomes_text = "; ".join(outcomes)
-                if len(outcomes_text) > 1000:
-                    outcomes_text = outcomes_text[:1000] + "..."
-                annotation = f"[Tool outcomes: {outcomes_text}]"
-                if content:
-                    content = f"{annotation}\n{content}"
+            # Map tool result IDs to match regenerated assistant IDs
+            if role == "tool" and metadata.get("tool_call_id"):
+                old_id = metadata["tool_call_id"]
+                new_id = id_map.get(old_id)
+                if new_id:
+                    metadata = {**metadata, "tool_call_id": new_id}
                 else:
-                    content = annotation
-                pending_tool_outcomes = []
-            elif pending_tool_outcomes and role == "user":
-                # Tool outcomes before a user message (e.g. tool-only turn with no final response)
-                outcomes = pending_tool_outcomes[:10]
-                outcomes_text = "; ".join(outcomes)
-                if len(outcomes_text) > 1000:
-                    outcomes_text = outcomes_text[:1000] + "..."
-                self.messages.append(Message(
-                    role="assistant",
-                    content=f"[Tool outcomes: {outcomes_text}]",
-                ))
-                loaded_count += 1
-                pending_tool_outcomes = []
+                    # Orphaned tool result — no matching assistant tool_call.
+                    # Skip it; the orphan cleanup would remove it anyway.
+                    continue
+
+            raw_messages.append({"role": role, "content": content, "metadata": metadata, "created_at": msg.get("created_at")})
+
+        # Second pass: build Message objects
+        for msg in raw_messages:
+            role = msg["role"]
+            content = msg["content"]
+            metadata = msg["metadata"]
 
             # Handle multimodal content - extract text, skip base64
             if isinstance(content, str) and content.startswith("["):
                 try:
-                    import json
                     parsed = json.loads(content)
                     if isinstance(parsed, list):
                         text_parts = []
@@ -529,7 +520,6 @@ class ContextWindow:
                                 if p.get("type") == "text":
                                     text_parts.append(p.get("text", ""))
                                 elif p.get("type") == "image_url":
-                                    # Skip base64 images, just note they existed
                                     text_parts.append("[image]")
                         content = " ".join(text_parts)
                 except (json.JSONDecodeError, TypeError):
@@ -552,7 +542,6 @@ class ContextWindow:
                 except (ValueError, AttributeError):
                     created_at = datetime.now(timezone.utc)
 
-            # Build message with all metadata
             self.messages.append(Message(
                 role=role,
                 content=content,
@@ -563,19 +552,7 @@ class ContextWindow:
             ))
             loaded_count += 1
 
-        # Flush any remaining tool outcomes at end of history
-        if pending_tool_outcomes:
-            outcomes = pending_tool_outcomes[:10]
-            outcomes_text = "; ".join(outcomes)
-            if len(outcomes_text) > 1000:
-                outcomes_text = outcomes_text[:1000] + "..."
-            self.messages.append(Message(
-                role="assistant",
-                content=f"[Tool outcomes: {outcomes_text}]",
-            ))
-            loaded_count += 1
-
-        logger.info(f"Loaded {loaded_count} messages (skipped: {skipped_tool} tool, {skipped_empty} empty)")
+        logger.info(f"Loaded {loaded_count} messages (skipped: {skipped_empty} empty, remapped {len(id_map)} tool call IDs)")
         # Compress if needed after loading
         self._compress_if_needed(include_transient=False)
     
