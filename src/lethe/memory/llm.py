@@ -170,7 +170,16 @@ class LLMConfig:
             else:
                 raise ValueError(f"{env_key} not set")
         
-        logger.info(f"LLM config: provider={self.provider}, model={self.model}, aux={self.model_aux}")
+        # Model-specific temperature tuning. Can be overridden via LLM_TEMPERATURE env.
+        # Gemma 4 was trained with temp=1.0; anything lower hurts instruction-following
+        # and tool-call reliability per Google's published sampler recommendations.
+        env_temp = os.environ.get("LLM_TEMPERATURE")
+        if env_temp:
+            self.temperature = float(env_temp)
+        elif "gemma" in self.model.lower():
+            self.temperature = 1.0
+
+        logger.info(f"LLM config: provider={self.provider}, model={self.model}, aux={self.model_aux}, temp={self.temperature}")
     
     def _detect_provider(self) -> str:
         """Auto-detect provider from available API keys."""
