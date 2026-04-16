@@ -124,12 +124,19 @@ class SignalBot:
         self._pending_selection: dict[str, tuple[str, list]] = {}
 
     def _is_authorized(self, sender: str) -> bool:
-        """Check if sender is allowed."""
-        allowed = self.settings.signal_allowed_number_list
+        """Check if sender is allowed.
+
+        Default (no SIGNAL_ALLOWED_NUMBERS set): only Note to Self is allowed.
+        With SIGNAL_ALLOWED_NUMBERS: listed numbers + own account are allowed.
+        """
         # Always allow messages from own account (Note to Self)
         if sender == self.settings.signal_account:
             return True
-        return not allowed or sender in allowed
+        allowed = self.settings.signal_allowed_number_list
+        # If no allowlist configured, only self is allowed (safe default)
+        if not allowed:
+            return False
+        return sender in allowed
 
     # --- Message handling ---
 
