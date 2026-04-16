@@ -128,7 +128,7 @@ class SignalBot:
         self.adapter = SignalBotAdapter(self.client, sent_timestamps=self._sent_timestamps)
 
         self._running = False
-        self._typing_tasks: dict[str, asyncio.Task] = {}
+        self._typing_tasks: dict[str, int] = {}  # recipient -> placeholder message timestamp
         self._last_message_timestamp: Optional[int] = None
         self._last_sender: Optional[str] = None
 
@@ -389,6 +389,9 @@ class SignalBot:
         MAX_LENGTH = 4000
         segments = [s.strip() for s in text.split("---") if s.strip()]
 
+        # If there's a typing placeholder, edit it with the first chunk
+        placeholder_ts = self._typing_tasks.pop(recipient, None)
+
         for i, segment in enumerate(segments):
             if len(segment) <= MAX_LENGTH:
                 chunks = [segment]
@@ -407,7 +410,14 @@ class SignalBot:
 
             for chunk in chunks:
                 try:
-                    result = await self.client.send(recipient=recipient, message=chunk)
+                    # Edit the placeholder with the first chunk, send new for the rest
+                    edit_ts = None
+                    if placeholder_ts:
+                        edit_ts = placeholder_ts
+                        placeholder_ts = None  # Only edit once
+                    result = await self.client.send(
+                        recipient=recipient, message=chunk, edit_timestamp=edit_ts,
+                    )
                     # Track timestamp to ignore our own sync echo
                     ts = result.get("timestamp") if isinstance(result, dict) else None
                     if ts:
@@ -459,31 +469,26 @@ class SignalBot:
             await self.react_to_message(self._last_sender, self._last_message_timestamp, emoji)
 
     async def start_typing(self, recipient: str):
-        """Start typing indicator loop."""
+        """Send a '...' placeholder message as typing indicator.
+
+        Signal's sendTyping doesn't work for Note to Self. Instead we send
+        a placeholder that gets edited with the real response later.
+        """
         if recipient in self._typing_tasks:
             return
-
-        async def typing_loop():
-            while True:
-                try:
-                    await self.client.send_typing(recipient=recipient)
-                    await asyncio.sleep(4)
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    break
-
-        self._typing_tasks[recipient] = asyncio.create_task(typing_loop())
+        try:
+            result = await self.client.send(recipient=recipient, message="...")
+            ts = result.get("timestamp") if isinstance(result, dict) else None
+            if ts:
+                # Store placeholder timestamp so send_message can edit it
+                self._typing_tasks[recipient] = ts
+                self._sent_timestamps.add(ts)
+        except Exception as e:
+            logger.debug(f"Signal placeholder send failed: {e}")
 
     async def stop_typing(self, recipient: str):
-        """Stop typing indicator."""
-        task = self._typing_tasks.pop(recipient, None)
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        """Clean up typing placeholder if it wasn't edited."""
+        self._typing_tasks.pop(recipient, None)
 
     async def start(self):
         """Start the SSE event loop."""

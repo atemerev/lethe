@@ -96,6 +96,7 @@ class SignalClient:
         recipient: str,
         message: str,
         attachments: Optional[list[str]] = None,
+        edit_timestamp: Optional[int] = None,
     ) -> dict:
         """Send a text message, optionally with attachments.
 
@@ -103,6 +104,7 @@ class SignalClient:
             recipient: Phone number (E.164) or group ID
             message: Text content
             attachments: List of local file paths to attach
+            edit_timestamp: If set, edit an existing message instead of sending new
 
         Returns:
             dict with 'timestamp' of sent message
@@ -117,6 +119,8 @@ class SignalClient:
             params["account"] = self.account
         if attachments:
             params["attachment"] = attachments
+        if edit_timestamp:
+            params["edit-timestamp"] = edit_timestamp
         return await self.rpc("send", params)
 
     async def send_typing(self, recipient: str, stop: bool = False) -> dict:
