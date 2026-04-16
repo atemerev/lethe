@@ -1616,21 +1616,20 @@ class AsyncLLMClient:
                 choice = response["choices"][0]
                 assistant_msg = choice["message"]
                 
-                # Get content (might be present even with tool calls)
-                content = strip_model_tags(assistant_msg.get("content") or "")
-                
-                # Handle tool calls
+                # Get content and handle tool calls.
+                # Extract text-embedded tool calls BEFORE stripping model tags,
+                # since strip_model_tags removes the tool call patterns.
+                raw_content = assistant_msg.get("content") or ""
                 tool_calls = assistant_msg.get("tool_calls")
 
                 # Fallback: extract tool calls embedded as text by Gemma 4 / llama.cpp
                 # when the model mixes conversational text with tool calls in one response.
-                # Format: <tool_call:func_name{arg:value, arg2:<|"|>value<|"|>}>
-                if not tool_calls and content and "<tool_call:" in content:
-                    tool_calls = _extract_text_tool_calls(content)
+                if not tool_calls and raw_content:
+                    tool_calls = _extract_text_tool_calls(raw_content)
                     if tool_calls:
-                        # Strip the tool call text from the content
-                        content = re.sub(r'\s*<tool_call:\w+\{.+?\}>', '', content, flags=re.DOTALL).strip()
                         logger.info(f"Recovered {len(tool_calls)} tool call(s) from text content")
+
+                content = strip_model_tags(raw_content)
 
                 if tool_calls:
                     import uuid

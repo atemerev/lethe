@@ -186,11 +186,12 @@ class TestSignalBot:
         bot.settings.signal_allowed_number_list = ["+15559999999"]
         assert not bot._is_authorized("+15550000000")
 
-    def test_allow_all_when_empty(self):
-        """Empty allowlist should allow all."""
+    def test_deny_all_when_empty(self):
+        """Empty allowlist should only allow self (Note to Self)."""
         bot = self._make_bot()
         bot.settings.signal_allowed_number_list = []
-        assert bot._is_authorized("+15550000000")
+        assert not bot._is_authorized("+15550000000")
+        assert bot._is_authorized("+15551234567")  # own account still allowed
 
     @pytest.mark.asyncio
     async def test_handle_command_status(self):
