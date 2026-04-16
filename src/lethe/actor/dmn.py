@@ -22,7 +22,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Awaitable, Optional
 
-from lethe.actor import Actor, ActorConfig, ActorRegistry, ActorState, ActorMessage
+from lethe.actor import Actor, ActorConfig, ActorRegistry, ActorState, ActorMessage, ModelTier
 from lethe.actor.tools import create_actor_tools
 from lethe.memory.llm import AsyncLLMClient, LLMConfig
 from lethe.prompts import load_prompt_template
@@ -204,7 +204,7 @@ class DefaultModeNetwork:
             name="dmn",
             group="main",
             goals="Background thinking round. Scan goals, reflect, take action, update state.",
-            model="",  # Will be set to main model by factory
+            model=ModelTier.AUX,
             tools=["read_file", "write_file", "edit_file", "list_directory",
                    "grep_search", "bash", "web_search", "fetch_webpage",
                    "memory_read", "memory_update", "memory_append",

@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from lethe.actor import (
     Actor,
     ActorConfig,
+    ModelTier,
     TaskState,
     ActorInfo,
     ActorMessage,
@@ -457,18 +458,33 @@ class TestActorTools:
 
     @pytest.mark.asyncio
     async def test_spawn_with_model_choice(self, principal, registry):
-        """Butler can specify model for subagent."""
+        """Butler can specify model tier for subagent."""
         tools = create_actor_tools(principal, registry)
         spawn_fn = next(func for func, _ in tools if func.__name__ == "spawn_actor")
-        
+
         result = await spawn_fn(
             name="thinker",
             goals="Deep analysis",
+            model="main",
+        )
+        assert "model=main" in result
+        thinker = registry.find_by_name("thinker")
+        assert thinker.config.model is ModelTier.MAIN
+
+    @pytest.mark.asyncio
+    async def test_spawn_with_invalid_model_falls_back_to_aux(self, principal, registry):
+        """Arbitrary model strings fall back to aux tier instead of crashing."""
+        tools = create_actor_tools(principal, registry)
+        spawn_fn = next(func for func, _ in tools if func.__name__ == "spawn_actor")
+
+        result = await spawn_fn(
+            name="fallback-test",
+            goals="Test fallback",
             model="openrouter/moonshotai/kimi-k2.5",
         )
-        assert "kimi-k2.5" in result
-        thinker = registry.find_by_name("thinker")
-        assert thinker.config.model == "openrouter/moonshotai/kimi-k2.5"
+        assert "model=aux" in result
+        actor = registry.find_by_name("fallback-test")
+        assert actor.config.model is ModelTier.AUX
 
     def test_kill_actor_tool(self, principal, worker, registry):
         tools = create_actor_tools(principal, registry)

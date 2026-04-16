@@ -15,7 +15,7 @@ import logging
 import os
 from typing import Awaitable, Callable, Dict, List, Optional
 
-from lethe.actor import Actor, ActorConfig, ActorMessage, ActorRegistry, ActorState
+from lethe.actor import Actor, ActorConfig, ActorMessage, ActorRegistry, ActorState, ModelTier
 from lethe.actor.tools import create_actor_tools
 from lethe.actor.runner import ActorRunner
 from lethe.actor.dmn import DefaultModeNetwork
@@ -248,8 +248,8 @@ class ActorSystem:
     async def _create_llm_for_actor(self, actor: Actor) -> AsyncLLMClient:
         """Create an LLM client for a subagent actor."""
         config = LLMConfig()
-        if actor.config.model:
-            config.model = actor.config.model
+        if actor.config.model is ModelTier.MAIN:
+            pass  # config.model is already the main model
         else:
             config.model = config.model_aux
         

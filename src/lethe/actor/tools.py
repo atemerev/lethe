@@ -182,27 +182,27 @@ def create_actor_tools(actor: "Actor", registry: "ActorRegistry") -> list:
         goals: str,
         group: str = "",
         tools: str = "",
-        model: str = "",
+        model: str = "aux",
         max_turns: int = 50,
     ) -> str:
         """Spawn a new subagent actor to handle a subtask.
-        
+
         IMPORTANT: Before spawning, check if an existing actor can handle this.
         Use discover_actors() first to see who's already running.
-        
+
         Args:
             name: Short name for the actor (e.g., "researcher", "coder")
             goals: Detailed description of what to accomplish. Include all context the subagent needs.
             group: Actor group for discovery (default: same as yours)
             tools: Comma-separated EXTRA tool names beyond the defaults. All subagents always get: bash, read_file, write_file, edit_file, list_directory, grep_search, view_image. Specify extras like: "web_search,fetch_webpage,browser_open" etc.
-            model: LLM model override (empty = default aux model). Use main model for complex reasoning.
+            model: "main" for complex reasoning tasks, "aux" (default) for routine work.
             max_turns: Max LLM turns before forced termination (default 50)
-            
+
         Returns:
             Actor ID and confirmation, or existing actor info if duplicate
         """
         import re
-        from lethe.actor import ActorConfig, ActorState
+        from lethe.actor import ActorConfig, ActorState, ModelTier
         
         ACTIVE_STATES = (ActorState.RUNNING, ActorState.INITIALIZING, ActorState.WAITING)
         target_group = group or actor.config.group
@@ -260,19 +260,26 @@ def create_actor_tools(actor: "Actor", registry: "ActorRegistry") -> list:
             )
         
         tool_list = [t.strip() for t in tools.split(",") if t.strip()] if tools else []
-        
+
+        # Resolve model tier from string
+        model_key = model.strip().lower() if model else "aux"
+        try:
+            model_tier = ModelTier(model_key)
+        except ValueError:
+            model_tier = ModelTier.AUX
+
         config = ActorConfig(
             name=name,
             group=target_group,
             goals=goals,
             tools=tool_list,
-            model=model,
+            model=model_tier,
             max_turns=max_turns,
         )
-        
+
         child = registry.spawn(config, spawned_by=actor.id)
-        
-        model_info = f", model={model}" if model else ", model=aux (default)"
+
+        model_info = f", model={model_tier.value}"
         # Refresh active children (now includes new child)
         active_children = [c for c in registry.get_children(actor.id) if c.state in ACTIVE_STATES]
         

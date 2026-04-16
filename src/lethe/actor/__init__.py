@@ -89,6 +89,12 @@ SUBAGENT_RULES_BLOCK = load_prompt_template(
 )
 
 
+class ModelTier(str, Enum):
+    """Which LLM model tier to use for an actor."""
+    MAIN = "main"  # Primary model (best reasoning)
+    AUX = "aux"    # Auxiliary model (cheaper/faster, used for subagents by default)
+
+
 class ActorState(str, Enum):
     """Lifecycle states for an actor."""
     INITIALIZING = "initializing"
@@ -192,7 +198,7 @@ class ActorConfig:
     name: str                              # Human-readable name (e.g., "researcher")
     group: str = "default"                 # Actor group for discovery
     goals: str = ""                        # What this actor should accomplish
-    model: str = ""                        # LLM model override (empty = use aux)
+    model: Optional[ModelTier] = None      # Model tier (None = AUX default)
     tools: List[str] = field(default_factory=list)  # Tool names available to this actor
     max_turns: int = 50                    # Max LLM turns before forced termination
     max_messages: int = 50                 # Max inter-actor messages
