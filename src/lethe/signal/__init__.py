@@ -147,14 +147,16 @@ class SignalBot:
         if not source:
             return
 
-        # Check both dataMessage (direct) and syncMessage.sentMessage (Note to Self / multi-device)
+        # Check both dataMessage (direct) and syncMessage.sentMessage (Note to Self)
         data_msg = envelope.get("dataMessage")
         if not data_msg:
             sync_msg = envelope.get("syncMessage", {}).get("sentMessage")
             if sync_msg:
+                # Only process Note to Self — ignore synced messages to other people
+                dest = sync_msg.get("destination") or sync_msg.get("destinationNumber", "")
+                if dest != self.settings.signal_account:
+                    return  # Message to someone else, not Note to Self
                 data_msg = sync_msg
-                # For sync messages, source is ourselves — use destination as the chat context
-                # but keep source as the sender (it's us talking to ourselves)
             else:
                 return  # Not a data/sync message (receipt, typing, etc.)
 
