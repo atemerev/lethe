@@ -32,5 +32,8 @@ def strip_model_tags(content: str) -> str:
     # Strip Kimi tool call markers (these should be in tool_calls field, not content)
     content = re.sub(r'<\|tool_calls_section_begin\|>.*', '', content, flags=re.DOTALL)
     content = re.sub(r'<\|tool_call_begin\|>.*', '', content, flags=re.DOTALL)
-    
+
+    # Strip Gemma tool calls emitted as text (should be structured tool use, not content)
+    content = re.sub(r'<tool_call:.*?>', '', content, flags=re.DOTALL)
+
     return content.strip()
