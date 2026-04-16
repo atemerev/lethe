@@ -140,9 +140,16 @@ class SignalBot:
         if not source:
             return
 
+        # Check both dataMessage (direct) and syncMessage.sentMessage (Note to Self / multi-device)
         data_msg = envelope.get("dataMessage")
         if not data_msg:
-            return  # Not a data message (receipt, typing, etc.)
+            sync_msg = envelope.get("syncMessage", {}).get("sentMessage")
+            if sync_msg:
+                data_msg = sync_msg
+                # For sync messages, source is ourselves — use destination as the chat context
+                # but keep source as the sender (it's us talking to ourselves)
+            else:
+                return  # Not a data/sync message (receipt, typing, etc.)
 
         text = (data_msg.get("message") or "").strip()
         timestamp = data_msg.get("timestamp", 0)
