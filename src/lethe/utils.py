@@ -36,4 +36,9 @@ def strip_model_tags(content: str) -> str:
     # Strip Gemma tool calls emitted as text (should be structured tool use, not content)
     content = re.sub(r'<tool_call:.*?>', '', content, flags=re.DOTALL)
 
+    # Strip Gemma 4 native tool call token fragments that leak into content
+    # Full tags: <|tool_call|>...<tool_call|>, <|tool_response|>...<tool_response|>
+    content = re.sub(r'<\|?tool_call\|?>.*', '', content, flags=re.DOTALL)
+    content = re.sub(r'<\|?tool_response\|?>.*', '', content, flags=re.DOTALL)
+
     return content.strip()
