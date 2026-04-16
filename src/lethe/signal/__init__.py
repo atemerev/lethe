@@ -21,12 +21,21 @@ class SignalBotAdapter:
     via ContextVar. This adapter translates those calls to signal-cli JSON-RPC.
     """
 
-    def __init__(self, client: SignalClient):
+    def __init__(self, client: SignalClient, sent_timestamps: Optional[set] = None):
         self._client = client
         self._message_counter = 0
+        self._sent_timestamps = sent_timestamps  # shared with SignalBot
+
+    def _track_ts(self, result):
+        """Track sent timestamp for self-reply loop prevention."""
+        if self._sent_timestamps is not None and isinstance(result, dict):
+            ts = result.get("timestamp")
+            if ts:
+                self._sent_timestamps.add(ts)
 
     async def send_message(self, chat_id, text, parse_mode=None, **kwargs) -> MockMessage:
         result = await self._client.send(recipient=str(chat_id), message=text)
+        self._track_ts(result)
         ts = result.get("timestamp", self._message_counter)
         self._message_counter += 1
         return MockMessage(message_id=ts)
@@ -36,6 +45,7 @@ class SignalBotAdapter:
         result = await self._client.send(
             recipient=str(chat_id), message=caption or "", attachments=[path]
         )
+        self._track_ts(result)
         return MockMessage(message_id=result.get("timestamp", 0))
 
     async def send_document(self, chat_id, document, caption=None, **kwargs) -> MockMessage:
@@ -113,7 +123,9 @@ class SignalBot:
             base_url=self.settings.signal_cli_url,
             account=self.settings.signal_account,
         )
-        self.adapter = SignalBotAdapter(self.client)
+        # Adapter shares _sent_timestamps with the bot for loop prevention
+        self._sent_timestamps: set[int] = set()
+        self.adapter = SignalBotAdapter(self.client, sent_timestamps=self._sent_timestamps)
 
         self._running = False
         self._typing_tasks: dict[str, asyncio.Task] = {}
@@ -156,6 +168,11 @@ class SignalBot:
                 dest = sync_msg.get("destination") or sync_msg.get("destinationNumber", "")
                 if dest != self.settings.signal_account:
                     return  # Message to someone else, not Note to Self
+                # Ignore our own sent messages (self-reply loop prevention)
+                ts = sync_msg.get("timestamp", 0)
+                if ts in self._sent_timestamps:
+                    self._sent_timestamps.discard(ts)
+                    return
                 data_msg = sync_msg
             else:
                 return  # Not a data/sync message (receipt, typing, etc.)
@@ -390,7 +407,14 @@ class SignalBot:
 
             for chunk in chunks:
                 try:
-                    await self.client.send(recipient=recipient, message=chunk)
+                    result = await self.client.send(recipient=recipient, message=chunk)
+                    # Track timestamp to ignore our own sync echo
+                    ts = result.get("timestamp") if isinstance(result, dict) else None
+                    if ts:
+                        self._sent_timestamps.add(ts)
+                        # Cap set size to prevent unbounded growth
+                        if len(self._sent_timestamps) > 100:
+                            self._sent_timestamps = set(sorted(self._sent_timestamps)[-50:])
                 except Exception as e:
                     logger.error(f"Signal send failed: {e}")
                 await asyncio.sleep(0.1)
