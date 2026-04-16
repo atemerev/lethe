@@ -479,11 +479,11 @@ class ContextWindow:
                     continue
                 result_text = str(content).strip()
                 if result_text:
-                    # Cap individual outcome preview
-                    preview = result_text[:200]
-                    if len(result_text) > 200:
-                        preview += "..."
-                    pending_tool_outcomes.append(f"{tool_name}: {preview}")
+                    # Short summary only — long previews teach the model to
+                    # fabricate tool results as text instead of calling tools.
+                    # Use first line or 80 chars, whichever is shorter.
+                    first_line = result_text.split("\n", 1)[0][:80]
+                    pending_tool_outcomes.append(f"{tool_name}: {first_line}")
                 continue
 
             # Strip tool_calls from loaded assistant messages — their results
