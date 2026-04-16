@@ -1348,11 +1348,13 @@ class AsyncLLMClient:
     def add_tool(self, func: Callable, schema: Optional[Dict] = None):
         """Add a tool function. Schema auto-generated if not provided."""
         from lethe.tools import function_to_schema
-        
+
         if schema is None:
             schema = function_to_schema(func)
-        
-        self._tools[func.__name__] = (func, schema)
+
+        # Use schema name as key (matches add_tools behavior, handles name overrides)
+        name = schema.get("name", func.__name__)
+        self._tools[name] = (func, schema)
         self._update_tool_budget()
     
     def add_tools(self, tools: List[tuple[Callable, Dict]]):
