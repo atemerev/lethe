@@ -38,7 +38,7 @@ dist/
 build/
 *.egg-info/
 
-# Letta Code
+# Legacy
 .letta/
 workspace/
 

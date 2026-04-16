@@ -1,6 +1,6 @@
 """Lethe Memory Layer - Local memory management with LanceDB.
 
-Replaces Letta Cloud with a local, reliable memory backend.
+Local memory backend using LanceDB.
 - Memory blocks (core memory)
 - Archival memory with hybrid search (vector + FTS)
 - Message history

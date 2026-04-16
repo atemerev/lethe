@@ -109,7 +109,7 @@ HEARTBEAT_SYSTEM_PROMPT = load_prompt_template(
     fallback="You are background reflection. Reply with ok unless urgent.",
 )
 
-# Letta-style summarization prompt (template)
+# Summarization prompt (template)
 SUMMARIZE_PROMPT = load_prompt_template(
     "llm_summarize",
     fallback="Summarize conversation concisely. Output summary only.",
@@ -275,7 +275,7 @@ class ContextWindow:
         """Approximate token count with safety margin.
         
         Uses 4 chars per token approximation with 1.3x safety margin
-        to avoid underestimating (Letta's approach).
+        to avoid underestimating.
         """
         base_count = len(text) // CHARS_PER_TOKEN
         return int(base_count * TOKEN_SAFETY_MARGIN)
@@ -893,7 +893,7 @@ class ContextWindow:
         return "\n".join(lines)
     
     def build_messages(self) -> List[Dict]:
-        """Build messages array for API call (Letta-style structure with prompt caching)."""
+        """Build messages array for API call with prompt caching."""
         # Clean orphaned tool messages before building
         self._clean_orphaned_tool_messages()
         

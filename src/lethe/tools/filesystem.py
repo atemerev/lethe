@@ -11,7 +11,7 @@ from lethe.tools.truncate import (
 
 
 def _is_tool(func):
-    """Decorator to mark a function as a Letta tool."""
+    """Decorator to mark a function as a tool."""
     func._is_tool = True
     return func
 
