@@ -24,6 +24,19 @@ from typing import Optional
 from litellm import completion
 
 from lethe.memory.notes import NoteStore, normalize_tags
+
+_oauth_client = None
+
+
+def _get_oauth():
+    """Lazy-init OAuth client for Anthropic subscription auth."""
+    global _oauth_client
+    if _oauth_client is None:
+        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if auth_token:
+            from lethe.memory.anthropic_oauth import AnthropicOAuth
+            _oauth_client = AnthropicOAuth(access_token=auth_token)
+    return _oauth_client
 from lethe.prompts import load_prompt_template
 
 logger = logging.getLogger(__name__)
@@ -115,27 +128,30 @@ def _get_api_base() -> str:
 
 
 def _llm_call(prompt: str, user_content: str, model: str, max_tokens: int = 4000) -> str:
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    # Use OAuth for Claude models when subscription token is available
+    oauth = _get_oauth()
+    if oauth and "claude" in model.lower():
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(
+            oauth.call_messages(messages=messages, model=model, max_tokens=max_tokens)
+        )
+        return result["choices"][0]["message"]["content"] or ""
+
+    # Fallback to litellm for non-Claude models
     kwargs = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_content},
-        ],
+        "messages": messages,
         "temperature": 0.2,
         "max_tokens": max_tokens,
     }
     api_base = _get_api_base()
     if api_base:
         kwargs["api_base"] = api_base
-
-    # Anthropic subscription auth (OAuth Bearer token instead of x-api-key)
-    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    if auth_token and "claude" in model.lower():
-        kwargs["api_key"] = "placeholder"
-        kwargs["extra_headers"] = {
-            "Authorization": f"Bearer {auth_token}",
-            "x-api-key": "",
-        }
 
     response = completion(**kwargs)
     return response.choices[0].message.content or ""
