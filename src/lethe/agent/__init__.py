@@ -117,7 +117,7 @@ class Agent:
         await self._load_message_history()
         # Run memory curator (harvest + curate) on startup
         try:
-            stats = run_curator(self.notes, self.memory.archival, self.memory.messages, force=True)
+            stats = await run_curator(self.notes, self.memory.archival, self.memory.messages, force=True)
             if not stats.get("skipped"):
                 logger.info(f"Memory curator: {stats}")
         except Exception as e:
