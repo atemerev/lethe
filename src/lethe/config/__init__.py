@@ -81,9 +81,9 @@ class Settings(BaseSettings):
 
     # Background cognition modules
     # amygdala_enabled removed: salience tagging merged into hippocampus (per-message)
-    consolidation_enabled: bool = Field(
+    curator_enabled: bool = Field(
         default=True,
-        description="Enable memory consolidation (background memory compression, aux model)",
+        description="Enable memory curator (harvest + curate episodic memories, extract notes)",
     )
 
     # Proactive messaging limits (hard enforcement, not prompt-dependent)

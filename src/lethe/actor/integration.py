@@ -21,7 +21,7 @@ from lethe.actor.runner import ActorRunner
 from lethe.actor.dmn import DefaultModeNetwork
 # Amygdala merged into hippocampus — salience tagging now runs per-message
 from lethe.actor.brainstem import Brainstem
-from lethe.actor.consolidation import MemoryConsolidation
+from lethe.memory.curator import run_curator
 from lethe.config import Settings, get_settings
 from lethe.memory.llm import AsyncLLMClient, LLMConfig
 
@@ -65,7 +65,7 @@ class ActorSystem:
         self.brainstem: Optional[Brainstem] = None
         self.dmn: Optional[DefaultModeNetwork] = None
         self.amygdala = None  # Deprecated: salience tagging merged into hippocampus
-        self.consolidation: Optional[MemoryConsolidation] = None
+        self._curator_enabled = True
         self._background_tasks: Dict[str, asyncio.Task] = {}
         self._principal_monitor_task: Optional[asyncio.Task] = None
         self._processed_principal_message_ids: set[str] = set()
@@ -171,7 +171,7 @@ class ActorSystem:
         def spawn_and_start(*args, **kwargs):
             actor = original_spawn(*args, **kwargs)
             # Auto-start non-principal actors, but NOT background supervisors.
-            if not actor.is_principal and actor.config.name not in {"brainstem", "dmn", "amygdala", "consolidation"}:
+            if not actor.is_principal and actor.config.name not in {"brainstem", "dmn", "amygdala"}:
                 self._start_actor(actor)
             return actor
         self.registry.spawn = spawn_and_start
@@ -203,25 +203,14 @@ class ActorSystem:
         )
         # Amygdala removed: salience tagging now runs per-message in hippocampus
         
-        # Initialize Memory Consolidation — slow-cadence memory compression
-        if getattr(self.settings, "consolidation_enabled", True):
-            self.consolidation = MemoryConsolidation(
-                registry=self.registry,
-                llm_factory=self._create_llm_for_actor,
-                available_tools=self._available_tools,
-                cortex_id=self.principal.id,
-                send_to_user=self._send_to_user or (lambda msg: asyncio.sleep(0)),
-            )
-
         tool_count = len(self.agent.llm._tools)
         available_count = len(self._available_tools)
         amygdala_state = "merged into hippocampus"
-        consolidation_state = "enabled" if self.consolidation else "disabled"
         logger.info(
             f"Actor system initialized. Principal: {self.principal.id}, "
             f"cortex tools: {tool_count}, subagent tools available: {available_count}, "
             f"Brainstem online, DMN ready, Amygdala {amygdala_state}, "
-            f"Consolidation {consolidation_state}"
+            f"Memory curator active"
         )
         self._start_principal_monitor()
 
@@ -461,13 +450,9 @@ class ActorSystem:
         if self.dmn:
             self.dmn.send_to_user = send_to_user
             self.dmn.get_reminders = get_reminders
-        # Amygdala removed — salience tagging in hippocampus doesn't need send_to_user
-        if self.consolidation:
-            self.consolidation.send_to_user = send_to_user
-
     async def dmn_round(self) -> Optional[str]:
         """Run a DMN round. Called by heartbeat timer.
-        
+
         Returns:
             Message to send to user, or None
         """
@@ -475,14 +460,18 @@ class ActorSystem:
             return None
         return await self.dmn.run_round()
 
-    async def consolidation_round(self) -> Optional[str]:
-        """Run a consolidation round. Called by heartbeat timer.
-
-        Self-gating: the module internally checks cadence/capacity triggers.
-        """
-        if self.consolidation is None:
-            return None
-        return await self.consolidation.run_round()
+    async def curator_round(self):
+        """Run memory curator if cadence elapsed (6h). Called by heartbeat."""
+        try:
+            stats = run_curator(
+                self.agent.notes,
+                self.agent.memory.archival,
+                self.agent.memory.messages,
+            )
+            if not stats.get("skipped"):
+                logger.info("Curator round: %s", stats)
+        except Exception as e:
+            logger.error("Curator round failed: %s", e)
 
     async def brainstem_heartbeat(self, heartbeat_message: str = "") -> Optional[str]:
         """Run Brainstem supervisory checks (main heartbeat cadence)."""
@@ -497,7 +486,7 @@ class ActorSystem:
         Amygdala salience tagging now runs per-message in hippocampus.
         """
         dmn_result = await self.dmn_round()
-        await self.consolidation_round()  # self-gating, no user-facing output
+        await self.curator_round()  # self-gating via 6h cadence
         return dmn_result
 
     async def shutdown(self):
