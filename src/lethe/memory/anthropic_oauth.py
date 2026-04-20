@@ -401,7 +401,11 @@ class AnthropicOAuth:
         
         # Validate tool_result/tool_use pairing (Anthropic rejects orphans with 400)
         merged = self._clean_orphaned_tool_pairs(merged)
-        
+
+        # Strip trailing assistant messages — OAuth API doesn't support prefill
+        while merged and merged[-1].get("role") == "assistant":
+            merged.pop()
+
         return system_blocks, merged
     
     @staticmethod

@@ -1180,7 +1180,25 @@ class ContextWindow:
                     current_tool_ids = set()
                     valid.append(m)
             merged = valid
-        
+
+            # If stripping left an assistant with tool_calls but no following
+            # tool results, demote it to plain text (keeps the content, drops
+            # the dangling tool_calls that would confuse the model).
+            for i in range(len(merged) - 1, -1, -1):
+                m = merged[i]
+                if m["role"] != "assistant" or not m.get("tool_calls"):
+                    break
+                # Check if any tool result follows this assistant
+                has_results = any(
+                    merged[j]["role"] == "tool"
+                    for j in range(i + 1, len(merged))
+                )
+                if not has_results:
+                    if m.get("content"):
+                        del m["tool_calls"]
+                    else:
+                        merged.pop(i)
+
         return merged
 
 
