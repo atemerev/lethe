@@ -97,7 +97,9 @@ EXTRACT_NOTES_PROMPT = load_prompt_template(
         "Notes are for: facts, procedures, contacts, skills, conventions —\n"
         "knowledge that is useful independent of when it was learned.\n\n"
         "Most memories should NOT become notes. Only extract when the memory\n"
-        "contains crystallized, reusable knowledge.\n\n"
+        "contains crystallized, reusable knowledge.\n"
+        "Do NOT create notes for trivial facts, ephemeral config, or content\n"
+        "that overlaps existing notes. When in doubt, don't extract.\n\n"
         "Respond with a JSON array. Empty array [] if nothing to extract:\n"
         "```json\n"
         '[\n'
@@ -178,6 +180,22 @@ def _parse_json(text: str):
         if end > start_obj:
             return json.loads(text[start_obj:end + 1])
     return None
+
+
+def _titles_overlap(a: str, b: str) -> bool:
+    """Check if two note titles are substantially similar."""
+    if a == b:
+        return True
+    if a in b or b in a:
+        return True
+    # Word overlap: if 60%+ of words match, consider them duplicates
+    words_a = set(a.split())
+    words_b = set(b.split())
+    if not words_a or not words_b:
+        return False
+    overlap = len(words_a & words_b)
+    smaller = min(len(words_a), len(words_b))
+    return smaller > 2 and overlap / smaller >= 0.6
 
 
 class MemoryCurator:
@@ -492,7 +510,16 @@ class MemoryCurator:
                 for ext in extractions:
                     title = ext.get("title", "").strip()
                     content = ext.get("content", "").strip()
-                    if not title or not content:
+                    if not title or not content or len(content) < 50:
+                        continue
+
+                    # Skip if too similar to an existing note title
+                    title_lower = title.lower()
+                    if any(
+                        _titles_overlap(title_lower, n.get("title", "").lower())
+                        for n in existing_notes
+                    ):
+                        logger.info("Curator: skipped note '%s' — similar note exists", title)
                         continue
 
                     tags = ext.get("tags", [])
