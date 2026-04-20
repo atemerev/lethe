@@ -708,13 +708,13 @@ class ActorRegistry:
         )
         status_kind = "failed" if is_failed else "done"
 
-        # Notify parent if exists and running
+        # Notify parent if exists and not terminated
         parent = self._actors.get(actor.spawned_by) if actor.spawned_by else None
         if not parent:
             logger.info(f"Actor {actor.config.name} terminated with no parent (spawned_by={actor.spawned_by})")
-        elif parent.state != ActorState.RUNNING:
-            logger.warning(f"Actor {actor.config.name} terminated but parent {parent.config.name} state={parent.state}")
-        if parent and parent.state == ActorState.RUNNING:
+        elif parent.state == ActorState.TERMINATED:
+            logger.warning(f"Actor {actor.config.name} terminated but parent {parent.config.name} already terminated")
+        if parent and parent.state != ActorState.TERMINATED:
             msg = ActorMessage(
                 sender=actor_id,
                 recipient=actor.spawned_by,
@@ -725,12 +725,12 @@ class ActorRegistry:
                     "source": "termination",
                 },
             )
+            # Deliver directly — no fire-and-forget async task
+            parent._messages.append(msg)
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(parent.send(msg))
-            except RuntimeError:
-                parent._messages.append(msg)
                 parent._inbox.put_nowait(msg)
+            except Exception:
+                pass
         self.emit_event(
             "actor_terminated",
             actor,
