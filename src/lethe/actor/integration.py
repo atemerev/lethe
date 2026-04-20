@@ -463,7 +463,7 @@ class ActorSystem:
     async def curator_round(self):
         """Run memory curator if cadence elapsed (6h). Called by heartbeat."""
         try:
-            stats = run_curator(
+            stats = await run_curator(
                 self.agent.notes,
                 self.agent.memory.archival,
                 self.agent.memory.messages,

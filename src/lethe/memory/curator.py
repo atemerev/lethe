@@ -127,7 +127,7 @@ def _get_api_base() -> str:
     return os.environ.get("LLM_API_BASE", "")
 
 
-def _llm_call(prompt: str, user_content: str, model: str, max_tokens: int = 4000) -> str:
+async def _llm_call(prompt: str, user_content: str, model: str, max_tokens: int = 4000) -> str:
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": user_content},
@@ -136,13 +136,13 @@ def _llm_call(prompt: str, user_content: str, model: str, max_tokens: int = 4000
     # Use OAuth for Claude models when subscription token is available
     oauth = _get_oauth()
     if oauth and "claude" in model.lower():
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            oauth.call_messages(messages=messages, model=model, max_tokens=max_tokens)
+        result = await oauth.call_messages(
+            messages=messages, model=model, max_tokens=max_tokens,
         )
         return result["choices"][0]["message"]["content"] or ""
 
     # Fallback to litellm for non-Claude models
+    from litellm import acompletion
     kwargs = {
         "model": model,
         "messages": messages,
@@ -153,7 +153,7 @@ def _llm_call(prompt: str, user_content: str, model: str, max_tokens: int = 4000
     if api_base:
         kwargs["api_base"] = api_base
 
-    response = completion(**kwargs)
+    response = await acompletion(**kwargs)
     return response.choices[0].message.content or ""
 
 
@@ -239,13 +239,13 @@ class MemoryCurator:
         except Exception:
             return True
 
-    def run(self) -> dict:
+    async def run(self) -> dict:
         """Run both curator passes. Returns stats."""
         logger.info("Curator: starting run")
         start = time.monotonic()
 
-        harvest_stats = self._pass_harvest()
-        curate_stats = self._pass_curate()
+        harvest_stats = await self._pass_harvest()
+        curate_stats = await self._pass_curate()
 
         self._last_run_ts = datetime.now(timezone.utc).isoformat()
         self._stats["total_runs"] += 1
@@ -259,7 +259,7 @@ class MemoryCurator:
 
     # -- Pass 1: Harvest -------------------------------------------------------
 
-    def _pass_harvest(self) -> dict:
+    async def _pass_harvest(self) -> dict:
         """Extract episodic memories from recent conversation history."""
         model = _get_model("aux")
         if not model:
@@ -299,7 +299,7 @@ class MemoryCurator:
             transcript = self._format_transcript(batch)
 
             try:
-                raw = _llm_call(HARVEST_PROMPT, transcript, model)
+                raw = await _llm_call(HARVEST_PROMPT, transcript, model)
                 memories = _parse_json(raw)
                 if not isinstance(memories, list):
                     continue
@@ -370,7 +370,7 @@ class MemoryCurator:
 
     # -- Pass 2: Curate --------------------------------------------------------
 
-    def _pass_curate(self) -> dict:
+    async def _pass_curate(self) -> dict:
         """Reorganize episodic memories + extract notes."""
         stats = {"curated": 0, "notes_extracted": 0, "deleted": 0, "merged": 0}
 
@@ -390,7 +390,7 @@ class MemoryCurator:
         logger.info("Curator: curating %d episodic memories", len(entries))
 
         # Step 1: Reorganize with main model
-        reorg_stats = self._curate_reorganize(entries)
+        reorg_stats = await self._curate_reorganize(entries)
         stats["curated"] = reorg_stats.get("curated", 0)
         stats["deleted"] = reorg_stats.get("deleted", 0)
         stats["merged"] = reorg_stats.get("merged", 0)
@@ -407,7 +407,7 @@ class MemoryCurator:
 
         # Step 2: Extract notes with aux model
         if entries:
-            extract_stats = self._curate_extract_notes(entries)
+            extract_stats = await self._curate_extract_notes(entries)
             stats["notes_extracted"] = extract_stats.get("notes_extracted", 0)
 
         self._stats["total_curated"] += stats["curated"]
@@ -416,7 +416,7 @@ class MemoryCurator:
         self._stats["total_notes_extracted"] += stats["notes_extracted"]
         return stats
 
-    def _curate_reorganize(self, entries: list[dict]) -> dict:
+    async def _curate_reorganize(self, entries: list[dict]) -> dict:
         """Reorganize memories: deduplicate, merge, retag. Uses main model."""
         model = _get_model("main")
         if not model:
@@ -429,7 +429,7 @@ class MemoryCurator:
             formatted = self._format_memories(batch)
 
             try:
-                raw = _llm_call(CURATE_PROMPT, formatted, model, max_tokens=4000)
+                raw = await _llm_call(CURATE_PROMPT, formatted, model, max_tokens=4000)
                 result = _parse_json(raw)
                 if not isinstance(result, dict):
                     continue
@@ -442,7 +442,7 @@ class MemoryCurator:
 
         return stats
 
-    def _curate_extract_notes(self, entries: list[dict]) -> dict:
+    async def _curate_extract_notes(self, entries: list[dict]) -> dict:
         """Extract reusable knowledge into notes. Uses aux model."""
         model = _get_model("aux")
         if not model:
@@ -468,7 +468,7 @@ class MemoryCurator:
                 )
 
             try:
-                raw = _llm_call(
+                raw = await _llm_call(
                     EXTRACT_NOTES_PROMPT + tag_hint,
                     formatted,
                     model,
@@ -614,7 +614,7 @@ class MemoryCurator:
         )
 
 
-def run_curator(
+async def run_curator(
     note_store: NoteStore,
     archival_memory,
     message_history,
@@ -625,4 +625,4 @@ def run_curator(
     if not force and not curator.should_run():
         logger.info("Curator: skipping, last run too recent")
         return {"skipped": True}
-    return curator.run()
+    return await curator.run()
