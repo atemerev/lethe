@@ -81,6 +81,40 @@ def _render_frontmatter(meta: dict) -> str:
     return "\n".join(lines)
 
 
+def normalize_tags(tags: list[str], existing_tags: set[str]) -> list[str]:
+    """Normalize LLM-suggested tags against existing vocabulary.
+
+    Handles common inconsistencies: plurals, case, hyphens vs underscores.
+    If an existing tag is close enough, use it instead. All tags are lowercased.
+    """
+    normalized = []
+    seen = set()
+    for tag in tags:
+        tag = tag.lower().strip()
+        if not tag or tag in seen:
+            continue
+        if tag in existing_tags:
+            normalized.append(tag)
+            seen.add(tag)
+            continue
+        if tag.endswith("s") and tag[:-1] in existing_tags:
+            normalized.append(tag[:-1])
+            seen.add(tag[:-1])
+            continue
+        if not tag.endswith("s") and tag + "s" in existing_tags:
+            normalized.append(tag + "s")
+            seen.add(tag + "s")
+            continue
+        swapped = tag.replace("-", "_") if "-" in tag else tag.replace("_", "-")
+        if swapped in existing_tags:
+            normalized.append(swapped)
+            seen.add(swapped)
+            continue
+        normalized.append(tag)
+        seen.add(tag)
+    return normalized
+
+
 class NoteStore:
     """Persistent notes with vector + FTS search via lancedb.
 

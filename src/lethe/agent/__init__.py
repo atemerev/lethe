@@ -13,7 +13,7 @@ from typing import Callable, Optional, Any
 from lethe.config import Settings, get_settings
 from lethe.memory import MemoryStore, AsyncLLMClient, LLMConfig, Hippocampus
 from lethe.memory.notes import NoteStore
-from lethe.memory.organizer import organize as organize_memories
+from lethe.memory.curator import run_curator
 from lethe.prompts import load_prompt_template
 from lethe.tools import get_core_tools, get_all_tools, function_to_schema, set_note_store, set_llm_client
 
@@ -115,13 +115,13 @@ class Agent:
         if self._initialized:
             return
         await self._load_message_history()
-        # Organize archival memory → notes on every startup
+        # Run memory curator (harvest + curate) on startup
         try:
-            stats = organize_memories(self.notes, self.memory.archival)
-            if stats["processed"] > 0:
-                logger.info(f"Memory organizer: {stats}")
+            stats = run_curator(self.notes, self.memory.archival, self.memory.messages, force=True)
+            if not stats.get("skipped"):
+                logger.info(f"Memory curator: {stats}")
         except Exception as e:
-            logger.error(f"Memory organizer failed (non-fatal): {e}")
+            logger.error(f"Memory curator failed (non-fatal): {e}")
         self._initialized = True
     
     async def _load_message_history(self):
@@ -785,7 +785,7 @@ class Agent:
                 return
 
             # Normalize tags
-            from lethe.memory.organizer import _normalize_tags
+            from lethe.memory.notes import normalize_tags as _normalize_tags
             tags = _normalize_tags(tags, set(existing_tags))
 
             filepath = self.notes.create(title, content, tags)
