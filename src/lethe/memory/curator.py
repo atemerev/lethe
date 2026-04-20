@@ -448,9 +448,10 @@ class MemoryCurator:
         if not model:
             return {"notes_extracted": 0}
 
-        # Collect existing tags for consistency
+        # Collect existing notes for dedup + tags for consistency
+        existing_notes = self.notes.list_notes()
         existing_tags = set()
-        for note in self.notes.list_notes():
+        for note in existing_notes:
             for tag in note.get("tags", []):
                 existing_tags.add(tag.lower().strip())
 
@@ -460,12 +461,22 @@ class MemoryCurator:
             batch = entries[batch_start:batch_start + CURATE_BATCH_SIZE]
             formatted = self._format_memories(batch)
 
-            tag_hint = ""
+            # Build context about existing notes so LLM avoids duplicates
+            context_parts = []
             if existing_tags:
-                tag_hint = (
-                    f"\n\nExisting note tags (reuse when applicable): "
+                context_parts.append(
+                    f"Existing note tags (reuse when applicable): "
                     f"{', '.join(sorted(existing_tags))}"
                 )
+            if existing_notes:
+                note_list = "\n".join(
+                    f"- \"{n.get('title', '?')}\" (tags: {n.get('tags', [])})"
+                    for n in existing_notes
+                )
+                context_parts.append(
+                    f"Existing notes (DO NOT create duplicates of these):\n{note_list}"
+                )
+            tag_hint = "\n\n" + "\n\n".join(context_parts) if context_parts else ""
 
             try:
                 raw = await _llm_call(
@@ -495,6 +506,7 @@ class MemoryCurator:
                         logger.info("Curator: created note '%s' -> %s", title, filepath)
                         stats["notes_extracted"] += 1
                         existing_tags.update(tags)
+                        existing_notes.append({"title": title, "tags": tags})
                     except Exception as e:
                         logger.error("Curator: failed to create note '%s': %s", title, e)
                         continue
