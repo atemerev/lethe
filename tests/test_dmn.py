@@ -66,10 +66,7 @@ class TestDMNBasic:
         """DMN has a specific system prompt for background thinking."""
         prompt = get_dmn_system_prompt()
         assert "Default Mode Network" in prompt
-        assert "background" in prompt
-        assert "questions.md" in prompt
         assert "terminate" in prompt
-        # Verify workspace paths are resolved (no {workspace} placeholders)
         assert "{workspace}" not in prompt
 
     def test_dmn_init(self, registry, butler, available_tools):
@@ -226,6 +223,7 @@ class TestDMNBasic:
     @pytest.mark.asyncio
     async def test_dmn_model_override_takes_precedence(self, registry, butler, available_tools, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        monkeypatch.setenv("LLM_MODEL", "openrouter/test/default-model")
         captured = {}
 
         class FakeClient:

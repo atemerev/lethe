@@ -224,12 +224,13 @@ def test_llm_config_accepts_openai_oauth_without_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
 
-    config = LLMConfig(provider="openai")
+    config = LLMConfig(provider="openai", model="gpt-5")
     assert config.provider == "openai"
 
 
 def test_llm_config_auto_detects_openai_oauth_provider(monkeypatch):
     monkeypatch.setenv("OPENAI_AUTH_TOKEN", "test-openai-oauth-token")
+    monkeypatch.setenv("LLM_MODEL", "gpt-5")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

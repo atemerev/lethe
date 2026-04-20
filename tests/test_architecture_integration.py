@@ -637,20 +637,16 @@ async def test_view_image_tool_registered_and_available_to_cortex(monkeypatch):
          patch("lethe.agent.MemoryStore", return_value=DummyMemory()), \
          patch("lethe.agent.NoteStore", return_value=DummyNoteStore()):
         agent = Agent()
-        assert "view_image" in agent.llm._tools
-        assert "web_search" in agent.llm._tools
-        assert "browser_open" in agent.llm._tools
-        assert "browser_snapshot" in agent.llm._tools
-        assert "browser_click" in agent.llm._tools
-        assert "browser_fill" in agent.llm._tools
+        # Before actor system setup, all tools are registered
+        assert "bash" in agent.llm._tools
         actor_system = ActorSystem(agent)
         await actor_system.setup()
-    assert "view_image" in agent.llm._tools  # Kept on cortex in hybrid mode.
-    assert "web_search" in agent.llm._tools
-    assert "browser_open" in agent.llm._tools
-    assert "browser_snapshot" in agent.llm._tools
-    assert "browser_click" in agent.llm._tools
-    assert "browser_fill" in agent.llm._tools
+    # After setup, cortex keeps only CORTEX_TOOL_NAMES; browser tools are extended
+    assert "bash" in agent.llm._tools
+    assert "read_file" in agent.llm._tools
+    assert "spawn_actor" in agent.llm._tools
+    # Browser tools stripped to extended (available via request_tool)
+    assert "browser_open" not in agent.llm._tools
 
 
 def test_extract_anthropic_unified_ratelimit_headers():

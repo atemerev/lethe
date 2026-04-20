@@ -109,7 +109,7 @@ class TestHippocampus:
         
         assert "user question" in result
         assert "context info" in result
-        assert "<associative_memory_recall>" in result
+        assert "<associative_memory_recall" in result
     
     @pytest.mark.asyncio
     async def test_augment_message_unchanged_when_no_recall(self, hippocampus, memory_store):
@@ -162,20 +162,22 @@ class TestHippocampus:
     
     @pytest.mark.asyncio
     async def test_summarizer_called_when_provided(self, memory_store):
-        """Should call summarizer when provided."""
+        """Should call summarizer when recall exceeds SUMMARIZE_THRESHOLD."""
         mock_summarizer = AsyncMock(return_value="Summarized content")
         hippo = Hippocampus(memory_store, summarizer=mock_summarizer, enabled=True)
-        
+
+        # Recall must exceed 2000 chars to trigger summarization
+        long_text = "x" * 2500
         memory_store.archival.search.return_value = [
-            {"text": "long memory content", "score": 0.9, "created_at": "2024-01-01"}
+            {"text": long_text, "score": 0.9, "created_at": "2024-01-01"}
         ]
         memory_store.messages.search.return_value = []
-        
+
         result = await hippo.recall("test query")
-        
+
         mock_summarizer.assert_called_once()
         assert "Summarized content" in result
-        assert 'summarized="true"' in result
+        assert 'reviewed="true"' in result
 
 
 if __name__ == "__main__":
