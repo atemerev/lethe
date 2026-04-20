@@ -19,16 +19,23 @@ Most memories should NOT become notes. Only extract when the memory
 contains crystallized, reusable knowledge that would be useful as
 standalone reference material.
 
-## Quality bar — do NOT create notes for:
+## Quality bar — be VERY selective. Most batches should return [].
 
-- Trivial or obvious facts (e.g. "server runs on port 3000")
-- Ephemeral configuration that will change soon
-- Project-specific minutiae that only matter during active development
-- Anything that can be found in 5 seconds by reading the code or config
-- Content that substantially overlaps an existing note (check the list!)
+Do NOT create notes for:
+- Import paths, function signatures, argument orders — that's in the code
+- API endpoints, port numbers, config values — that's in config files
+- Project file structure or "what files exist" — use ls/find
+- How a specific library works — read its docs
+- Anything about a single project's internals unless it's a hard-won
+  non-obvious insight that took real debugging to discover
+- Video/recording workflows unless they involve surprising tool behavior
+- Content that substantially overlaps an existing note (CHECK THE LIST)
+- Multiple notes about the same project — consolidate into one if needed
 
-A note earns its place by saving real time in a future conversation.
-When in doubt, don't extract — the memory is still searchable.
+A note earns its place ONLY if it would save 10+ minutes in a future
+conversation. "I could grep for this" means it's not worth a note.
+
+Aim for 0-2 notes per batch. If you're creating 3+, your bar is too low.
 
 ## Output
 

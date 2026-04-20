@@ -96,10 +96,10 @@ EXTRACT_NOTES_PROMPT = load_prompt_template(
         "extracting into permanent notes.\n\n"
         "Notes are for: facts, procedures, contacts, skills, conventions —\n"
         "knowledge that is useful independent of when it was learned.\n\n"
-        "Most memories should NOT become notes. Only extract when the memory\n"
-        "contains crystallized, reusable knowledge.\n"
-        "Do NOT create notes for trivial facts, ephemeral config, or content\n"
-        "that overlaps existing notes. When in doubt, don't extract.\n\n"
+        "Most memories should NOT become notes. Be VERY selective — most batches\n"
+        "should return []. Only extract hard-won non-obvious insights that would\n"
+        "save 10+ minutes in a future conversation. No import paths, no config\n"
+        "values, no project file structure — that's in the code.\n\n"
         "Respond with a JSON array. Empty array [] if nothing to extract:\n"
         "```json\n"
         '[\n'
@@ -188,14 +188,16 @@ def _titles_overlap(a: str, b: str) -> bool:
         return True
     if a in b or b in a:
         return True
-    # Word overlap: if 60%+ of words match, consider them duplicates
-    words_a = set(a.split())
-    words_b = set(b.split())
+    # Strip common prefixes/suffixes for comparison
+    # "Coasean Bargain: X" and "Coasean bargain: X" should match
+    words_a = set(a.replace(":", "").replace("-", " ").split())
+    words_b = set(b.replace(":", "").replace("-", " ").split())
     if not words_a or not words_b:
         return False
     overlap = len(words_a & words_b)
     smaller = min(len(words_a), len(words_b))
-    return smaller > 2 and overlap / smaller >= 0.6
+    # 50% word overlap is enough — catches "X project structure" vs "X: project structure"
+    return smaller > 1 and overlap / smaller >= 0.5
 
 
 class MemoryCurator:
