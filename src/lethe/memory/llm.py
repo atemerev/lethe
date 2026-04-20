@@ -923,6 +923,8 @@ class ContextWindow:
         # Clean orphaned tool messages before building
         self._clean_orphaned_tool_messages()
 
+        is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
+
         # Delegate system block assembly to the context assembler
         if self._assembler:
             system_content = self._assembler.build_system_blocks(

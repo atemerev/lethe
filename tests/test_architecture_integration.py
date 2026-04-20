@@ -106,7 +106,7 @@ def test_anthropic_transient_system_context_block_is_uncached(monkeypatch):
     assert isinstance(system_content, list)
     transient = system_content[-1]
     assert "<runtime_context>volatile</runtime_context>" in transient.get("text", "")
-    assert "<runtime_context_block " in transient.get("text", "")
+    assert "<runtime_context_block" in transient.get("text", "")
     assert "cache_control" not in transient
 
 
@@ -608,11 +608,12 @@ async def test_view_image_tool_registered_and_available_to_cortex(monkeypatch):
             self.blocks = DummyBlocks()
             self.messages = DummyMessages()
             self.archival = DummyArchival()
+            self.db = None
         def get_context_for_prompt(self):
             return ""
 
     class DummySettings:
-        llm_model = ""
+        llm_model = "openrouter/test/model"
         llm_model_aux = ""
         llm_api_base = ""
         llm_context_limit = 8000
@@ -626,7 +627,15 @@ async def test_view_image_tool_registered_and_available_to_cortex(monkeypatch):
     from lethe.actor.integration import ActorSystem
     from unittest.mock import patch
 
-    with patch("lethe.agent.get_settings", return_value=DummySettings()), patch("lethe.agent.MemoryStore", return_value=DummyMemory()):
+    class DummyNoteStore:
+        def list_notes(self, tags=None):
+            return []
+        def search(self, query, tags=None, limit=5):
+            return []
+
+    with patch("lethe.agent.get_settings", return_value=DummySettings()), \
+         patch("lethe.agent.MemoryStore", return_value=DummyMemory()), \
+         patch("lethe.agent.NoteStore", return_value=DummyNoteStore()):
         agent = Agent()
         assert "view_image" in agent.llm._tools
         assert "web_search" in agent.llm._tools
