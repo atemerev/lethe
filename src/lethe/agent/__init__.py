@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional, Any
 
 from lethe.config import Settings, get_settings
+from lethe.context import get_assembler, SystemComponents
 from lethe.memory import MemoryStore, AsyncLLMClient, LLMConfig, Hippocampus
 from lethe.memory.notes import NoteStore
 from lethe.memory.curator import run_curator
@@ -57,13 +58,12 @@ class Agent:
             context_limit=self.settings.llm_context_limit,
         )
         
-        # Load system prompt from config
+        # Get model-specific context assembler
+        self.assembler = get_assembler(llm_config.model)
+        logger.info(f"Context assembler: {self.assembler.__class__.__name__} for {llm_config.model}")
+
+        # Build system prompt via assembler
         system_prompt = self._build_system_prompt()
-        
-        # Load model-specific communication rules into system prompt
-        comm_rules = self._load_communication_rules(llm_config.model)
-        if comm_rules:
-            system_prompt += "\n\n" + comm_rules
         
         # Get memory context
         memory_context = self.memory.get_context_for_prompt()
@@ -79,6 +79,7 @@ class Agent:
             on_message_persist=persist_message,
             usage_scope="cortex",
         )
+        self.llm.context._assembler = self.assembler
         
         # Initialize hippocampus with LLM functions (analyzer + summarizer + salience use aux model)
         hippocampus_enabled = os.environ.get("HIPPOCAMPUS_ENABLED", "true").lower() == "true"
@@ -99,9 +100,8 @@ class Agent:
         set_llm_client(self.llm)
         self.llm.add_tools(get_core_tools())
         
-        # For non-Anthropic models: embed tool reference in system prompt
-        # (Kimi K2.5 needs tools visible in context text, not just tools parameter)
-        if "claude" not in llm_config.model.lower() and "anthropic" not in llm_config.model.lower():
+        # Embed tool reference in system prompt if assembler says so
+        if self.assembler.should_embed_tool_reference():
             self.llm.context._tool_reference = self.llm.context._build_tool_reference(self.llm.tools)
             logger.info(f"Embedded tool reference in system prompt ({len(self.llm.context._tool_reference)} chars)")
         
@@ -199,69 +199,55 @@ class Agent:
             logger.warning(f"Failed to summarize history: {e}")
             return ""
     
-    def _load_communication_rules(self, model: str) -> str:
-        """Load model-specific communication rules from skills directory."""
-        from pathlib import Path
-        
-        workspace = self.settings.workspace_dir
-        skills_dir = workspace / "skills"
-        
-        # Determine which rules to load based on model name.
-        # Only load model-specific files when that model is actually in use;
-        # unrelated rules (e.g. Kimi's walls-of-text guardrails) actively harm
-        # other models' behavior if loaded indiscriminately.
-        model_lower = model.lower()
-        if "kimi" in model_lower:
-            rules_file = skills_dir / "communication-kimi.md"
-        elif "claude" in model_lower or "anthropic" in model_lower:
-            rules_file = skills_dir / "communication-anthropic.md"
-        elif "gemma" in model_lower:
-            rules_file = skills_dir / "communication-gemma.md"
-        else:
-            rules_file = skills_dir / "communication.md"
-        
-        if rules_file.exists():
-            content = rules_file.read_text().strip()
-            logger.info(f"Loaded communication rules from {rules_file.name}")
-            return content
-        
-        logger.debug("No communication rules found in skills/")
-        return ""
-    
     def _build_system_prompt(self) -> str:
-        """Build system prompt from identity (workspace) + instructions (config).
+        """Build system prompt via the model-specific context assembler.
 
         Identity block (workspace) = persona, user-customizable, survives updates.
         Instructions (config/prompts/) = system behavior, always up to date.
         Tools documentation (config/prompts/) = tool reference, always up to date.
+        Communication rules (workspace/skills/) = model-specific voice/format rules.
         """
-        parts = []
+        from pathlib import Path
 
-        # 1. Identity / persona from workspace (user-customizable)
+        # 1. Identity / persona from workspace
+        identity = ""
         identity_block = self.memory.blocks.get("identity")
         if identity_block:
-            parts.append(identity_block.get("value", ""))
+            identity = identity_block.get("value", "")
         else:
             persona_block = self.memory.blocks.get("persona")
             if persona_block:
-                parts.append(persona_block.get("value", ""))
+                identity = persona_block.get("value", "")
             else:
-                parts.append(load_prompt_template(
+                identity = load_prompt_template(
                     "agent_system_fallback",
                     fallback="You are an AI assistant with persistent memory.",
-                ))
+                )
 
-        # 2. System instructions from config (always current after updates)
+        # 2. System instructions
         instructions = load_prompt_template("agent_instructions")
-        if instructions:
-            parts.append(instructions)
 
-        # 3. Tools documentation from config (always current after updates)
+        # 3. Tools documentation
         tools_doc = load_prompt_template("agent_tools")
-        if tools_doc:
-            parts.append(tools_doc)
 
-        return "\n\n".join(p for p in parts if p.strip())
+        # 4. Communication rules (assembler picks the right file)
+        comm_rules = ""
+        rules_filename = self.assembler.get_comm_rules_filename()
+        if rules_filename:
+            skills_dir = self.settings.workspace_dir / "skills"
+            rules_file = skills_dir / rules_filename
+            if rules_file.exists():
+                comm_rules = rules_file.read_text().strip()
+                logger.info(f"Loaded communication rules from {rules_file.name}")
+
+        # Assemble via model-specific assembler
+        components = SystemComponents(
+            identity=identity,
+            instructions=instructions,
+            tools_doc=tools_doc,
+            comm_rules=comm_rules,
+        )
+        return self.assembler.build_system_prompt(components)
     
     async def _summarize_memories(self, prompt: str) -> str:
         """Summarize memories using LLM (for hippocampus)."""

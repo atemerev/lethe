@@ -178,9 +178,13 @@ class ActorSystem:
         
         # Rebuild tool reference in system prompt (was built before stripping)
         if hasattr(self.agent, 'llm'):
-            self.agent.llm.context._tool_reference = self.agent.llm.context._build_tool_reference(self.agent.llm.tools)
+            assembler = getattr(self.agent, 'assembler', None)
+            if assembler and assembler.should_embed_tool_reference():
+                self.agent.llm.context._tool_reference = self.agent.llm.context._build_tool_reference(self.agent.llm.tools)
+                logger.info(f"Rebuilt tool reference ({len(self.agent.llm.context._tool_reference)} chars)")
+            else:
+                self.agent.llm.context._tool_reference = ""
             self.agent.llm._update_tool_budget()
-            logger.info(f"Rebuilt tool reference ({len(self.agent.llm.context._tool_reference)} chars)")
         
         # Initialize Brainstem FIRST. It supervises boot and runtime health.
         self.brainstem = Brainstem(
@@ -250,7 +254,9 @@ class ActorSystem:
             system_prompt=actor.build_system_prompt(),
             usage_scope=f"actor:{actor.config.name}",
         )
-        
+        if hasattr(self.agent, 'assembler'):
+            client.context._assembler = self.agent.assembler
+
         return client
 
     def _start_actor(self, actor: Actor):

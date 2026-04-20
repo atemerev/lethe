@@ -315,6 +315,7 @@ class ContextWindow:
     memory_context_updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     transient_system_context: str = ""  # Per-turn synthetic context (e.g. recall), injected in system role
     _summarizer: Optional[Callable] = None  # Set by LLMClient
+    _assembler: Optional[Any] = None  # ContextAssembler, set by Agent
     _tool_reference: str = ""  # Compact tool list for system prompt (non-Anthropic models)
     _tool_schemas_text: str = ""  # Serialized tool schemas for token budget accounting
     _last_prompt_tokens: int = 0  # Actual prompt tokens from last API response (for calibration)
@@ -921,78 +922,38 @@ class ContextWindow:
         """Build messages array for API call with prompt caching."""
         # Clean orphaned tool messages before building
         self._clean_orphaned_tool_messages()
-        
-        # Build system prompt blocks with explicit markup.
-        # Anthropic: separate blocks for cache-friendly behavior
-        #   1. Identity/system (rarely changes) — cached 1h
-        #   2. Memory context (changes on memory updates) — cached 5m
-        #   3. Tool reference (non-Anthropic models only)
-        #   4. Summary + runtime context (volatile) — uncached
-        # Cache order: tools → system blocks (prefix-matched)
-        # Each cache_control creates a breakpoint: content before it is cached independently
-        
-        is_anthropic = "claude" in self.config.model.lower() or "anthropic" in self.config.model.lower()
 
-        identity_block = self._render_system_block(
-            "identity_block",
-            self.system_prompt,
-            self.system_prompt_loaded_at,
-        )
-        memory_block = self._render_system_block(
-            "memory_context_block",
-            self.memory_context,
-            self.memory_context_updated_at,
-            {"kind": "core_memory"},
-        ) if self.memory_context else ""
-        summary_block = self._render_system_block(
-            "conversation_summary_block",
-            self.summary,
-            datetime.now(timezone.utc),
-        ) if self.summary else ""
-        runtime_block = self._render_system_block(
-            "runtime_context_block",
-            self.transient_system_context,
-            datetime.now(timezone.utc),
-            {"source": "runtime"},
-        ) if self.transient_system_context else ""
-
-        # Build structured system content blocks (both Anthropic and non-Anthropic).
-        # LiteLLM translates cache_control per provider; Anthropic gets longer TTL
-        # on identity since it rarely changes.
-        system_content = []
-
-        # Block 1: identity/system instructions (stable, cached)
-        identity_cache = {"type": "ephemeral", "ttl": "1h"} if is_anthropic else {"type": "ephemeral"}
-        system_content.append({
-            "type": "text",
-            "text": identity_block,
-            "cache_control": identity_cache,
-        })
-
-        # Block 2: memory context + tool reference (volatile, cached)
-        # Non-Anthropic models benefit from tool list in system prompt text;
-        # Anthropic models get tools via the separate tools parameter.
-        if memory_block:
-            block_text = memory_block
-            if not is_anthropic and self._tool_reference:
-                block_text += "\n\n" + self._render_system_block(
-                    "available_tools_block",
-                    self._tool_reference,
-                    self.system_prompt_loaded_at,
-                )
+        # Delegate system block assembly to the context assembler
+        if self._assembler:
+            system_content = self._assembler.build_system_blocks(
+                system_prompt=self.system_prompt,
+                memory_context=self.memory_context,
+                summary=self.summary,
+                transient_context=self.transient_system_context,
+                tool_reference=self._tool_reference,
+            )
+        else:
+            # Fallback: inline assembly (no assembler set)
+            from lethe.context import _render_block
+            system_content = []
             system_content.append({
                 "type": "text",
-                "text": block_text,
+                "text": _render_block("identity_block", self.system_prompt),
                 "cache_control": {"type": "ephemeral"},
             })
-
-        # Block 3: conversation summary (uncached, changes on compaction)
-        if summary_block:
-            system_content.append({"type": "text", "text": summary_block})
-
-        # Block 4: runtime/transient context (uncached, per-turn)
-        if runtime_block:
-            system_content.append({"type": "text", "text": runtime_block})
+            if self.memory_context:
+                mem_text = _render_block("memory_context_block", self.memory_context)
+                if self._tool_reference:
+                    mem_text += "\n\n" + _render_block("available_tools_block", self._tool_reference)
+                system_content.append({
+                    "type": "text",
+                    "text": mem_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            if self.summary:
+                system_content.append({"type": "text", "text": _render_block("conversation_summary_block", self.summary)})
+            if self.transient_system_context:
+                system_content.append({"type": "text", "text": _render_block("runtime_context_block", self.transient_system_context)})
 
         messages = [{"role": "system", "content": system_content}]
 
