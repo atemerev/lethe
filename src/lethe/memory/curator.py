@@ -262,10 +262,7 @@ class MemoryCurator:
                 msgs.append(m)
 
         if not msgs:
-            logger.info("Curator: no new messages to harvest")
-            if all_msgs:
-                self._last_harvest_ts = all_msgs[-1]["created_at"]
-                self._save_state()
+            logger.info("Curator: no substantive messages to harvest")
             return {"harvested": 0}
 
         # Collect existing tags for normalization
