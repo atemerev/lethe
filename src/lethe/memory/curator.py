@@ -128,11 +128,14 @@ def _llm_call(prompt: str, user_content: str, model: str, max_tokens: int = 4000
     if api_base:
         kwargs["api_base"] = api_base
 
-    # Anthropic subscription auth
+    # Anthropic subscription auth (OAuth Bearer token instead of x-api-key)
     auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
     if auth_token and "claude" in model.lower():
         kwargs["api_key"] = "placeholder"
-        kwargs["extra_headers"] = {"Authorization": f"Bearer {auth_token}"}
+        kwargs["extra_headers"] = {
+            "Authorization": f"Bearer {auth_token}",
+            "x-api-key": "",
+        }
 
     response = completion(**kwargs)
     return response.choices[0].message.content or ""
@@ -323,7 +326,7 @@ class MemoryCurator:
                 tags.add(t.lower().strip())
         try:
             table = self.archival._get_table()
-            for row in table.to_pandas().to_dict("records"):
+            for row in table.to_arrow().to_pylist():
                 raw = row.get("tags", "[]")
                 if isinstance(raw, str):
                     try:
@@ -358,7 +361,7 @@ class MemoryCurator:
         # Get all archival entries
         try:
             table = self.archival._get_table()
-            all_entries = table.to_pandas().to_dict("records")
+            all_entries = table.to_arrow().to_pylist()
         except Exception as e:
             logger.error("Curator: failed to read archival: %s", e)
             return stats
@@ -380,7 +383,7 @@ class MemoryCurator:
         try:
             table = self.archival._get_table()
             entries = [
-                e for e in table.to_pandas().to_dict("records")
+                e for e in table.to_arrow().to_pylist()
                 if e.get("id") != "_init_"
             ]
         except Exception:
