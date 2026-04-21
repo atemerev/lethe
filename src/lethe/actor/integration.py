@@ -64,7 +64,6 @@ class ActorSystem:
         self.principal: Optional[Actor] = None
         self.brainstem: Optional[Brainstem] = None
         self.dmn: Optional[DefaultModeNetwork] = None
-        self.amygdala = None  # Deprecated: salience tagging merged into hippocampus
         self._curator_enabled = True
         self._background_tasks: Dict[str, asyncio.Task] = {}
         self._principal_monitor_task: Optional[asyncio.Task] = None
@@ -171,7 +170,7 @@ class ActorSystem:
         def spawn_and_start(*args, **kwargs):
             actor = original_spawn(*args, **kwargs)
             # Auto-start non-principal actors, but NOT background supervisors.
-            if not actor.is_principal and actor.config.name not in {"brainstem", "dmn", "amygdala"}:
+            if not actor.is_principal and actor.config.name not in {"brainstem", "dmn"}:
                 self._start_actor(actor)
             return actor
         self.registry.spawn = spawn_and_start
@@ -205,16 +204,12 @@ class ActorSystem:
             principal_context_provider=self._get_principal_context,
             model_override=self.settings.llm_model_dmn,
         )
-        # Amygdala removed: salience tagging now runs per-message in hippocampus
-        
         tool_count = len(self.agent.llm._tools)
         available_count = len(self._available_tools)
-        amygdala_state = "merged into hippocampus"
         logger.info(
             f"Actor system initialized. Principal: {self.principal.id}, "
             f"cortex tools: {tool_count}, subagent tools available: {available_count}, "
-            f"Brainstem online, DMN ready, Amygdala {amygdala_state}, "
-            f"Memory curator active"
+            "Brainstem online, DMN ready, Memory curator active"
         )
         self._start_principal_monitor()
 
@@ -354,7 +349,7 @@ class ActorSystem:
         if (
             channel == "task_update"
             and kind in _NOTIFY_KINDS
-            and sender_name not in {"brainstem", "dmn", "amygdala"}
+            and sender_name not in {"brainstem", "dmn"}
         ):
             if kind in _TERMINAL_KINDS:
                 synthetic = (
@@ -380,7 +375,7 @@ class ActorSystem:
         # System actors never bypass cortex: relay decision is always cortex-owned.
         if metadata.get("channel") != "user_notify":
             return
-        if sender_name not in {"brainstem", "dmn", "amygdala"}:
+        if sender_name not in {"brainstem", "dmn"}:
             return
         if self.principal:
             self.registry.emit_event(
@@ -489,7 +484,7 @@ class ActorSystem:
     async def background_round(self) -> Optional[str]:
         """Run background cognition rounds (DMN + Consolidation).
 
-        Amygdala salience tagging now runs per-message in hippocampus.
+        Salience tagging now runs per-message in hippocampus.
         """
         dmn_result = await self.dmn_round()
         await self.curator_round()  # self-gating via 6h cadence
@@ -533,7 +528,6 @@ class ActorSystem:
             if e.event_type in {"actor_spawned", "actor_terminated"}
         ][-30:]
         dmn_status = self.dmn.status if self.dmn else {}
-        amygdala_status = {}  # Deprecated: merged into hippocampus
         brainstem_status = self.brainstem.status if self.brainstem else {}
         actor_last_event_at: dict[str, str] = {}
         for e in all_events:
@@ -581,11 +575,10 @@ class ActorSystem:
             ],
             "brainstem": brainstem_status,
             "dmn": dmn_status,
-            "amygdala": amygdala_status,
         }
 
     def _get_recent_user_signals(self) -> str:
-        """Build compact user signal context for Amygdala rounds."""
+        """Build compact recent user signal context for background decisions."""
         try:
             recent = self.agent.memory.messages.get_recent(limit=14) or []
             user_messages = [m for m in recent if m.get("role") == "user"]

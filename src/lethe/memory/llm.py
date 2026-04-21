@@ -1240,9 +1240,21 @@ class AsyncLLMClient:
 
         # Set up summarizer callback
         self.context._summarizer = self._summarize_messages_sync
-        
+
         # Auth mode: OAuth (subscription) takes priority over API key
         self._oauth: Optional[Any] = None
+        self._oauth_provider: str = ""
+        # User override from /model command: True=force OAuth, False=force API key, None=auto
+        self._force_oauth: Optional[bool] = None
+        self.refresh_auth_client()
+
+        logger.info(f"AsyncLLMClient initialized with model {self.config.model}")
+
+    def refresh_auth_client(self):
+        """Rebuild provider-specific auth state after runtime model/provider changes."""
+        self._oauth = None
+        self._oauth_provider = ""
+
         if self.config.provider == "anthropic" and is_oauth_available():
             self._oauth = AnthropicOAuth()
             has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -1261,13 +1273,9 @@ class AsyncLLMClient:
             logger.info("Auth: using Anthropic API key")
         elif self.config.provider == "openai":
             logger.info("Auth: using OpenAI API key")
-        
-        # Remember which provider the OAuth client was initialized for
-        self._oauth_provider: str = self.config.provider if self._oauth else ""
-        # User override from /model command: True=force OAuth, False=force API key, None=auto
-        self._force_oauth: Optional[bool] = None
 
-        logger.info(f"AsyncLLMClient initialized with model {self.config.model}")
+        if self._oauth:
+            self._oauth_provider = self.config.provider
 
     def _should_use_oauth(self, model: str) -> bool:
         """Check if the given model should route through the OAuth client.

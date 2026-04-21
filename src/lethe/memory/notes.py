@@ -135,7 +135,7 @@ class NoteStore:
 
     def _ensure_table(self):
         """Create the notes table if it doesn't exist."""
-        if TABLE_NAME not in self.db.table_names():
+        if TABLE_NAME not in self.db.list_tables():
             init_vector = [0.0] * EMBEDDING_DIM
             self.db.create_table(
                 TABLE_NAME,
@@ -149,6 +149,7 @@ class NoteStore:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }],
+                exist_ok=True,
             )
             table = self.db.open_table(TABLE_NAME)
             try:

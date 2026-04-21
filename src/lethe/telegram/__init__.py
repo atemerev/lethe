@@ -92,15 +92,14 @@ class TelegramBot:
                 from lethe.actor import ActorState
                 actors = self.actor_system.registry.all_actors
                 
-                # Separate system actors (cortex, brainstem, dmn, amygdala) from user-spawned
-                system_names = {"cortex", "brainstem", "dmn", "amygdala"}
+                # Separate system actors (cortex, brainstem, dmn) from user-spawned
+                system_names = {"cortex", "brainstem", "dmn"}
                 active = [a for a in actors if a.state in (ActorState.RUNNING, ActorState.INITIALIZING, ActorState.WAITING)]
                 terminated = [a for a in actors if a.state == ActorState.TERMINATED and a.name not in system_names]
                 
                 # DMN status: sleeping (between rounds) or running
                 dmn_active = any(a.name == "dmn" and a.state == ActorState.RUNNING for a in actors)
                 dmn_status = "🟢 running" if dmn_active else "💤 sleeping (wakes on heartbeat)"
-                amygdala_status = "🔀 merged into hippocampus (per-message)"
                 
                 # Subagents (non-system)
                 subagents = [a for a in active if a.name not in system_names]
@@ -109,7 +108,6 @@ class TelegramBot:
                 lines.append(f"\nCortex: 🟢 active")
                 lines.append(f"Brainstem: {'🟢 online' if brainstem_active else '🟡 starting'}")
                 lines.append(f"DMN: {dmn_status}")
-                lines.append(f"Amygdala: {amygdala_status}")
                 
                 if subagents:
                     lines.append(f"\nSubagents ({len(subagents)} active):")
@@ -407,30 +405,29 @@ class TelegramBot:
             return
 
         old_model = self.agent.llm.config.model if kind == "main" else self.agent.llm.config.model_aux
-
-        # Switch provider if model belongs to a different one
-        new_provider = provider_for_model(model_id)
-        if new_provider and new_provider != self.agent.llm.config.provider:
-            old_provider = self.agent.llm.config.provider
-            self.agent.llm.config.provider = new_provider
-            logger.info(f"Provider changed: {old_provider} → {new_provider}")
-
-        # Enable/disable OAuth based on auth type selection
-        if auth == "sub":
-            # User explicitly chose subscription — ensure OAuth is active
-            self.agent.llm._force_oauth = True
-            logger.info(f"OAuth forced ON for {new_provider or self.agent.llm.config.provider}")
-        else:
-            # User chose API key — disable OAuth for this provider
-            self.agent.llm._force_oauth = False
-            logger.info(f"OAuth forced OFF, using API key")
+        new_provider = provider_for_model(model_id) or self.agent.llm.config.provider
+        force_oauth = True if auth == "sub" else False
 
         if kind == "main":
-            self.agent.llm.config.model = model_id
+            changed = await self.agent.reconfigure_models(
+                provider=new_provider,
+                model=model_id,
+                force_oauth=force_oauth,
+            )
         else:
-            self.agent.llm.config.model_aux = model_id
+            changed = await self.agent.reconfigure_models(
+                provider=new_provider,
+                model_aux=model_id,
+                force_oauth=force_oauth,
+            )
 
         label = "Main model" if kind == "main" else "Aux model"
+        if "provider" in changed:
+            logger.info(
+                "Provider changed: %s → %s",
+                changed["provider"]["old"],
+                changed["provider"]["new"],
+            )
         logger.info(f"{label} changed: {old_model} → {model_id}")
 
         await callback.answer(f"Switched to {model_id}")

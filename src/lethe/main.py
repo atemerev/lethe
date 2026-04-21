@@ -72,7 +72,7 @@ async def run():
         from lethe.actor.integration import ActorSystem
         actor_system = ActorSystem(agent, settings=settings)
         await actor_system.setup()
-        console.print("[cyan]Actor system[/cyan] initialized (brainstem + cortex + DMN + Amygdala)")
+        console.print("[cyan]Actor system[/cyan] initialized (brainstem + cortex + DMN)")
     
     stats = agent.get_stats()
     console.print(f"[green]Agent ready[/green] - {stats['memory_blocks']} blocks, {stats['archival_memories']} memories")
@@ -125,6 +125,11 @@ async def run():
     conversation_manager = ConversationManager(debounce_seconds=settings.debounce_seconds)
     logger.info(f"Conversation manager initialized (debounce: {settings.debounce_seconds}s)")
     heartbeat: Optional[Heartbeat] = None
+    fallback_chat_id: Optional[int] = settings.allowed_user_ids[0] if settings.allowed_user_ids else None
+    last_user_chat_id: Optional[int] = None
+
+    def get_target_chat_id() -> Optional[int]:
+        return last_user_chat_id or fallback_chat_id
 
     def mark_user_visible_activity(reason: str) -> None:
         """Reset synthetic idle state after real user-visible activity."""
@@ -138,8 +143,10 @@ async def run():
     async def process_message(chat_id: int, user_id: int, message: str, metadata: dict, interrupt_check):
         """Process a message from Telegram."""
         from lethe.tools import set_telegram_context, set_last_message_id, clear_telegram_context
+        nonlocal last_user_chat_id
         
         logger.info(f"Processing message from {user_id}: {message[:50]}...")
+        last_user_chat_id = chat_id
         mark_user_visible_activity("incoming user message")
         
         # Set telegram context for tools (reactions, sending messages)
@@ -205,10 +212,6 @@ async def run():
     heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", 60 * 60))  # Default 1 hour
     heartbeat_enabled = os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true"
     
-    # Get the first allowed user ID for heartbeat messages
-    allowed_ids = settings.telegram_allowed_user_ids
-    heartbeat_chat_id = int(allowed_ids.split(",")[0]) if allowed_ids else None
-    
     async def heartbeat_process(message: str) -> str:
         """Process heartbeat — triggers background rounds if actor system is active."""
         if actor_system:
@@ -255,13 +258,16 @@ async def run():
 
     async def heartbeat_send(response: str):
         """Send heartbeat response to user (rate-limited)."""
-        if heartbeat_chat_id:
-            if not _proactive_allowed():
-                logger.info("Heartbeat message suppressed by rate limiter")
-                return
-            await telegram_bot.send_message(heartbeat_chat_id, response)
-            _proactive_record()
-            mark_user_visible_activity("proactive outbound message")
+        target_chat_id = get_target_chat_id()
+        if not target_chat_id:
+            logger.info("Heartbeat message suppressed: no active chat target")
+            return
+        if not _proactive_allowed():
+            logger.info("Heartbeat message suppressed by rate limiter")
+            return
+        await telegram_bot.send_message(target_chat_id, response)
+        _proactive_record()
+        mark_user_visible_activity("proactive outbound message")
     
     async def heartbeat_summarize(prompt: str) -> str:
         """Summarize/evaluate heartbeat response before sending (uses aux model)."""
@@ -367,7 +373,7 @@ async def run():
         get_reminders_callback=get_active_reminders,
         idle_callback=heartbeat_idle,
         interval=heartbeat_interval,
-        enabled=heartbeat_enabled and heartbeat_chat_id is not None,
+        enabled=heartbeat_enabled,
     )
     
     # Set heartbeat trigger on telegram bot for /heartbeat command
@@ -383,22 +389,23 @@ async def run():
         Used when a subagent finishes so the cortex can process the result
         and respond to the user proactively.
         """
-        if not heartbeat_chat_id:
+        target_chat_id = get_target_chat_id()
+        if not target_chat_id:
             logger.warning("run_cortex_turn: no chat_id configured")
             return
         # No rate limiting — subagent results are responses to user-initiated tasks.
         from lethe.tools import set_telegram_context, clear_telegram_context
-        set_telegram_context(telegram_bot.bot, heartbeat_chat_id)
+        set_telegram_context(telegram_bot.bot, target_chat_id)
         try:
-            await telegram_bot.start_typing(heartbeat_chat_id)
+            await telegram_bot.start_typing(target_chat_id)
             response = await agent.chat(synthetic_message)
             if response and response.strip():
-                await telegram_bot.send_message(heartbeat_chat_id, response)
+                await telegram_bot.send_message(target_chat_id, response)
                 mark_user_visible_activity("cortex subagent followup")
         except Exception as e:
             logger.exception("run_cortex_turn failed: %s", e)
         finally:
-            await telegram_bot.stop_typing(heartbeat_chat_id)
+            await telegram_bot.stop_typing(target_chat_id)
             clear_telegram_context()
 
     # Wire DMN callbacks (send_to_user, get_reminders)
@@ -519,6 +526,10 @@ async def run_api(port: int = 8080):
     console.print(f"Model: {settings.llm_model}")
     console.print(f"Memory: {settings.memory_dir}")
     console.print()
+
+    if not os.environ.get("LETHE_API_TOKEN", "").strip():
+        console.print("[red]LETHE_API_TOKEN must be set in API mode.[/red]")
+        sys.exit(1)
 
     # Initialize agent
     console.print("[dim]Initializing agent...[/dim]")

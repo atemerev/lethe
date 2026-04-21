@@ -128,6 +128,11 @@ class PoolManager:
         self._next_port += 1
         return port
 
+    def _worker_headers(self) -> dict[str, str]:
+        if not self.config.worker_api_token:
+            return {}
+        return {"X-Lethe-Token": self.config.worker_api_token}
+
     async def ensure_pool(self):
         """Ensure we have enough idle containers in the pool."""
         async with self._lock:
@@ -287,6 +292,7 @@ class PoolManager:
                         "username": metadata.get("username", ""),
                         "first_name": metadata.get("first_name", ""),
                     },
+                    headers=self._worker_headers(),
                     timeout=10,
                 )
         except Exception as e:

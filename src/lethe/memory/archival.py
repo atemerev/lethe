@@ -49,7 +49,7 @@ class ArchivalMemory:
     
     def _ensure_table(self):
         """Create table if it doesn't exist."""
-        if self.TABLE_NAME not in self.db.table_names():
+        if self.TABLE_NAME not in self.db.list_tables():
             # Create with initial data (LanceDB requires data for schema inference)
             init_vector = [0.0] * EMBEDDING_DIM
             self.db.create_table(
@@ -62,6 +62,7 @@ class ArchivalMemory:
                     "tags": "[]",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }],
+                exist_ok=True,
             )
             logger.info(f"Created table {self.TABLE_NAME}")
             

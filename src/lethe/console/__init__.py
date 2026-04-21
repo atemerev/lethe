@@ -74,11 +74,9 @@ class ConsoleState:
     # Subsystem monitoring
     actor_system: Dict[str, Any] = field(default_factory=dict)
     dmn: Dict[str, Any] = field(default_factory=dict)
-    amygdala: Dict[str, Any] = field(default_factory=dict)
     hippocampus: Dict[str, Any] = field(default_factory=dict)
     stem: Dict[str, Any] = field(default_factory=dict)
     dmn_context: str = ""
-    amygdala_context: str = ""
     hippocampus_context: str = ""
     stem_context: str = ""
     
@@ -323,17 +321,14 @@ def update_actor_status(status: dict):
     status = status or {}
     stem = status.get("brainstem", {})
     dmn = status.get("dmn", {})
-    amygdala = status.get("amygdala", {})
     if (
         _state.actor_system != status
         or _state.stem != stem
         or _state.dmn != dmn
-        or _state.amygdala != amygdala
     ):
         _state.actor_system = status
         _state.stem = stem
         _state.dmn = dmn
-        _state.amygdala = amygdala
         _state.version += 1
 
 
@@ -359,15 +354,6 @@ def update_hippocampus_context(context: str):
     if _state.hippocampus_context != context:
         _state.hippocampus_context = context
         _state.version += 1
-
-
-def update_amygdala_context(context: str):
-    """Update amygdala context/debug view text."""
-    context = context or ""
-    if _state.amygdala_context != context:
-        _state.amygdala_context = context
-        _state.version += 1
-
 
 
 def update_stem_context(context: str):

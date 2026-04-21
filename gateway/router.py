@@ -23,11 +23,18 @@ MAX_TG_LENGTH = 4000
 class Router:
     """Routes messages between Telegram and Lethe containers via SSE."""
 
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, api_token: str = ""):
         self.bot = bot
+        self._api_token = api_token.strip()
         self._typing_tasks: dict[int, asyncio.Task] = {}
         # Persistent /events SSE connections (container_id -> task)
         self._event_listeners: dict[str, asyncio.Task] = {}
+        self._event_chat_ids: dict[str, int] = {}
+
+    def _worker_headers(self) -> dict[str, str]:
+        if not self._api_token:
+            return {}
+        return {"X-Lethe-Token": self._api_token}
 
     async def forward_message(
         self,
@@ -48,7 +55,7 @@ class Router:
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
-                async with client.stream("POST", url, json=payload) as response:
+                async with client.stream("POST", url, json=payload, headers=self._worker_headers()) as response:
                     if response.status_code != 200:
                         body = await response.aread()
                         logger.error("Container %s returned %d: %s", container.container_name, response.status_code, body[:200])
@@ -235,6 +242,7 @@ class Router:
                     r = await client.get(
                         f"{container.api_url}/file",
                         params={"path": container_path},
+                        headers=self._worker_headers(),
                     )
                     if r.status_code == 200:
                         # Save to temp file and send
@@ -281,27 +289,29 @@ class Router:
 
     def start_event_listener(self, container: ContainerInfo, chat_id: int):
         """Start listening for proactive events from a container's /events endpoint."""
+        self._event_chat_ids[container.container_id] = chat_id
         if container.container_id in self._event_listeners:
             return
         task = asyncio.create_task(
-            self._listen_events(container, chat_id),
+            self._listen_events(container),
             name=f"events-{container.container_name}",
         )
         self._event_listeners[container.container_id] = task
 
     def stop_event_listener(self, container_id: str):
         """Stop listening for events from a container."""
+        self._event_chat_ids.pop(container_id, None)
         task = self._event_listeners.pop(container_id, None)
         if task:
             task.cancel()
 
-    async def _listen_events(self, container: ContainerInfo, chat_id: int):
+    async def _listen_events(self, container: ContainerInfo):
         """Persistent SSE listener for proactive messages from a container."""
         url = f"{container.api_url}/events"
         while True:
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10)) as client:
-                    async with client.stream("GET", url) as response:
+                    async with client.stream("GET", url, headers=self._worker_headers()) as response:
                         event_type = ""
                         data_buf = ""
                         async for line in response.aiter_lines():
@@ -315,6 +325,9 @@ class Router:
                                         data = json.loads(data_buf)
                                     except json.JSONDecodeError:
                                         data = {}
+                                    chat_id = self._event_chat_ids.get(container.container_id)
+                                    if chat_id is None:
+                                        continue
                                     await self._handle_event(event_type, data, chat_id, container)
                                 event_type = ""
                                 data_buf = ""
@@ -331,6 +344,7 @@ class Router:
                 await client.post(
                     f"{container.api_url}/cancel",
                     json={"chat_id": chat_id},
+                    headers=self._worker_headers(),
                 )
         except Exception as e:
             logger.warning("Failed to cancel on container %s: %s", container.container_name, e)

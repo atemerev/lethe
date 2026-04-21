@@ -41,8 +41,13 @@ class Gateway:
         )
         self.dp = Dispatcher()
         self.pool = PoolManager(config)
-        self.router = Router(self.bot)
+        self.router = Router(self.bot, api_token=config.worker_api_token)
         self._register_handlers()
+
+    def _worker_headers(self) -> dict[str, str]:
+        if not self.config.worker_api_token:
+            return {}
+        return {"X-Lethe-Token": self.config.worker_api_token}
 
     def _register_handlers(self):
         dp = self.dp
@@ -250,7 +255,10 @@ class Gateway:
         """Show inline keyboard with model options, fetching current model from worker."""
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(f"{container.api_url}/model")
+                resp = await client.get(
+                    f"{container.api_url}/model",
+                    headers=self._worker_headers(),
+                )
                 data = resp.json()
         except Exception as e:
             await message.answer(f"Failed to get model info: {e}")
@@ -303,7 +311,11 @@ class Gateway:
 
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.post(f"{container.api_url}/model", json=payload)
+                resp = await client.post(
+                    f"{container.api_url}/model",
+                    json=payload,
+                    headers=self._worker_headers(),
+                )
                 result = resp.json()
         except Exception as e:
             await callback.answer(f"Failed: {e}")
@@ -318,7 +330,12 @@ class Gateway:
         # Update keyboard to reflect new selection
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                info = (await client.get(f"{container.api_url}/model")).json()
+                info = (
+                    await client.get(
+                        f"{container.api_url}/model",
+                        headers=self._worker_headers(),
+                    )
+                ).json()
             pi = info.get("provider_info") or [{"provider": info.get("provider", "openrouter"), "label": info.get("provider", "openrouter")}]
             ca = info.get("current_auth", auth)
             buttons = self._build_model_buttons(pi, kind, model_id, ca)
@@ -413,6 +430,9 @@ def main():
 
     if not config.telegram_bot_token:
         print("ERROR: TELEGRAM_BOT_TOKEN environment variable is required")
+        sys.exit(1)
+    if not config.worker_api_token:
+        print("ERROR: LETHE_API_TOKEN is required for worker API authentication")
         sys.exit(1)
 
     gateway = Gateway(config)

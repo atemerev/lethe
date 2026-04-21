@@ -107,6 +107,7 @@ class Agent:
         
         # Note: call await agent.initialize() after creation to load message history
         self._initialized = False
+        self._chat_lock = asyncio.Lock()
         
         logger.info(f"Agent initialized with model {self.settings.llm_model}")
     
@@ -452,6 +453,60 @@ class Agent:
     def add_tool(self, func: Callable):
         """Add a custom tool function."""
         self.llm.add_tool(func)
+
+    async def reconfigure_models(
+        self,
+        *,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        model_aux: Optional[str] = None,
+        force_oauth: Optional[bool] = None,
+    ) -> dict[str, dict[str, str]]:
+        """Rebuild model-dependent runtime state after a hot model/provider switch."""
+        async with self._chat_lock:
+            current = self.llm.config
+            target_provider = provider or current.provider
+            target_model = model or current.model
+            target_aux = model_aux or current.model_aux
+
+            new_config = LLMConfig(
+                provider=target_provider,
+                model=target_model,
+                model_aux=target_aux,
+                api_base=current.api_base,
+                context_limit=current.context_limit,
+                max_output_tokens=current.max_output_tokens,
+                temperature=current.temperature,
+            )
+
+            changed: dict[str, dict[str, str]] = {}
+            if current.provider != new_config.provider:
+                changed["provider"] = {"old": current.provider, "new": new_config.provider}
+            if current.model != new_config.model:
+                changed["model"] = {"old": current.model, "new": new_config.model}
+            if current.model_aux != new_config.model_aux:
+                changed["model_aux"] = {"old": current.model_aux, "new": new_config.model_aux}
+
+            self.llm.config = new_config
+            self.llm.context.config = new_config
+            if force_oauth is not None:
+                self.llm._force_oauth = force_oauth
+            self.llm.refresh_auth_client()
+
+            if "model" in changed or "provider" in changed:
+                self.assembler = get_assembler(new_config.model)
+                self.llm.context._assembler = self.assembler
+                self.llm.context.system_prompt = self._build_system_prompt()
+
+            self.refresh_memory_context()
+
+            if self.assembler.should_embed_tool_reference():
+                self.llm.context._tool_reference = self.llm.context._build_tool_reference(self.llm.tools)
+            else:
+                self.llm.context._tool_reference = ""
+            self.llm._update_tool_budget()
+
+            return changed
     
     @staticmethod
     def _fmt_reset(unix_ts: int) -> str:
@@ -545,6 +600,21 @@ class Agent:
         return "\n".join(parts)
 
     async def chat(
+        self,
+        message: str,
+        on_message: Optional[Callable[[str], Any]] = None,
+        on_image: Optional[Callable[[str], Any]] = None,
+        use_hippocampus: bool = True,
+    ) -> str:
+        async with self._chat_lock:
+            return await self._chat_locked(
+                message,
+                on_message=on_message,
+                on_image=on_image,
+                use_hippocampus=use_hippocampus,
+            )
+
+    async def _chat_locked(
         self,
         message: str,
         on_message: Optional[Callable[[str], Any]] = None,
