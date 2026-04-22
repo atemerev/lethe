@@ -61,6 +61,3 @@ outputs/
 unsloth_compiled_cache/
 workspace-split/
 
-# Junk files with weird names
-,
-": true, "
