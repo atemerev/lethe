@@ -104,10 +104,10 @@ class MemoryStore:
             "This directory stores skill files with extended workflows and references.\n"
             "This README is intentionally always present so skills are discoverable.\n\n"
             "Use core tools to work with skills:\n"
-            "- list_directory(\"~/lethe/skills/\")\n"
-            "- read_file(\"~/lethe/skills/README.md\")\n"
-            "- read_file(\"~/lethe/skills/<name>.md\")\n"
-            "- grep_search(\"keyword\", path=\"~/lethe/skills/\")\n"
+            f"- list_directory(\"{skills_dir}/\")\n"
+            f"- read_file(\"{skills_dir}/README.md\")\n"
+            f"- read_file(\"{skills_dir}/<name>.md\")\n"
+            f"- grep_search(\"keyword\", path=\"{skills_dir}/\")\n"
         )
         logger.info("Initialized default skills README")
     

@@ -45,7 +45,7 @@ class Agent:
         )
         
         # Initialize notes system (skills, conventions, persistent knowledge)
-        self.notes = NoteStore(db=self.memory.db)
+        self.notes = NoteStore(db=self.memory.db, notes_dir=str(self.settings.notes_dir))
         set_note_store(self.notes)
 
         # Initialize LLM client (provider auto-detected from env vars)

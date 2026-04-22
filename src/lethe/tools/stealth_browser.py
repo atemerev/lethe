@@ -29,11 +29,11 @@ import time
 from typing import Optional
 from pathlib import Path
 
+from lethe.paths import cache_dir as _cache_dir
+
 logger = logging.getLogger(__name__)
 
-# Workspace directory for persistent profiles
-WORKSPACE = os.environ.get("WORKSPACE", os.path.expanduser("~/devel/lethe/workspace"))
-STEALTH_PROFILE_DIR = Path(WORKSPACE) / "browser" / "stealth_profile"
+STEALTH_PROFILE_DIR = _cache_dir() / "browser" / "stealth_profile"
 
 # Realistic user agents (rotating)
 USER_AGENTS = [

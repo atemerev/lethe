@@ -7,6 +7,7 @@ Based on reverse-engineering from opencode-anthropic-auth plugin.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from lethe.paths import credentials_dir as _credentials_dir
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,29 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 
+# Claude Code billing attribution (extracted from CLI binary)
+_CC_VERSION = "2.1.117"
+_CC_SALT = "59cf53e54c78"
+
+
+def _cc_version_hash(first_user_text: str) -> str:
+    """Compute the 3-char hex suffix for cc_version, matching Claude Code's hL6().
+
+    Claude Code picks characters at indices 4, 7, 20 of the first user message,
+    concatenates with a salt and the build config object (which JS coerces to
+    "[object Object]" inside a template literal), then SHA-256 truncates to 3 hex chars.
+    """
+    chars = "".join(first_user_text[i] if i < len(first_user_text) else "0" for i in (4, 7, 20))
+    raw = f"{_CC_SALT}{chars}[object Object]"
+    return hashlib.sha256(raw.encode()).hexdigest()[:3]
+
+
+def _billing_header(first_user_text: str = "") -> str:
+    """Build the billing attribution string embedded in the system prompt."""
+    h = _cc_version_hash(first_user_text)
+    entrypoint = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "unknown")
+    return f"x-anthropic-billing-header: cc_version={_CC_VERSION}.{h}; cc_entrypoint={entrypoint}; cch=00000;"
+
 # Claude Code tool name mapping (our snake_case → Claude's PascalCase)
 TOOL_NAME_TO_CLAUDE = {
     "bash": "Bash",
@@ -43,12 +69,12 @@ TOOL_NAME_TO_CLAUDE = {
     "grep_search": "Grep",
     "web_search": "WebSearch",
     "fetch_webpage": "WebFetch",
-    "memory_read": "mcp_memory_read",
-    "memory_update": "mcp_memory_update",
-    "memory_append": "mcp_memory_append",
-    "archival_search": "mcp_archival_search",
-    "archival_insert": "mcp_archival_insert",
-    "conversation_search": "mcp_conversation_search",
+    "memory_read": "mcp__lethe__MemoryRead",
+    "memory_update": "mcp__lethe__MemoryUpdate",
+    "memory_append": "mcp__lethe__MemoryAppend",
+    "archival_search": "mcp__lethe__ArchivalSearch",
+    "archival_insert": "mcp__lethe__ArchivalInsert",
+    "conversation_search": "mcp__lethe__ConversationSearch",
 }
 
 # Reverse mapping (Claude PascalCase → our snake_case)
@@ -64,11 +90,10 @@ MODEL_ID_MAP = {
 MODEL_ID_REVERSE = {v: k for k, v in MODEL_ID_MAP.items()}
 
 # Token file location
-# Prefer explicit provider-scoped override; keep legacy env var for compatibility.
 TOKEN_FILE = Path(
     os.environ.get("LETHE_ANTHROPIC_OAUTH_TOKENS")
-    or os.environ.get("LETHE_OAUTH_TOKENS", "~/.lethe/oauth_tokens.json")
-).expanduser()
+    or str(_credentials_dir() / "anthropic_oauth_tokens.json")
+)
 
 
 def _to_pascal_case(name: str) -> str:
@@ -87,15 +112,19 @@ def _map_tool_name_to_claude(name: str) -> str:
     """Map our tool name to Claude Code's expected format."""
     if name in TOOL_NAME_TO_CLAUDE:
         return TOOL_NAME_TO_CLAUDE[name]
-    # Unknown tools: prefix with mcp_ and PascalCase
-    return f"mcp_{_to_pascal_case(name)}"
+    # Unknown tools: use mcp__lethe__PascalCase (Claude Code's MCP naming convention)
+    return f"mcp__lethe__{_to_pascal_case(name)}"
 
 
 def _map_tool_name_from_claude(name: str) -> str:
     """Map Claude Code's tool name back to ours."""
     if name in TOOL_NAME_FROM_CLAUDE:
         return TOOL_NAME_FROM_CLAUDE[name]
-    # Strip mcp_ prefix and convert back
+    # Strip mcp__<server>__ prefix and convert back
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) == 3:
+            return _to_snake_case(parts[2])
     if name.startswith("mcp_"):
         stripped = name[4:]
         return _to_snake_case(stripped)
@@ -211,7 +240,7 @@ class AnthropicOAuth:
             "accept": "application/json",
             "authorization": f"Bearer {self.access_token}",
             "anthropic-version": "2023-06-01",
-            "user-agent": "claude-cli/2.1.81 (external, cli)",
+            "user-agent": f"claude-cli/{_CC_VERSION} (external, cli)",
             "x-app": "cli",
             "anthropic-dangerous-direct-browser-access": "true",
             # Stainless headers (Claude SDK metadata)
@@ -224,14 +253,14 @@ class AnthropicOAuth:
             "x-stainless-retry-count": "0",
             "x-stainless-timeout": "600",
         }
-        
+
         # Beta headers — claude-code-20250219 MUST always be present for OAuth to work
         betas = ["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"]
         headers["anthropic-beta"] = ",".join(betas)
-        
+
         if is_stream:
             headers["x-stainless-helper-method"] = "stream"
-        
+
         return headers
     
     def _normalize_model(self, model: str) -> str:
@@ -370,11 +399,26 @@ class AnthropicOAuth:
             else:
                 api_messages.append({"role": "user", "content": str(content)})
         
-        # Prepend Claude Code identifier as its own system block.
-        # CRITICAL: OAuth tokens require this exact string as a standalone block.
-        # Merging it with other text causes Anthropic to return 400 "Error".
+        # Extract first user message text for billing header hash
+        first_user_text = ""
+        for msg in api_messages:
+            if msg.get("role") == "user":
+                c = msg.get("content", "")
+                if isinstance(c, str):
+                    first_user_text = c
+                elif isinstance(c, list):
+                    for blk in c:
+                        if isinstance(blk, dict) and blk.get("type") == "text":
+                            first_user_text = blk.get("text", "")
+                            break
+                break
+
+        # Prepend billing attribution and Claude Code identifier as system blocks.
+        # The billing header is embedded in the system prompt (not an HTTP header) —
+        # Claude Code's server reads it from the prompt text to classify billing.
         claude_code_prefix = "You are Claude Code, Anthropic's official CLI for Claude."
         system_blocks.insert(0, {"type": "text", "text": claude_code_prefix})
+        system_blocks.insert(0, {"type": "text", "text": _billing_header(first_user_text)})
         
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
         merged = []

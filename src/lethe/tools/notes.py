@@ -1,6 +1,6 @@
 """Note management tools — search, create, and list persistent notes.
 
-Notes are markdown files in ~/lethe/notes/ with tags for categorization.
+Notes are markdown files in $LETHE_HOME/workspace/notes/ with tags for categorization.
 Common tags: skill (procedures), convention (preferences), plus freeform.
 """
 

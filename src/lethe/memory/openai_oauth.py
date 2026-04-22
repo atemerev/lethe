@@ -16,6 +16,8 @@ from uuid import uuid4
 
 import httpx
 
+from lethe.paths import credentials_dir as _credentials_dir
+
 logger = logging.getLogger(__name__)
 
 # OpenAI Codex OAuth client ID (public, used by Codex-compatible CLIs)
@@ -31,8 +33,9 @@ DEFAULT_INSTRUCTIONS = "You are Lethe, a helpful and precise assistant."
 
 # Token file location
 TOKEN_FILE = Path(
-    os.environ.get("LETHE_OPENAI_OAUTH_TOKENS", "~/.lethe/openai_oauth_tokens.json")
-).expanduser()
+    os.environ.get("LETHE_OPENAI_OAUTH_TOKENS")
+    or str(_credentials_dir() / "openai_oauth_tokens.json")
+)
 
 # Common account-id claim paths
 JWT_ACCOUNT_PATH = "https://api.openai.com/auth"

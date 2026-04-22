@@ -1,6 +1,6 @@
 """Notes system — persistent procedural knowledge and conventions.
 
-Notes are markdown files in ~/lethe/notes/ with YAML frontmatter.
+Notes are markdown files in $LETHE_HOME/workspace/notes/ with YAML frontmatter.
 They're indexed in lancedb for vector + FTS search and integrated
 into hippocampus recall.
 
@@ -28,8 +28,7 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 TABLE_NAME = "notes"
 
-# Default notes directory
-DEFAULT_NOTES_DIR = os.path.expanduser("~/lethe/notes")
+from lethe.paths import notes_dir as _default_notes_dir
 
 
 def _slugify(title: str) -> str:
@@ -122,9 +121,9 @@ class NoteStore:
     The index can be rebuilt from files at any time (files are source of truth).
     """
 
-    def __init__(self, db: lancedb.DBConnection, notes_dir: str = DEFAULT_NOTES_DIR):
+    def __init__(self, db: lancedb.DBConnection, notes_dir: str = ""):
         self.db = db
-        self.notes_dir = Path(notes_dir)
+        self.notes_dir = Path(notes_dir) if notes_dir else _default_notes_dir()
         self.notes_dir.mkdir(parents=True, exist_ok=True)
 
         self.embedder = get_registry().get("sentence-transformers").create(

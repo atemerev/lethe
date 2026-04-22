@@ -7,7 +7,6 @@ Handles context preparation, token counting, and tool calling.
 import json
 import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -30,9 +29,11 @@ litellm.suppress_debug_info = True
 # Allow litellm to modify params for provider compatibility (e.g., Anthropic tool handling)
 litellm.modify_params = True
 
+from lethe.paths import logs_dir as _logs_dir, cache_dir as _cache_dir
+
 # Debug logging for LLM interactions
 LLM_DEBUG = os.environ.get("LLM_DEBUG", "false").lower() == "true"
-LLM_DEBUG_DIR = Path(os.environ.get("LLM_DEBUG_DIR", "logs/llm"))
+LLM_DEBUG_DIR = Path(os.environ.get("LLM_DEBUG_DIR", str(_logs_dir() / "llm")))
 
 
 def _extract_text_tool_calls(content: str) -> list[dict] | None:
@@ -139,8 +140,7 @@ SUMMARY_MAX_LINES = 60  # max lines in conversation summary
 MAX_OVERFLOW_RETRIES = 3  # max recovery attempts on context overflow
 MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3  # single tool result capped at 30% of context
 
-# Tool result archival — old tool results are saved to temp files so the model can re-read them
-_TOOL_ARCHIVE_DIR = os.path.join(tempfile.gettempdir(), "lethe_tool_archive")
+_TOOL_ARCHIVE_DIR = str(_cache_dir() / "tool_archive")
 
 # Minimal heartbeat system prompt (template)
 HEARTBEAT_SYSTEM_PROMPT = load_prompt_template(

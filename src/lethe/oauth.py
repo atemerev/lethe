@@ -22,6 +22,8 @@ from urllib.parse import urlencode, parse_qs, urlparse
 
 import httpx
 
+from lethe.paths import credentials_dir as _credentials_dir
+
 logger = logging.getLogger(__name__)
 
 # Claude OAuth endpoints
@@ -35,7 +37,7 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REDIRECT_URI = "http://localhost:19532/callback"
 
 # Token storage
-DEFAULT_TOKEN_PATH = Path("~/.config/lethe/claude_tokens.json").expanduser()
+DEFAULT_TOKEN_PATH = _credentials_dir() / "claude_tokens.json"
 
 # Claude Code CLI credentials path
 CLAUDE_CODE_CREDENTIALS = Path("~/.claude/.credentials.json").expanduser()

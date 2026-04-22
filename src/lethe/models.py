@@ -5,12 +5,14 @@ import logging
 import os
 from pathlib import Path
 
+from lethe.paths import config_dir as _config_dir, workspace_dir as _workspace_dir
+
 logger = logging.getLogger(__name__)
 
-# Resolve catalog path relative to project root (works for both direct and installed)
 _CATALOG_PATHS = [
-    Path(__file__).resolve().parent.parent.parent / "config" / "model_catalog.json",  # dev: src/lethe/../../config/
-    Path(os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))) / "config" / "model_catalog.json",
+    Path(__file__).resolve().parent.parent.parent / "config" / "model_catalog.json",  # dev
+    _config_dir() / "model_catalog.json",
+    _workspace_dir() / "config" / "model_catalog.json",  # legacy
 ]
 
 

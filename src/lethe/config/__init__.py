@@ -6,6 +6,8 @@ from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lethe import paths
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment."""
@@ -67,17 +69,20 @@ class Settings(BaseSettings):
 
     # Agent
     lethe_agent_name: str = Field(default="lethe", description="Agent name")
-    lethe_config_dir: Path = Field(default=Path("./config"), description="Config directory")
-    workspace_dir: Path = Field(default=Path("./workspace"), description="Agent workspace directory")
+    lethe_config_dir: Path = Field(default_factory=paths.config_dir, description="Seed config templates (repo)")
 
-    # Memory
-    memory_dir: Path = Field(default=Path("./data/memory"), description="Memory storage directory")
+    # Paths — all derive from LETHE_HOME (~/.lethe) unless overridden
+    lethe_home: Path = Field(default_factory=paths.lethe_home, description="Root for all runtime data")
+    workspace_dir: Path = Field(default_factory=paths.workspace_dir, description="Agent workspace directory")
+    memory_dir: Path = Field(default_factory=paths.memory_dir, description="Memory storage directory")
+    db_path: Path = Field(default_factory=paths.db_path, description="SQLite database path")
+    credentials_dir: Path = Field(default_factory=paths.credentials_dir, description="OAuth tokens (0o600)")
+    cache_dir: Path = Field(default_factory=paths.cache_dir, description="Browser profiles, ephemeral data")
+    logs_dir: Path = Field(default_factory=paths.logs_dir, description="LLM debug logs, curator log")
+    notes_dir: Path = Field(default_factory=paths.notes_dir, description="Persistent knowledge notes")
 
     # Conversation
     debounce_seconds: float = Field(default=5.0, description="Wait time for additional messages")
-
-    # Database
-    db_path: Path = Field(default=Path("./data/lethe.db"), description="SQLite database path")
 
     # Background cognition modules
     # amygdala_enabled removed: salience tagging merged into hippocampus (per-message)

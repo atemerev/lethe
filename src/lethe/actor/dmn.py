@@ -30,14 +30,14 @@ from lethe.utils import strip_model_tags
 
 logger = logging.getLogger(__name__)
 
-# Workspace root — resolved from env or default
-WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))
+from lethe.paths import workspace_dir as _workspace_dir
 
-# State file — persists between rounds
-DMN_STATE_FILE = os.path.join(WORKSPACE_DIR, "dmn_state.md")
-IDEAS_FILE = os.path.join(WORKSPACE_DIR, "ideas.md")
-QUESTIONS_FILE = os.path.join(WORKSPACE_DIR, "questions.md")
-DMN_RESET_MARKER = os.path.join(WORKSPACE_DIR, ".dmn_state_reset_v1")
+# State files — persists between rounds
+_WS = str(_workspace_dir())
+DMN_STATE_FILE = os.path.join(_WS, "dmn_state.md")
+IDEAS_FILE = os.path.join(_WS, "ideas.md")
+QUESTIONS_FILE = os.path.join(_WS, "questions.md")
+DMN_RESET_MARKER = os.path.join(_WS, ".dmn_state_reset_v1")
 FORCE_DEEP_EVERY_N_ROUNDS = 4
 IDEAS_STALE_HOURS = 3
 
@@ -59,7 +59,7 @@ def get_dmn_system_prompt(principal_context: str = "") -> str:
         "relationships, and long-term outcomes. Use memory blocks for current context."
     )
     return DMN_SYSTEM_PROMPT_TEMPLATE.format(
-        workspace=WORKSPACE_DIR,
+        workspace=_WS,
         home=os.path.expanduser("~"),
         principal_context=principal,
     )

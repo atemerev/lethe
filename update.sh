@@ -1,12 +1,9 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 #
 # Lethe Update Script
 # Checks for updates and applies them
 #
-# Usage: curl -fsSL https://lethe.gg/update | zsh
-#
-# Container mode: clones to temp dir, rebuilds, restarts container
-# Native mode: updates install dir, restarts service
+# Usage: curl -fsSL https://lethe.gg/update | bash
 #
 
 set -euo pipefail
@@ -23,7 +20,8 @@ NC='\033[0m'
 REPO_URL="https://github.com/atemerev/lethe.git"
 REPO_OWNER="atemerev"
 REPO_NAME="lethe"
-CONFIG_DIR="${LETHE_CONFIG_DIR:-$HOME/.config/lethe}"
+LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
+CONFIG_DIR="$LETHE_HOME/config"
 
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
@@ -48,75 +46,49 @@ get_latest_release() {
     fi
 }
 
-get_container_version() {
-    local container_cmd="$1"
-    # Try to get version from container label or just return "unknown"
-    $container_cmd inspect lethe --format '{{index .Config.Labels "version"}}' 2>/dev/null || echo "unknown"
-}
-
 detect_install_mode() {
-    # Check container mode FIRST
-    if command -v podman &>/dev/null; then
-        if podman ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^lethe$'; then
-            echo "container-podman"
-            return
-        fi
-    fi
-    
-    if command -v docker &>/dev/null; then
-        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^lethe$'; then
-            echo "container-docker"
-            return
-        fi
-    fi
-    
     # Root user: always use system-level service
     if [[ "$(id -u)" -eq 0 ]]; then
-        # Clean up any leftover user service from failed install
         if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
             rm -f "$HOME/.config/systemd/user/lethe.service"
         fi
-        # Check if system service exists, or we need to create it
         if [ -f "/etc/systemd/system/lethe.service" ]; then
             echo "native-systemd-system"
             return
         fi
-        # No service yet - will need to create system service
         echo "native-systemd-system-new"
         return
     fi
-    
+
     # Non-root: check for systemd user service
     if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
         echo "native-systemd-user"
         return
     fi
-    
-    # Check for launchd service (Mac native)
+
+    # Check for launchd service (Mac)
     if [ -f "$HOME/Library/LaunchAgents/com.lethe.agent.plist" ]; then
         echo "native-launchd"
         return
     fi
-    
+
     echo "unknown"
 }
 
 detect_install_dir() {
-    # Only called for native mode
-    
     # 1. Check environment variable
     if [ -n "${LETHE_INSTALL_DIR:-}" ] && [ -d "$LETHE_INSTALL_DIR/.git" ]; then
         echo "$LETHE_INSTALL_DIR"
         return
     fi
-    
+
     # 2. Check if running from within install dir
     local script_dir="$(cd "$(dirname "$0")" && pwd)"
     if [ -f "$script_dir/pyproject.toml" ] && grep -q "lethe" "$script_dir/pyproject.toml" 2>/dev/null; then
         echo "$script_dir"
         return
     fi
-    
+
     # 3. Check systemd system service for WorkingDirectory (root installs)
     if [ -f "/etc/systemd/system/lethe.service" ]; then
         local wd
@@ -126,7 +98,7 @@ detect_install_dir() {
             return
         fi
     fi
-    
+
     # 4. Check systemd user service for WorkingDirectory
     if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
         local wd
@@ -136,8 +108,8 @@ detect_install_dir() {
             return
         fi
     fi
-    
-    # 4. Check launchd plist for WorkingDirectory
+
+    # 5. Check launchd plist for WorkingDirectory
     if [ -f "$HOME/Library/LaunchAgents/com.lethe.agent.plist" ]; then
         local wd
         wd="$(grep -A1 "WorkingDirectory" "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/' || true)"
@@ -146,14 +118,19 @@ detect_install_dir() {
             return
         fi
     fi
-    
-    # 5. Default install location (NOT ~/lethe - that's workspace/memory!)
+
+    # 6. Default install location
+    if [ -d "$LETHE_HOME/install/.git" ] && [ -f "$LETHE_HOME/install/pyproject.toml" ]; then
+        echo "$LETHE_HOME/install"
+        return
+    fi
+
+    # Legacy location
     if [ -d "$HOME/.lethe/.git" ] && [ -f "$HOME/.lethe/pyproject.toml" ]; then
         echo "$HOME/.lethe"
         return
     fi
-    
-    # Not found
+
     echo ""
 }
 
@@ -172,94 +149,10 @@ get_native_version() {
     fi
 }
 
-update_container() {
-    local container_cmd="$1"
-    local latest_version="$2"
-    local config_file="$CONFIG_DIR/container.env"
-    local workspace_dir="${LETHE_WORKSPACE_DIR:-$HOME/lethe}"
-    
-    # Check if container runtime is reachable
-    if ! $container_cmd info &>/dev/null; then
-        if [[ "$container_cmd" == "docker" ]] && [[ -n "$DOCKER_HOST" ]]; then
-            echo ""
-            echo "  DOCKER_HOST is set to: $DOCKER_HOST"
-            echo "  This may be pointing to a non-running Docker Desktop"
-            echo ""
-            echo "  Try one of:"
-            echo "    1. Start Docker Desktop"
-            echo "    2. Run: unset DOCKER_HOST"
-            echo "    3. Run: export DOCKER_HOST=unix:///var/run/docker.sock"
-            echo "    4. Run: sudo systemctl start docker"
-            echo ""
-        fi
-        error "$container_cmd daemon not reachable"
-    fi
-    
-    # Clone to temp directory
-    local tmp_dir
-    tmp_dir="$(mktemp -d)"
-    trap 'rm -rf -- "$tmp_dir"' EXIT
-    
-    info "Cloning latest version..."
-    if ! git clone --depth 1 --branch "$latest_version" "$REPO_URL" "$tmp_dir" 2>/dev/null; then
-        git clone --depth 1 "$REPO_URL" "$tmp_dir"
-        cd "$tmp_dir"
-        git fetch --tags origin
-        git checkout "$latest_version"
-    fi
-    
-    info "Stopping container..."
-    $container_cmd stop lethe 2>/dev/null || true
-    $container_cmd rm lethe 2>/dev/null || true
-    
-    info "Rebuilding container image..."
-    cd "$tmp_dir"
-    $container_cmd build --load -t lethe:latest --label "version=$latest_version" .
-    
-    info "Starting container..."
-    if [ ! -f "$config_file" ]; then
-        error "Config file not found: $config_file"
-    fi
-    
-    if [[ "$container_cmd" == "podman" ]]; then
-        $container_cmd run -d \
-            --name lethe \
-            --restart unless-stopped \
-            --userns=keep-id \
-            --env-file "$config_file" \
-            -v "$workspace_dir:/workspace:Z" \
-            lethe:latest
-    elif docker info 2>/dev/null | grep -q "rootless"; then
-        # Rootless Docker - UID mapping handled automatically
-        $container_cmd run -d \
-            --name lethe \
-            --restart unless-stopped \
-            --env-file "$config_file" \
-            -v "$workspace_dir:/workspace:z" \
-            lethe:latest
-    else
-        # Traditional Docker - use gosu entrypoint for UID mapping
-        # Requires sudo for apt-get inside container
-        $container_cmd run -d \
-            --name lethe \
-            --restart unless-stopped \
-            -e HOST_UID=$(id -u) \
-            -e HOST_GID=$(id -g) \
-            --env-file "$config_file" \
-            -v "$workspace_dir:/workspace" \
-            lethe:latest
-    fi
-    
-    success "Container updated and restarted!"
-    echo ""
-    echo "  View logs: $container_cmd logs -f lethe"
-    echo ""
-}
-
 update_native() {
     local install_dir="$1"
     local target_version="$2"
-    
+
     cd "$install_dir"
 
     local stash_ref=""
@@ -290,13 +183,13 @@ update_native() {
             warn "Restore manually with: git -C $install_dir stash pop --index $stash_ref"
         fi
     }
-    
+
     info "Fetching updates..."
     if ! git fetch origin --tags; then
         restore_stash_on_failure
         return 1
     fi
-    
+
     if [ "$target_version" != "main" ]; then
         if ! git checkout "$target_version"; then
             restore_stash_on_failure
@@ -312,7 +205,7 @@ update_native() {
             return 1
         fi
     fi
-    
+
     # Update dependencies
     info "Updating dependencies..."
     if command -v uv &>/dev/null; then
@@ -325,65 +218,52 @@ update_native() {
         warn "Local pre-update changes were backed up to $stash_ref"
         warn "Reapply manually if needed: git -C $install_dir stash pop --index $stash_ref"
     fi
-    
+
     success "Code updated to $target_version"
 }
 
 main() {
     print_header
-    
-    # Detect install mode first
+
     local install_mode=$(detect_install_mode)
     local latest_version=$(get_latest_release)
     local current_version="unknown"
-    
+
     echo "  Install mode:   $install_mode"
-    
+
     case "$install_mode" in
-        container-podman|container-docker)
-            local container_cmd="${install_mode#container-}"
-            current_version=$(get_container_version "$container_cmd")
-            
-            echo "  Latest version: $latest_version"
-            echo ""
-            
-            info "Updating container..."
-            update_container "$container_cmd" "$latest_version"
-            success "Update complete!"
-            ;;
-            
         native-systemd-system|native-systemd-system-new|native-systemd-user|native-launchd)
             local install_dir=$(detect_install_dir)
-            
+
             if [ -z "$install_dir" ] || [ ! -d "$install_dir" ]; then
-                error "Could not find Lethe installation directory"
+                error "Could not find Lethe installation directory. Set LETHE_INSTALL_DIR or LETHE_HOME."
             fi
-            
+
             current_version=$(get_native_version "$install_dir")
-            
+
             echo "  Install dir:    $install_dir"
             echo "  Current:        $current_version"
             echo "  Latest:         $latest_version"
             echo ""
-            
+
             if [ "$current_version" == "$latest_version" ]; then
                 success "Already up to date!"
                 exit 0
             fi
-            
-            info "Update available: $current_version → $latest_version"
+
+            info "Update available: $current_version -> $latest_version"
             echo ""
-            
+
             update_native "$install_dir" "$latest_version"
-            
-            # Migrate aux model: gemini-flash → qwen3-coder-next (v0.4.1+)
+
+            # Migrate aux model: gemini-flash -> qwen3-coder-next (v0.4.1+)
             local env_file="$CONFIG_DIR/.env"
             if [ -f "$env_file" ] && grep -q "gemini.*flash" "$env_file"; then
-                info "Migrating aux model: gemini-flash → qwen3-coder-next"
+                info "Migrating aux model: gemini-flash -> qwen3-coder-next"
                 sed -i.bak 's|LLM_MODEL_AUX=.*gemini.*flash.*|LLM_MODEL_AUX=openrouter/qwen/qwen3-coder-next|' "$env_file"
                 success "Aux model updated"
             fi
-            
+
             if [[ "$install_mode" == "native-systemd-system" ]]; then
                 info "Restarting systemd system service..."
                 systemctl restart lethe
@@ -412,6 +292,7 @@ Restart=always
 RestartSec=10
 Environment="PATH=$uv_bin_dir:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/root"
+Environment="LETHE_HOME=$LETHE_HOME"
 
 [Install]
 WantedBy=multi-user.target
@@ -434,15 +315,12 @@ EOF
                 launchctl load "$HOME/Library/LaunchAgents/com.lethe.agent.plist"
                 success "Service restarted!"
                 echo ""
-                echo "  View logs: tail -f ~/Library/Logs/lethe.log"
+                echo "  View logs: tail -f $LETHE_HOME/logs/lethe.log"
             fi
             echo ""
-            success "Update complete! ($current_version → $latest_version)"
-            echo ""
-            echo "  💡 If upgrading from v0.3.7 or earlier, migrate persona to identity:"
-            echo "     uv run python scripts/migrate_persona_to_identity.py"
+            success "Update complete! ($current_version -> $latest_version)"
             ;;
-            
+
         *)
             error "Could not detect Lethe installation. Is Lethe installed?"
             ;;

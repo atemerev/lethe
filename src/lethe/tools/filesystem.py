@@ -17,8 +17,8 @@ def _is_tool(func):
 
 
 def _workspace_root():
-    from pathlib import Path
-    return Path(os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))).expanduser().resolve()
+    from lethe.paths import workspace_dir
+    return workspace_dir().resolve()
 
 
 def _is_broad_recursive_target(path):

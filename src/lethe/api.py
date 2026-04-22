@@ -77,7 +77,8 @@ def _auth_error() -> JSONResponse:
 def _workspace_root() -> Path:
     if _settings and getattr(_settings, "workspace_dir", None):
         return Path(_settings.workspace_dir).resolve()
-    return Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
+    from lethe.paths import workspace_dir
+    return workspace_dir().resolve()
 
 
 def _resolve_workspace_path(raw_path: str) -> Optional[Path]:
@@ -464,7 +465,7 @@ async def send_proactive(content: str):
 
 
 async def serve_file(request: Request) -> FileResponse | JSONResponse:
-    """Serve a file from the container workspace only."""
+    """Serve a file from the workspace directory only."""
     auth_error = await _require_auth(request)
     if auth_error:
         return auth_error

@@ -12,11 +12,15 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
+from pathlib import Path
+
 from rich.console import Console
 from rich.logging import RichHandler
 
 from lethe.agent import Agent
 from lethe.config import get_settings
+from lethe.paths import lethe_home
+from lethe.sandbox import apply_write_sandbox
 from lethe.conversation import ConversationManager
 from lethe.telegram import TelegramBot
 from lethe.heartbeat import Heartbeat
@@ -55,11 +59,22 @@ async def run():
         console.print("Also ensure OPENROUTER_API_KEY is set in your environment.")
         sys.exit(1)
 
+    # Apply write sandbox before any agent initialization
+    home = lethe_home()
+    sandboxed = apply_write_sandbox([
+        home,
+        Path("/tmp"),
+    ])
+
     console.print("[bold blue]Lethe[/bold blue] - Autonomous AI Assistant")
     console.print(f"Model: {settings.llm_model}")
     console.print(f"Memory: {settings.memory_dir}")
+    if sandboxed:
+        console.print(f"[green]Sandbox:[/green] writes restricted to {home}")
+    else:
+        console.print("[yellow]Sandbox:[/yellow] not active")
     console.print()
-    
+
     # Initialize agent (tools auto-loaded)
     console.print("[dim]Initializing agent...[/dim]")
     agent = Agent(settings)
@@ -522,9 +537,18 @@ async def run_api(port: int = 8080):
         console.print(f"[red]Configuration error:[/red] {e}")
         sys.exit(1)
 
+    # Apply write sandbox
+    home = lethe_home()
+    sandboxed = apply_write_sandbox([
+        home,
+        Path("/tmp"),
+    ])
+
     console.print("[bold blue]Lethe[/bold blue] - API Mode")
     console.print(f"Model: {settings.llm_model}")
     console.print(f"Memory: {settings.memory_dir}")
+    if sandboxed:
+        console.print(f"[green]Sandbox:[/green] writes restricted to {home}")
     console.print()
 
     if not os.environ.get("LETHE_API_TOKEN", "").strip():
@@ -652,7 +676,7 @@ async def run_api(port: int = 8080):
     import uvicorn
     config = uvicorn.Config(
         api_module.app,
-        host="0.0.0.0",
+        host=os.environ.get("LETHE_API_HOST", "127.0.0.1"),
         port=port,
         log_level="info",
     )

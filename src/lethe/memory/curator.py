@@ -39,10 +39,12 @@ def _get_oauth():
     return _oauth_client
 from lethe.prompts import load_prompt_template
 
+from lethe.paths import data_dir as _data_dir, logs_dir as _logs_dir
+
 logger = logging.getLogger(__name__)
 
-STATE_PATH = Path.home() / ".lethe" / "curator_state.json"
-LOG_PATH = Path.home() / ".lethe" / "curator_log.md"
+STATE_PATH = _data_dir() / "curator_state.json"
+LOG_PATH = _logs_dir() / "curator_log.md"
 
 HARVEST_BATCH_SIZE = 100  # large batches — LLM needs full conversation context to synthesize
 CURATE_BATCH_SIZE = 12

@@ -14,14 +14,14 @@ Optional - only works if EXA_API_KEY is set in environment.
 import json
 import logging
 import os
-import tempfile
 from datetime import datetime
 from typing import Optional
 
+from lethe.paths import cache_dir as _cache_dir
+
 logger = logging.getLogger(__name__)
 
-# Directory for raw search result files
-_RAW_RESULTS_DIR = os.path.join(tempfile.gettempdir(), "lethe_web_search")
+_RAW_RESULTS_DIR = str(_cache_dir() / "web_search")
 
 
 def _get_exa_api_key() -> Optional[str]:

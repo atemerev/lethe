@@ -52,8 +52,8 @@ SUMMARIZE_PROMPT = load_prompt_template(
 
 # --- Salience tagging (formerly Amygdala) ---
 
-WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))
-SALIENCE_TAGS_FILE = os.path.join(WORKSPACE_DIR, "emotional_tags.md")
+from lethe.paths import workspace_dir as _workspace_dir
+SALIENCE_TAGS_FILE = str(_workspace_dir() / "emotional_tags.md")
 
 HIGH_AROUSAL_THRESHOLD = 0.75
 TAG_LOG_MAX_LINES = 300

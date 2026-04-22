@@ -620,6 +620,7 @@ async def test_view_image_tool_registered_and_available_to_cortex(monkeypatch):
         memory_dir = Path(".")
         workspace_dir = Path(".")
         lethe_config_dir = Path(".")
+        notes_dir = Path(".")
         llm_messages_load = 0
         llm_messages_summarize = 0
 

@@ -676,31 +676,23 @@ class TestWebSearch:
     """Tests for web search tools."""
     
     def test_web_search_basic(self):
-        """Should search the web and return results."""
+        """Should search the web and return synthesized results."""
         _check_exa_api()
         from lethe.tools import web_search
-        import json
-        
+
         result = web_search("Python programming language")
-        data = json.loads(result)
-        
-        assert data.get("status") == "OK"
-        assert "results" in data
-        assert len(data["results"]) > 0
-        assert "title" in data["results"][0]
-        assert "url" in data["results"][0]
-    
+        assert isinstance(result, str)
+        assert len(result) > 50
+        assert "Raw results:" in result
+
     def test_web_search_with_category(self):
         """Should filter by category."""
         _check_exa_api()
         from lethe.tools import web_search
-        import json
-        
+
         result = web_search("machine learning", num_results=5, category="research paper")
-        data = json.loads(result)
-        
-        assert data.get("status") == "OK"
-        assert len(data["results"]) <= 5
+        assert isinstance(result, str)
+        assert len(result) > 50
     
     def test_web_search_no_api_key(self):
         """Should return error when API key not set."""

@@ -8,33 +8,20 @@ Resolution order:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Dict
 
-
-def _workspace_dir() -> Path:
-    raw = os.environ.get("WORKSPACE_DIR", "")
-    if raw:
-        return Path(raw).expanduser()
-    return Path("workspace")
-
-
-def _config_dir() -> Path:
-    raw = os.environ.get("LETHE_CONFIG_DIR", "")
-    if raw:
-        return Path(raw).expanduser()
-    return Path("config")
+from lethe.paths import workspace_dir as _workspace_dir, config_dir as _config_dir
 
 
 def _candidate_paths(name: str) -> list[Path]:
     base = name if name.endswith(".md") else f"{name}.md"
-    w = _workspace_dir() / "prompts" / base
-    c = _config_dir()
+    ws = _workspace_dir()
+    cfg = _config_dir()
     return [
-        w,
-        c / "prompts" / base,
-        c / "workspace" / "prompts" / base,
+        ws / "prompts" / base,
+        cfg / "prompts" / base,
+        cfg / "workspace" / "prompts" / base,
     ]
 
 

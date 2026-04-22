@@ -18,8 +18,8 @@ from lethe.actor import Actor, ActorConfig, ActorMessage, ActorRegistry, ActorSt
 from lethe.actor.tools import create_actor_tools
 from lethe.prompts import load_prompt_template
 
-# Workspace root — resolved once
-WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", os.path.expanduser("~/lethe"))
+from lethe.paths import workspace_dir as _workspace_dir
+WORKSPACE_DIR = str(_workspace_dir())
 
 WORKSPACE_CONTEXT = load_prompt_template(
     "actor_workspace_context",

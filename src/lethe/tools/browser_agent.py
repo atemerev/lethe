@@ -18,11 +18,11 @@ import os
 import shutil
 from typing import Optional
 
+from lethe.paths import cache_dir as _cache_dir
+
 logger = logging.getLogger(__name__)
 
-# Profile directory for persistent sessions (in workspace for easy access)
-WORKSPACE = os.environ.get("WORKSPACE", os.path.expanduser("~/devel/lethe/workspace"))
-PROFILE_DIR = os.path.join(WORKSPACE, "browser")
+PROFILE_DIR = str(_cache_dir() / "browser")
 
 
 def _get_agent_browser_path() -> str:
