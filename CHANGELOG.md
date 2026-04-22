@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.13.0 - 2026-04-22
+
+### Added
+- **OS-level write sandbox**: Landlock (Linux) and Seatbelt (macOS) restrict all writes to `~/.lethe` and `/tmp`. The sandbox is enforced at process start and cannot be escaped.
+- **Centralized path management**: new `src/lethe/paths.py` module derives all runtime paths from `LETHE_HOME` (`~/.lethe`), eliminating scattered path logic.
+- **OAuth subscription billing fix**: Anthropic subscription (Max/Pro) requests now embed the `x-anthropic-billing-header` attribution in the system prompt, and tool names use Claude Code's `mcp__<server>__<Tool>` naming convention. Both are required for Anthropic's server to classify requests as first-party and bill against the subscription plan instead of extra usage credits.
+
+### Changed
+- **Docker/container infrastructure removed**: Dockerfile, docker-compose files, entrypoint.sh, the entire `gateway/` directory, and `tests/test_api_gateway.py` have been deleted. Native + sandbox is now the only deployment mode.
+- **API server binds to localhost**: the API server now defaults to `127.0.0.1` instead of `0.0.0.0`. Override with `LETHE_API_HOST` for reverse-proxy setups.
+- **Install/update/uninstall scripts rewritten**: switched from zsh to bash for universal compatibility. `install.sh` detects existing dev checkouts (skips cloning), creates the `~/.lethe` directory tree, and writes systemd/launchd services with `LETHE_HOME`.
+- **Model catalog updated to April 2026 SOTA**: added Claude Opus 4.7, Kimi K2.6, GPT-5.4 Pro/Codex, GLM 5.1; removed stale entries; simplified Haiku ID to `claude-haiku-4-5`.
+- **OAuth tool naming convention**: tools sent to Anthropic's API are now named `mcp__lethe__PascalCase` (double-underscore MCP format) instead of `mcp_snake_case`, which Anthropic's server rejects as third-party.
+
+### Fixed
+- **Trailing assistant messages stripped from OAuth calls**: the API rejects prefill-style trailing assistant messages; these are now removed before sending.
+- **Note extraction quality and dedup**: extraction prompt now enforces a higher quality bar and receives existing note titles to prevent duplicates.
+- **Subagent termination notifications**: completion/failure results are now reliably delivered to parent actors.
+
 ## v0.12.3 - 2026-04-20
 
 ### Changed
