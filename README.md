@@ -97,7 +97,7 @@ The API server binds to `127.0.0.1` by default. Use a reverse proxy for remote a
 | **OpenRouter** | `OPENROUTER_API_KEY` | `openrouter/moonshotai/kimi-k2.6` |
 | **OpenAI (API key)** | `OPENAI_API_KEY` | `gpt-5.4` |
 | **OpenAI (subscription)** | `OPENAI_AUTH_TOKEN` | `gpt-5.4` |
-| **Local (llama.cpp)** | `LLM_API_BASE` + `OPENAI_API_KEY=local` | `openai/gemma-4-27B-it-Q8_0.gguf` |
+| **Local (llama.cpp)** | `LLM_API_BASE` + `OPENAI_API_KEY=local` | `openai/gemma-4-31B-it-Q8_0.gguf` |
 
 Set `LLM_MODEL` explicitly. The installer writes a default for the chosen provider; manual installs must set it in `.env`.
 
@@ -138,7 +138,7 @@ Full conversation history, stored locally in LanceDB. Searchable via `conversati
 
 ## Running locally with Gemma 4
 
-Lethe runs well with **Gemma 4 27B** on consumer GPUs via [llama.cpp](https://github.com/ggml-org/llama.cpp).
+Lethe runs well with **Gemma 4 31B** on consumer GPUs via [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
 ```bash
 # Build llama.cpp with CUDA
@@ -148,7 +148,7 @@ cmake --build build --target llama-server -j$(nproc)
 
 # Start the server (4x RTX 4090 example)
 ./build/bin/llama-server \
-    --model /path/to/gemma-4-27B-it-Q8_0.gguf \
+    --model /path/to/gemma-4-31B-it-Q8_0.gguf \
     --host 0.0.0.0 --port 8090 \
     --n-gpu-layers 999 --split-mode tensor \
     --ctx-size 98304 --flash-attn on \
@@ -163,7 +163,7 @@ Configure Lethe:
 ```bash
 # .env
 LLM_PROVIDER=openai
-LLM_MODEL=openai/gemma-4-27B-it-Q8_0.gguf
+LLM_MODEL=openai/gemma-4-31B-it-Q8_0.gguf
 LLM_API_BASE=http://localhost:8090/v1
 LLM_CONTEXT_LIMIT=96000
 OPENAI_API_KEY=local
