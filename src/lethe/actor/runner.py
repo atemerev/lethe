@@ -228,10 +228,6 @@ class ActorRunner:
                     actor._last_response = response  # For progress timer
                 except Exception as e:
                     logger.error(f"Actor {actor.id} LLM error: {e}")
-                    await self._notify_parent(
-                        f"{actor.config.name} hit an error: {e}",
-                        metadata={"channel": "task_update", "kind": "error"},
-                    )
                     actor.terminate(f"Error: {e}")
                     break
                 
@@ -247,18 +243,10 @@ class ActorRunner:
                 elapsed = time.monotonic() - start_time
                 result = f"Max turns reached ({actor.config.max_turns} turns, {int(elapsed)}s). Last: {response[:200] if response else 'none'}"
                 logger.warning(f"Actor {actor.id} hit max turns")
-                await self._notify_parent(
-                    f"{actor.config.name}: {result}",
-                    metadata={"channel": "task_update", "kind": "max_turns"},
-                )
                 actor.terminate(result)
             
         except Exception as e:
             logger.error(f"Actor {actor.id} runner error: {e}", exc_info=True)
-            await self._notify_parent(
-                f"{actor.config.name} crashed: {e}",
-                metadata={"channel": "task_update", "kind": "fatal"},
-            )
             actor.terminate(f"Runner error: {e}")
         finally:
             # Cancel progress timer

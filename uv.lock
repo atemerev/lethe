@@ -888,7 +888,7 @@ wheels = [
 
 [[package]]
 name = "lethe"
-version = "0.12.3"
+version = "0.13.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },

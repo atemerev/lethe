@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.13.1 - 2026-04-23
+
+### Fixed
+- **Proactive messaging restored**: `decide_user_notify` was recording a send to the rate-limiter *before* the actor's `send_to_user` callback ran, so the subsequent `heartbeat_send` blocked itself on its own pre-record. All proactive paths (hourly heartbeat, DMN notifications) were suppressed for 60 minutes after any decision — in practice, zero messages ever delivered.
+- **Duplicate subagent terminal notifications**: when a subagent emitted a terminal `task_update` via `send_message` before calling `terminate`, the registry also produced a synthetic termination message, so parents saw two "done/failed" events per outcome. The synthetic message is skipped when one already exists.
+- **Redundant `_notify_parent` calls on actor error / max_turns**: `actor.terminate()` already notifies the parent; the extra emits before `terminate()` are gone.
+
+### Changed
+- **systemd units source `$CONFIG_DIR/.env`**: generated `lethe.service` (user and system variants) now includes `EnvironmentFile=-$CONFIG_DIR/.env`, so toggles like `LETHE_NO_SANDBOX=1` in the config file take effect at service start without editing the unit.
+
 ## v0.13.0 - 2026-04-22
 
 ### Added

@@ -715,22 +715,36 @@ class ActorRegistry:
         elif parent.state == ActorState.TERMINATED:
             logger.warning(f"Actor {actor.config.name} terminated but parent {parent.config.name} already terminated")
         if parent and parent.state != ActorState.TERMINATED:
-            msg = ActorMessage(
-                sender=actor_id,
-                recipient=actor.spawned_by,
-                content=f"{actor.config.name}: {result_text}",
-                metadata={
-                    "channel": "task_update",
-                    "kind": status_kind,
-                    "source": "termination",
-                },
+            # Skip if this actor already sent a terminal task_update to the parent
+            # (the subagent LLM may have sent one via send_message before calling terminate)
+            _TERMINAL_KINDS = {"done", "failed", "error", "max_turns", "fatal"}
+            already_notified = any(
+                m.sender == actor_id
+                and (m.metadata or {}).get("channel") == "task_update"
+                and (m.metadata or {}).get("kind") in _TERMINAL_KINDS
+                for m in parent._messages
             )
-            # Deliver directly — no fire-and-forget async task
-            parent._messages.append(msg)
-            try:
-                parent._inbox.put_nowait(msg)
-            except Exception:
-                pass
+            if already_notified:
+                logger.info(
+                    f"Skipping duplicate terminal notification from {actor.config.name} "
+                    f"to {parent.config.name} — already notified"
+                )
+            else:
+                msg = ActorMessage(
+                    sender=actor_id,
+                    recipient=actor.spawned_by,
+                    content=f"{actor.config.name}: {result_text}",
+                    metadata={
+                        "channel": "task_update",
+                        "kind": status_kind,
+                        "source": "termination",
+                    },
+                )
+                parent._messages.append(msg)
+                try:
+                    parent._inbox.put_nowait(msg)
+                except Exception:
+                    pass
         self.emit_event(
             "actor_terminated",
             actor,

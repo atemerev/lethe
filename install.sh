@@ -701,6 +701,7 @@ Restart=always
 RestartSec=10
 Environment="PATH=$UV_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 Environment="LETHE_HOME=$LETHE_HOME"
+EnvironmentFile=-$CONFIG_DIR/.env
 
 [Install]
 WantedBy=default.target
@@ -748,6 +749,7 @@ RestartSec=10
 Environment="PATH=$UV_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/root"
 Environment="LETHE_HOME=$LETHE_HOME"
+EnvironmentFile=-$CONFIG_DIR/.env
 
 [Install]
 WantedBy=multi-user.target

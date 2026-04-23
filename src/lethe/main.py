@@ -376,8 +376,6 @@ async def run():
             logger.warning("Cortex notify decision call failed: %s", e)
             return None
         relay, message = parse_notify_decision(raw)
-        if relay and message:
-            _proactive_record()
         return message if relay else None
     
     heartbeat = Heartbeat(
