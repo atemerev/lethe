@@ -88,7 +88,7 @@ Lethe runs in an isolated container by default:
 - **Linux**: [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html) container with bind-mounted access only to `~/.lethe` and directories you choose during install.
 - **macOS**: [apple/container](https://github.com/apple/container) with equivalent volume mounts.
 
-In native mode (`--yolo`), an OS-level write sandbox is enforced instead: Landlock on Linux, Seatbelt on macOS — both restrict writes to `~/.lethe` and `/tmp`.
+Native mode (`--yolo`) runs without isolation — use at your own risk.
 
 The API server binds to `127.0.0.1` by default. Use a reverse proxy for remote access.
 
@@ -243,7 +243,6 @@ src/lethe/
   telegram/    -- Telegram bot interface
   conversation/ -- conversation management
   paths.py     -- centralized path derivation from LETHE_HOME
-  sandbox.py   -- Landlock/Seatbelt write sandbox
   api.py       -- HTTP API server
   main.py      -- entry point
 

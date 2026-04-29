@@ -3,9 +3,8 @@
 # Lethe Installer
 # Usage: curl -fsSL https://lethe.gg/install | bash
 #
-# Native install with OS-level write sandbox (Landlock on Linux, Seatbelt on macOS).
-# The agent can read the entire filesystem but only write to ~/.lethe/ and /tmp.
-# Disable sandbox with LETHE_NO_SANDBOX=1 if needed.
+# Default: container install (systemd-nspawn on Linux, apple/container on macOS).
+# Use --yolo for native (non-containerized) install.
 #
 # Supports multiple LLM providers: OpenRouter, Anthropic, OpenAI
 #
