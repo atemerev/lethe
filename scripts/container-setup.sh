@@ -263,6 +263,8 @@ setup_nspawn() {
     command -v systemd-nspawn >/dev/null 2>&1 || error "systemd-nspawn not found. Install: sudo dnf install systemd-container"
     command -v dnf >/dev/null 2>&1 || error "dnf is required to bootstrap the container rootfs"
 
+    local fedora_release
+    fedora_release="$(rpm -E '%{fedora}' 2>/dev/null || echo 43)"
     local rootfs="/var/lib/machines/$MACHINE_NAME"
 
     if [[ -d "$rootfs" && "$REBUILD" == "0" ]]; then
@@ -275,7 +277,7 @@ setup_nspawn() {
 
         info "Bootstrapping Fedora rootfs..."
         sudo mkdir -p "$rootfs"
-        sudo dnf --installroot="$rootfs" --releasever=43 \
+        sudo dnf --installroot="$rootfs" --releasever="$fedora_release" \
             --setopt=install_weak_deps=False -y \
             install coreutils-single bash python3.12 git-core curl findutils
         sudo dnf --installroot="$rootfs" clean all
@@ -320,7 +322,7 @@ setup_nspawn() {
 Boot=no
 User=lethe
 WorkingDirectory=/opt/lethe
-Parameters=uv run lethe
+Parameters=/usr/local/bin/uv run lethe
 Environment=HOME=/home/lethe
 Environment=LETHE_HOME=/home/lethe/.lethe
 
@@ -361,7 +363,7 @@ EOF
     echo "    Stop:    sudo systemctl stop lethe-container"
     echo "    Logs:    sudo journalctl -u lethe-container -f"
     echo "    Shell:   sudo systemd-nspawn -M $MACHINE_NAME --user lethe /bin/bash"
-    echo "    Install: sudo systemd-nspawn -M $MACHINE_NAME microdnf install <pkg>"
+    echo "    Install: sudo systemd-nspawn -M $MACHINE_NAME dnf install <pkg>"
 }
 
 # ---------------------------------------------------------------------------
@@ -505,7 +507,7 @@ main() {
     fi
     echo "  Mounts config: $MOUNTS_CONF"
     echo ""
-    echo "  The container can install software via microdnf."
+    echo "  The container can install software via dnf."
     echo "  Host filesystem is isolated except for the directories above."
 }
 
