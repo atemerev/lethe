@@ -20,12 +20,11 @@ from pathlib import Path
 from typing import Optional
 
 import lancedb
-from lancedb.embeddings import get_registry
+
+from lethe.memory.embeddings import embed, EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
 TABLE_NAME = "notes"
 
 from lethe.paths import notes_dir as _default_notes_dir
@@ -126,15 +125,16 @@ class NoteStore:
         self.notes_dir = Path(notes_dir) if notes_dir else _default_notes_dir()
         self.notes_dir.mkdir(parents=True, exist_ok=True)
 
-        self.embedder = get_registry().get("sentence-transformers").create(
-            name=EMBEDDING_MODEL
-        )
         self._ensure_table()
         logger.info(f"NoteStore initialized: {self.notes_dir} ({self.count()} notes indexed)")
 
+    def _table_names(self) -> list[str]:
+        result = self.db.list_tables()
+        return result.tables if hasattr(result, 'tables') else list(result)
+
     def _ensure_table(self):
         """Create the notes table if it doesn't exist."""
-        if TABLE_NAME not in self.db.list_tables():
+        if TABLE_NAME not in self._table_names():
             init_vector = [0.0] * EMBEDDING_DIM
             self.db.create_table(
                 TABLE_NAME,
@@ -160,8 +160,8 @@ class NoteStore:
     def _get_table(self):
         return self.db.open_table(TABLE_NAME)
 
-    def _embed(self, text: str) -> list[float]:
-        return self.embedder.compute_query_embeddings(text)[0]
+    def _embed(self, text: str, is_query: bool = True) -> list[float]:
+        return embed(text, is_query=is_query)
 
     def count(self) -> int:
         try:
@@ -174,6 +174,7 @@ class NoteStore:
         title: str,
         content: str,
         tags: Optional[list[str]] = None,
+        subdir: str = "",
     ) -> str:
         """Create a new note. Saves markdown file and indexes it.
 
@@ -181,6 +182,7 @@ class NoteStore:
             title: Note title
             content: Note body (markdown)
             tags: List of tags (e.g. ["skill", "email", "graph-api"])
+            subdir: Optional subdirectory under notes_dir (created if missing).
 
         Returns:
             File path of the created note
@@ -189,13 +191,16 @@ class NoteStore:
         now = datetime.now(timezone.utc)
         slug = _slugify(title)
         filename = f"{slug}.md"
-        filepath = self.notes_dir / filename
+        target_dir = self.notes_dir / subdir if subdir else self.notes_dir
+        if subdir:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        filepath = target_dir / filename
 
         # Avoid overwriting — append number if exists
         counter = 1
         while filepath.exists():
             counter += 1
-            filepath = self.notes_dir / f"{slug}_{counter}.md"
+            filepath = target_dir / f"{slug}_{counter}.md"
 
         meta = {
             "title": title,
@@ -208,9 +213,8 @@ class NoteStore:
 
         # Index in lancedb
         note_id = f"note-{uuid.uuid4()}"
-        # Embed title + tags + content for search
         search_text = f"{title}\n{' '.join(tags)}\n{content}"
-        vector = self._embed(search_text)
+        vector = self._embed(search_text, is_query=False)
 
         table = self._get_table()
         table.add([{
@@ -289,7 +293,7 @@ class NoteStore:
             List of notes with title, tags, file_path
         """
         notes = []
-        for filepath in sorted(self.notes_dir.glob("*.md")):
+        for filepath in sorted(self.notes_dir.rglob("*.md")):
             raw = filepath.read_text()
             meta, body = _parse_frontmatter(raw)
             note_tags = meta.get("tags", [])
@@ -342,7 +346,7 @@ class NoteStore:
         count = 0
         now = datetime.now(timezone.utc).isoformat()
 
-        for filepath in self.notes_dir.glob("*.md"):
+        for filepath in self.notes_dir.rglob("*.md"):
             raw = filepath.read_text()
             meta, body = _parse_frontmatter(raw)
             title = meta.get("title", filepath.stem)
@@ -351,7 +355,7 @@ class NoteStore:
                 tags = [tags]
 
             search_text = f"{title}\n{' '.join(tags)}\n{body}"
-            vector = self._embed(search_text)
+            vector = self._embed(search_text, is_query=False)
 
             table.add([{
                 "id": f"note-{uuid.uuid4()}",

@@ -10,6 +10,12 @@ logger = logging.getLogger(__name__)
 from lethe.memory.blocks import BlockManager
 from lethe.memory.archival import ArchivalMemory
 from lethe.memory.messages import MessageHistory
+from lethe.memory.embeddings import needs_reindex, save_model_metadata
+
+
+def _table_names(db: lancedb.DBConnection) -> list[str]:
+    result = db.list_tables()
+    return result.tables if hasattr(result, 'tables') else list(result)
 
 
 class MemoryStore:
@@ -57,11 +63,24 @@ class MemoryStore:
         # Copy workspace seed files (questions.md, etc.) if not present
         self._init_workspace_seeds(str(self.config_dir))
         
+        # Check if embedding model changed — must migrate before init
+        lancedb_dir = self.data_dir / "lancedb"
+        reindex = needs_reindex(lancedb_dir)
+        if reindex and _table_names(self.db):
+            logger.warning("Embedding model changed — migrating vector tables")
+            self._migrate_tables()
+
         # Initialize subsystems
         self.blocks = BlockManager(blocks_workspace)
         self.archival = ArchivalMemory(self.db)
         self.messages = MessageHistory(self.db)
-        
+
+        if reindex:
+            if self._has_note_files():
+                self._reindex_notes()
+            save_model_metadata(lancedb_dir)
+            logger.info("Embedding model metadata saved")
+
         logger.info("Memory store initialized")
     
     def _init_workspace_seeds(self, config_dir: str = "config"):
@@ -322,3 +341,71 @@ class MemoryStore:
             Message ID
         """
         return self.messages.add(role, content, metadata=metadata)
+
+    def _migrate_tables(self):
+        """Re-embed archival and message tables with the new embedding model.
+
+        Exports text data, drops tables (dimension changed), then re-inserts
+        with fresh vectors. Notes are file-backed and reindexed separately.
+        """
+        from lethe.memory.embeddings import embed, EMBEDDING_DIM
+
+        for table_name in list(_table_names(self.db)):
+            try:
+                table = self.db.open_table(table_name)
+                arrow = table.to_arrow()
+                columns = arrow.column_names
+            except Exception as e:
+                logger.warning(f"Could not read table {table_name}, dropping: {e}")
+                self.db.drop_table(table_name)
+                continue
+
+            if "vector" not in columns:
+                continue
+
+            ids = arrow.column("id").to_pylist()
+            rows = []
+            for i in range(arrow.num_rows):
+                if ids[i] == "_init_":
+                    continue
+                row = {col: arrow.column(col)[i].as_py() for col in columns if col != "vector"}
+                rows.append(row)
+
+            self.db.drop_table(table_name)
+            logger.info(f"Migrating {table_name}: {len(rows)} rows")
+
+            if not rows:
+                continue
+
+            text_col = "text" if "text" in columns else "content"
+            for row in rows:
+                row["vector"] = embed(row.get(text_col, "") or "", is_query=False)
+
+            init_row = {col: "" for col in columns if col != "vector"}
+            init_row["id"] = "_init_"
+            init_row["vector"] = [0.0] * EMBEDDING_DIM
+            self.db.create_table(table_name, data=[init_row], exist_ok=True)
+            table = self.db.open_table(table_name)
+            table.add(rows)
+
+            if text_col in columns:
+                try:
+                    table.create_fts_index(text_col, replace=True)
+                except Exception:
+                    pass
+
+            logger.info(f"Migrated {table_name}: {len(rows)} rows re-embedded")
+
+    def _has_note_files(self) -> bool:
+        from lethe.paths import notes_dir
+        nd = notes_dir()
+        return nd.exists() and any(nd.rglob("*.md"))
+
+    def _reindex_notes(self):
+        try:
+            from lethe.memory.notes import NoteStore
+            notes = NoteStore(db=self.db)
+            count = notes.reindex()
+            logger.info(f"Reindexed {count} notes")
+        except Exception as e:
+            logger.warning(f"Note reindex failed: {e}")
