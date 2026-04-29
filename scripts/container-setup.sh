@@ -363,7 +363,7 @@ EOF
     echo "    Stop:    sudo systemctl stop lethe-container"
     echo "    Logs:    sudo journalctl -u lethe-container -f"
     echo "    Shell:   sudo systemd-nspawn -M $MACHINE_NAME --user lethe /bin/bash"
-    echo "    Install: sudo systemd-nspawn -M $MACHINE_NAME dnf install <pkg>"
+    echo "    Install: sudo systemd-nspawn -M $MACHINE_NAME microdnf install <pkg>"
 }
 
 # ---------------------------------------------------------------------------
@@ -507,7 +507,7 @@ main() {
     fi
     echo "  Mounts config: $MOUNTS_CONF"
     echo ""
-    echo "  The container can install software via dnf."
+    echo "  The container can install software via microdnf."
     echo "  Host filesystem is isolated except for the directories above."
 }
 
