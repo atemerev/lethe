@@ -306,18 +306,32 @@ migrate_nspawn_to_podman() {
 
 update_container_apple() {
     local install_dir="$1"
-    local container_bin
-    container_bin="$(command -v container || true)"
-
-    if [ -z "$container_bin" ]; then
-        error "'container' CLI not found. Install: brew install container"
-    fi
 
     info "Stopping container..."
     launchctl unload "$HOME/Library/LaunchAgents/com.lethe.container.plist" 2>/dev/null || true
 
-    info "Rebuilding container image..."
-    "$container_bin" build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
+    # Detect which backend the launch script uses
+    local launch_script="$LETHE_HOME/run-container.sh"
+    if [ -f "$launch_script" ] && grep -q "podman" "$launch_script"; then
+        # Podman backend
+        local podman_bin
+        podman_bin="$(command -v podman || true)"
+        if [ -z "$podman_bin" ]; then
+            error "podman not found"
+        fi
+        podman stop lethe 2>/dev/null || true
+        info "Rebuilding container image..."
+        "$podman_bin" build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
+    else
+        # apple/container backend
+        local container_bin
+        container_bin="$(command -v container || true)"
+        if [ -z "$container_bin" ]; then
+            error "'container' CLI not found. Install: brew install container"
+        fi
+        info "Rebuilding container image..."
+        "$container_bin" build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
+    fi
 
     info "Starting container..."
     launchctl load "$HOME/Library/LaunchAgents/com.lethe.container.plist"

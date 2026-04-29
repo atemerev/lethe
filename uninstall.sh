@@ -145,9 +145,24 @@ fi
 # Container image (apple/container)
 if command -v container &>/dev/null; then
     if container image ls 2>/dev/null | grep -q "lethe"; then
-        info "Removing container image..."
+        info "Removing apple/container image..."
         container image rm lethe:latest 2>/dev/null || true
         success "Container image removed"
+    fi
+fi
+
+# Podman container + image (macOS fallback)
+if command -v podman &>/dev/null; then
+    if podman container exists lethe 2>/dev/null; then
+        info "Removing podman container..."
+        podman stop lethe 2>/dev/null || true
+        podman rm lethe 2>/dev/null || true
+        success "Podman container removed"
+    fi
+    if podman image exists localhost/lethe:latest 2>/dev/null; then
+        info "Removing podman image..."
+        podman rmi localhost/lethe:latest 2>/dev/null || true
+        success "Podman image removed"
     fi
 fi
 

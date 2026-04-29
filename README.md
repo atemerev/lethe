@@ -86,7 +86,7 @@ System prompt content is split by update lifecycle:
 Lethe runs in an isolated container by default:
 
 - **Linux**: [Podman](https://podman.io/) rootless container with volume-mounted access only to `~/.lethe` and directories you choose during install.
-- **macOS**: [apple/container](https://github.com/apple/container) with equivalent volume mounts.
+- **macOS**: [apple/container](https://github.com/apple/container) (macOS 26+), or [Podman](https://podman.io/) as fallback for Intel Macs / older macOS.
 
 Native mode (`--yolo`) runs without isolation — use at your own risk.
 

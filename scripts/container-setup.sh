@@ -352,7 +352,6 @@ setup_podman() {
 # macOS: apple/container
 # ---------------------------------------------------------------------------
 setup_apple_container() {
-    command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
     local container_bin
     container_bin="$(command -v container)"
 
@@ -381,7 +380,90 @@ setup_apple_container() {
     } > "$launch_script"
     chmod +x "$launch_script"
 
-    # Create launchd plist
+    _write_launchd_plist "$launch_script" "$(dirname "$container_bin")"
+
+    launchctl load "$HOME/Library/LaunchAgents/com.lethe.container.plist"
+    success "apple/container started"
+    echo ""
+    echo "  Launcher:  $launch_script"
+    echo "  Service:   ~/Library/LaunchAgents/com.lethe.container.plist"
+    echo ""
+    echo "  Commands:"
+    echo "    Start:   launchctl load ~/Library/LaunchAgents/com.lethe.container.plist"
+    echo "    Stop:    launchctl unload ~/Library/LaunchAgents/com.lethe.container.plist"
+    echo "    Logs:    tail -f $LETHE_HOME/logs/container.log"
+    echo "    Shell:   container run --volume $LETHE_HOME:/home/lethe/.lethe -it lethe:latest /bin/bash"
+}
+
+# ---------------------------------------------------------------------------
+# macOS: podman (fallback for Intel Macs / pre-Sequoia)
+# ---------------------------------------------------------------------------
+setup_podman_mac() {
+    command -v podman >/dev/null 2>&1 || error "podman not found. Install: brew install podman"
+    local podman_bin
+    podman_bin="$(command -v podman)"
+
+    # Ensure podman machine is initialized and running
+    if ! podman machine inspect &>/dev/null; then
+        info "Initializing podman machine..."
+        podman machine init --cpus 2 --memory 4096
+    fi
+    if ! podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qi "running"; then
+        info "Starting podman machine..."
+        podman machine start
+    fi
+    success "Podman machine running"
+
+    if podman image exists lethe:latest 2>/dev/null && [[ "$REBUILD" == "0" ]]; then
+        info "Image lethe:latest already exists (use --rebuild to recreate)"
+    else
+        info "Building container image..."
+        podman build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
+        success "Container image built"
+    fi
+
+    # Create launch script
+    local launch_script="$LETHE_HOME/run-container.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        printf '"%s" machine inspect --format '\''{{.State}}'\'' 2>/dev/null | grep -qi running || "%s" machine start\n' "$podman_bin" "$podman_bin"
+        printf 'exec "%s" run --rm --name lethe \\\n' "$podman_bin"
+        printf '    --userns=keep-id \\\n'
+        printf '    --env LETHE_HOME=/home/lethe/.lethe \\\n'
+        printf '    -v "%s:/home/lethe/.lethe" \\\n' "$LETHE_HOME"
+        printf '    -v "%s/config/.env:/opt/lethe/.env:ro" \\\n' "$LETHE_HOME"
+        for mount in "${SELECTED_MOUNTS[@]}"; do
+            local pair
+            pair=$(resolve_mount "$mount")
+            printf '    -v "%s" \\\n' "$pair"
+        done
+        echo '    lethe:latest'
+    } > "$launch_script"
+    chmod +x "$launch_script"
+
+    _write_launchd_plist "$launch_script" "$(dirname "$podman_bin")"
+
+    launchctl load "$HOME/Library/LaunchAgents/com.lethe.container.plist"
+    success "Podman container started"
+    echo ""
+    echo "  Launcher:  $launch_script"
+    echo "  Service:   ~/Library/LaunchAgents/com.lethe.container.plist"
+    echo ""
+    echo "  Commands:"
+    echo "    Start:   launchctl load ~/Library/LaunchAgents/com.lethe.container.plist"
+    echo "    Stop:    launchctl unload ~/Library/LaunchAgents/com.lethe.container.plist"
+    echo "    Logs:    tail -f $LETHE_HOME/logs/container.log"
+    echo "    Shell:   podman exec -it lethe /bin/bash"
+    echo "    Root:    podman exec -u 0 -it lethe /bin/bash"
+}
+
+# ---------------------------------------------------------------------------
+# Shared: write launchd plist for macOS container service
+# ---------------------------------------------------------------------------
+_write_launchd_plist() {
+    local launch_script="$1"
+    local bin_dir="$2"
+
     mkdir -p "$HOME/Library/LaunchAgents"
     mkdir -p "$LETHE_HOME/logs"
     cat > "$HOME/Library/LaunchAgents/com.lethe.container.plist" << EOF
@@ -406,23 +488,11 @@ setup_apple_container() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$(dirname "$container_bin"):/usr/local/bin:/usr/bin:/bin</string>
+        <string>$bin_dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 </dict>
 </plist>
 EOF
-
-    launchctl load "$HOME/Library/LaunchAgents/com.lethe.container.plist"
-    success "apple/container started"
-    echo ""
-    echo "  Launcher:  $launch_script"
-    echo "  Service:   ~/Library/LaunchAgents/com.lethe.container.plist"
-    echo ""
-    echo "  Commands:"
-    echo "    Start:   launchctl load ~/Library/LaunchAgents/com.lethe.container.plist"
-    echo "    Stop:    launchctl unload ~/Library/LaunchAgents/com.lethe.container.plist"
-    echo "    Logs:    tail -f $LETHE_HOME/logs/container.log"
-    echo "    Shell:   container run --volume $LETHE_HOME:/home/lethe/.lethe -it lethe:latest /bin/bash"
 }
 
 # ---------------------------------------------------------------------------
@@ -467,8 +537,15 @@ main() {
             setup_podman
             ;;
         mac)
-            info "Platform: macOS (apple/container)"
-            setup_apple_container
+            if command -v container >/dev/null 2>&1; then
+                info "Platform: macOS (apple/container)"
+                setup_apple_container
+            elif command -v podman >/dev/null 2>&1; then
+                info "Platform: macOS (podman)"
+                setup_podman_mac
+            else
+                error "No container runtime found. Install apple/container (macOS 26+: brew install container) or podman (brew install podman)"
+            fi
             ;;
         *)
             error "Unsupported platform: $(uname -s)"

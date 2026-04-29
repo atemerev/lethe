@@ -581,16 +581,26 @@ install_container_deps() {
     install_base_deps
 
     if [[ "$OS" == "mac" ]]; then
-        if ! check_command container; then
-            info "Installing apple/container..."
-            brew install container
+        if check_command container; then
+            success "container CLI found"
+            if ! container system status &>/dev/null; then
+                info "Starting container system service..."
+                container system start
+            fi
+            success "container system service running"
+        elif check_command podman; then
+            success "podman found (fallback for older macOS)"
+        else
+            info "Installing container runtime..."
+            if brew install container 2>/dev/null; then
+                success "container CLI installed"
+                container system start
+            else
+                info "apple/container not available, installing podman..."
+                brew install podman
+                success "podman installed"
+            fi
         fi
-        success "container CLI found"
-        if ! container system status &>/dev/null; then
-            info "Starting container system service..."
-            container system start
-        fi
-        success "container system service running"
     else
         if ! check_command podman; then
             info "Installing podman..."

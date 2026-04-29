@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.15.1 - 2026-04-30
+
+### Added
+- **macOS podman fallback**: Intel Macs and pre-Sequoia systems automatically use podman when apple/container is not available. Installer tries `brew install container` first, falls back to `brew install podman`.
+
 ## v0.15.0 - 2026-04-30
 
 ### Changed
