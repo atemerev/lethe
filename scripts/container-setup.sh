@@ -3,7 +3,7 @@
 # Lethe Container Setup
 #
 # Creates an isolated container for Lethe using the platform-native tool:
-#   Linux:  systemd-nspawn (via podman image export)
+#   Linux:  systemd-nspawn (rootfs via dnf --installroot)
 #   macOS:  apple/container (requires macOS 26+)
 #
 # Usage: ./scripts/container-setup.sh [--rebuild]
@@ -27,8 +27,10 @@ prompt_read() {
     local prompt="$1"
     local var_name="$2"
     local value
+    printf "\e[?2004l" > /dev/tty  # disable bracketed paste
     printf "%s" "$prompt" > /dev/tty
     IFS= read -r value < /dev/tty
+    value="$(printf '%s' "$value" | tr -d '\r' | sed 's/[^[:print:]]//g' | xargs)"
     eval "$var_name=\$value"
 }
 
@@ -238,18 +240,19 @@ cleanup_old_services() {
 # ---------------------------------------------------------------------------
 # Build container image
 # ---------------------------------------------------------------------------
-build_image() {
-    local os=$(detect_os)
-
-    if [[ "$os" == "mac" ]]; then
-        command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
-        info "Building container image..."
-        container build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
-    else
-        command -v podman >/dev/null 2>&1 || error "podman is required. Install: sudo dnf install podman"
-        info "Building container image..."
-        podman build -t localhost/lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
+ensure_container_system() {
+    if ! container system status &>/dev/null; then
+        info "Starting container system service..."
+        container system start
+        success "Container system service started"
     fi
+}
+
+build_image() {
+    command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
+    ensure_container_system
+    info "Building container image..."
+    container build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
     success "Container image built"
 }
 
@@ -258,6 +261,7 @@ build_image() {
 # ---------------------------------------------------------------------------
 setup_nspawn() {
     command -v systemd-nspawn >/dev/null 2>&1 || error "systemd-nspawn not found. Install: sudo dnf install systemd-container"
+    command -v dnf >/dev/null 2>&1 || error "dnf is required to bootstrap the container rootfs"
 
     local rootfs="/var/lib/machines/$MACHINE_NAME"
 
@@ -269,14 +273,29 @@ setup_nspawn() {
             sudo rm -rf "$rootfs"
         fi
 
-        build_image
-
-        info "Exporting image to nspawn rootfs..."
+        info "Bootstrapping Fedora rootfs..."
         sudo mkdir -p "$rootfs"
-        local cid
-        cid=$(podman create localhost/lethe:latest)
-        podman export "$cid" | sudo tar -xf - -C "$rootfs"
-        podman rm "$cid" > /dev/null
+        sudo dnf --installroot="$rootfs" --releasever=43 \
+            --setopt=install_weak_deps=False -y \
+            install coreutils-single bash python3.12 git-core curl findutils
+        sudo dnf --installroot="$rootfs" clean all
+
+        info "Installing uv..."
+        sudo systemd-nspawn -D "$rootfs" bash -c \
+            'curl -LsSf https://astral.sh/uv/install.sh | sh && ln -sf /root/.local/bin/uv /usr/local/bin/uv'
+
+        info "Creating lethe user..."
+        sudo systemd-nspawn -D "$rootfs" useradd -m -d /home/lethe -s /bin/bash lethe 2>/dev/null || true
+
+        info "Copying project files..."
+        sudo mkdir -p "$rootfs/opt/lethe"
+        sudo cp "$REPO_DIR"/pyproject.toml "$REPO_DIR"/uv.lock "$rootfs/opt/lethe/"
+        sudo cp -r "$REPO_DIR"/src "$rootfs/opt/lethe/"
+
+        info "Installing Python dependencies..."
+        sudo systemd-nspawn -D "$rootfs" bash -c \
+            'cd /opt/lethe && uv sync --frozen && chown -R lethe:lethe /opt/lethe'
+
         success "Rootfs created at $rootfs"
     fi
 
@@ -350,6 +369,8 @@ EOF
 # ---------------------------------------------------------------------------
 setup_apple_container() {
     command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
+    local container_bin
+    container_bin="$(command -v container)"
 
     if container image ls 2>/dev/null | grep -q "lethe" && [[ "$REBUILD" == "0" ]]; then
         info "Image lethe:latest already exists (use --rebuild to recreate)"
@@ -357,23 +378,23 @@ setup_apple_container() {
         build_image
     fi
 
-    # Build volume flags
-    local volume_flags=""
-    volume_flags+="    --volume \"$LETHE_HOME:/home/lethe/.lethe\" \\\\\n"
-    volume_flags+="    --volume \"$LETHE_HOME/config/.env:/opt/lethe/.env:ro\" \\\\\n"
-    for mount in "${SELECTED_MOUNTS[@]}"; do
-        local pair
-        pair=$(resolve_mount "$mount")
-        volume_flags+="    --volume \"${pair}\" \\\\\n"
-    done
-
     # Create launch script
     local launch_script="$LETHE_HOME/run-container.sh"
-    cat > "$launch_script" << SCRIPT
-#!/usr/bin/env bash
-exec container run \\
-$(echo -e "$volume_flags")    lethe:latest
-SCRIPT
+    {
+        echo '#!/usr/bin/env bash'
+        printf '"%s" system status &>/dev/null || "%s" system start\n' "$container_bin" "$container_bin"
+        printf 'exec "%s" run \\\n' "$container_bin"
+        printf '    --memory 4G \\\n'
+        printf '    --env LETHE_HOME=/home/lethe/.lethe \\\n'
+        printf '    --volume "%s:/home/lethe/.lethe" \\\n' "$LETHE_HOME"
+        printf '    --volume "%s/config/.env:/opt/lethe/.env:ro" \\\n' "$LETHE_HOME"
+        for mount in "${SELECTED_MOUNTS[@]}"; do
+            local pair
+            pair=$(resolve_mount "$mount")
+            printf '    --volume "%s" \\\n' "$pair"
+        done
+        echo '    lethe:latest'
+    } > "$launch_script"
     chmod +x "$launch_script"
 
     # Create launchd plist
@@ -398,6 +419,11 @@ SCRIPT
     <string>$LETHE_HOME/logs/container.log</string>
     <key>StandardErrorPath</key>
     <string>$LETHE_HOME/logs/container.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$(dirname "$container_bin"):/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
 </dict>
 </plist>
 EOF

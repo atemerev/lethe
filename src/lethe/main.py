@@ -486,6 +486,21 @@ async def run():
     bot_task = asyncio.create_task(telegram_bot.start())
     heartbeat_task = asyncio.create_task(heartbeat.start())
 
+    if stats['total_messages'] == 0 and fallback_chat_id:
+        async def onboarding():
+            await asyncio.sleep(3)
+            try:
+                response = await agent.chat(
+                    "You are Lethe. This is your very first conversation with your principal. "
+                    "Introduce yourself as Lethe and ask them to tell you about themselves "
+                    "so you can remember who they are. Two to three sentences."
+                )
+                await telegram_bot.send_message(fallback_chat_id, response)
+                logger.info("Onboarding message sent")
+            except Exception as e:
+                logger.warning("Onboarding failed: %s", e)
+        asyncio.create_task(onboarding())
+
     try:
         await shutdown_event.wait()
     except asyncio.CancelledError:

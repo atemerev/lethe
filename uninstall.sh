@@ -87,10 +87,10 @@ if [[ -d "/var/lib/machines/lethe" ]]; then
     success "Container rootfs removed"
 fi
 
-# Container image (podman)
+# Container image from previous podman-based installs
 if command -v podman &>/dev/null; then
     if podman image exists localhost/lethe:latest 2>/dev/null; then
-        info "Removing container image..."
+        info "Removing legacy podman container image..."
         podman rmi localhost/lethe:latest 2>/dev/null || true
         success "Container image removed"
     fi

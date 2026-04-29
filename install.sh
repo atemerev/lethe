@@ -115,8 +115,10 @@ prompt_read() {
     local prompt="$1"
     local var_name="$2"
     local value
+    printf "\e[?2004l" > /dev/tty  # disable bracketed paste
     printf "%s" "$prompt" > /dev/tty
     IFS= read -r value < /dev/tty
+    value="$(printf '%s' "$value" | tr -d '\r' | sed 's/[^[:print:]]//g' | xargs)"
     eval "$var_name=\$value"
 }
 
@@ -381,17 +383,27 @@ prompt_api_key() {
     echo ""
     echo -e "${BLUE}$key_name required${NC}"
     if [[ "$key_name" == "ANTHROPIC_AUTH_TOKEN" ]]; then
-        echo "   Step 1: Run 'claude setup-token' in another terminal and complete login."
         if check_command claude; then
-            prompt_read "   Run 'claude setup-token' now? [Y/n]: " run_setup
+            prompt_read "   Run 'claude setup-token' to authenticate via browser? [Y/n]: " run_setup
             run_setup=${run_setup:-Y}
             if [[ "$run_setup" =~ ^[Yy] ]]; then
-                claude setup-token || warn "claude setup-token did not complete. You can run it manually and continue."
+                local tmpfile captured_token
+                tmpfile=$(mktemp /tmp/lethe-token.XXXXXX)
+                claude setup-token < /dev/tty > "$tmpfile"
+                captured_token=$(sed -e :a -e '/-$/N; s/-\n/-/; ta' "$tmpfile" | grep -oE '^sk-ant-oat01-[A-Za-z0-9_-]+$' | tail -1)
+                rm -f "$tmpfile"
+                if [[ -n "$captured_token" ]]; then
+                    API_KEY="$captured_token"
+                    SELECTED_AUTH_KEY_NAME="$key_name"
+                    success "Token obtained"
+                    return
+                fi
+                warn "Could not capture token automatically."
             fi
         else
             echo "   Claude CLI not found. Install Claude Code CLI, run 'claude setup-token', then paste token below."
         fi
-        echo "   Step 2: Paste your ANTHROPIC_AUTH_TOKEN."
+        echo "   Paste your ANTHROPIC_AUTH_TOKEN below."
     elif [[ "$key_name" == "OPENAI_AUTH_TOKEN" ]]; then
         echo "   Recommended: run OpenAI OAuth after install:"
         echo "     cd $INSTALL_DIR && uv run lethe oauth-login openai"
@@ -575,19 +587,12 @@ install_container_deps() {
             brew install container
         fi
         success "container CLI found"
-    else
-        if ! check_command podman; then
-            info "Installing podman..."
-            if check_command apt-get; then
-                maybe_sudo apt-get install -y podman
-            elif check_command dnf; then
-                maybe_sudo dnf install -y podman
-            else
-                error "Could not install podman. Install it manually."
-            fi
+        if ! container system status &>/dev/null; then
+            info "Starting container system service..."
+            container system start
         fi
-        success "podman found"
-
+        success "container system service running"
+    else
         if ! check_command systemd-nspawn; then
             info "Installing systemd-container..."
             if check_command dnf; then
