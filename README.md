@@ -6,7 +6,7 @@
 
 Autonomous AI assistant with persistent memory, background cognition, and a multi-agent architecture.
 
-Lethe runs 24/7 as a systemd/launchd service, communicates via Telegram, remembers your preferences and projects across sessions, and thinks in the background even when you're not talking to it. It uses tools, browses files, searches the web, and delegates focused work to subagents.
+Lethe runs 24/7 in an isolated container, communicates via Telegram, remembers your preferences and projects across sessions, and thinks in the background even when you're not talking to it. It uses tools, browses files, searches the web, and delegates focused work to subagents.
 
 ## Install
 
@@ -14,9 +14,11 @@ Lethe runs 24/7 as a systemd/launchd service, communicates via Telegram, remembe
 curl -fsSL https://lethe.gg/install | bash
 ```
 
-The installer sets up `~/.lethe` as the runtime root, creates a systemd (Linux) or launchd (macOS) service, and walks you through provider selection and Telegram bot setup.
+The installer sets up `~/.lethe` as the runtime root, builds an isolated container (systemd-nspawn on Linux, apple/container on macOS), and walks you through provider selection and Telegram bot setup. If an existing workspace is detected, you can reuse it without reconfiguring.
 
-**Prerequisites:** Python 3.11+, a Telegram bot token, and an LLM provider (Anthropic subscription, OpenRouter API key, OpenAI, or a local server).
+**Prerequisites:** A Telegram bot token and an LLM provider (Anthropic subscription, OpenRouter API key, OpenAI, or a local server). The installer handles all other dependencies.
+
+For native (non-containerized) install: `curl -fsSL https://lethe.gg/install | bash -s -- --yolo`
 
 ### Manual install
 
@@ -81,10 +83,12 @@ System prompt content is split by update lifecycle:
 
 ## Security
 
-Lethe enforces an OS-level write sandbox at process start:
+Lethe runs in an isolated container by default:
 
-- **Linux**: [Landlock](https://landlock.io/) restricts writes to `~/.lethe` and `/tmp`.
-- **macOS**: Seatbelt sandbox profile with equivalent restrictions.
+- **Linux**: [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html) container with bind-mounted access only to `~/.lethe` and directories you choose during install.
+- **macOS**: [apple/container](https://github.com/apple/container) with equivalent volume mounts.
+
+In native mode (`--yolo`), an OS-level write sandbox is enforced instead: Landlock on Linux, Seatbelt on macOS — both restrict writes to `~/.lethe` and `/tmp`.
 
 The API server binds to `127.0.0.1` by default. Use a reverse proxy for remote access.
 
@@ -201,33 +205,25 @@ Edit `workspace/memory/identity.md` to customize personality, purpose, and backg
 
 System instructions (communication style, output format) are in `config/prompts/agent_instructions.md`.
 
-### Run as service
+### Container management
 
-The installer creates the service automatically. To do it manually:
+The installer creates the container and service automatically. Useful commands:
 
 ```bash
-# Linux (systemd user service)
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/lethe.service << EOF
-[Unit]
-Description=Lethe Autonomous AI Agent
-After=network.target
+# Linux (systemd-nspawn)
+sudo systemctl start lethe-container
+sudo systemctl stop lethe-container
+sudo journalctl -u lethe-container -f
+sudo systemd-nspawn -M lethe --user lethe /bin/bash   # shell into container
+sudo systemd-nspawn -M lethe microdnf install <pkg>   # install packages
 
-[Service]
-Type=simple
-WorkingDirectory=/path/to/lethe
-ExecStart=/path/to/uv run lethe
-Restart=always
-RestartSec=10
-Environment="LETHE_HOME=$HOME/.lethe"
-
-[Install]
-WantedBy=default.target
-EOF
-
-systemctl --user daemon-reload
-systemctl --user enable --now lethe
+# macOS (apple/container)
+launchctl load ~/Library/LaunchAgents/com.lethe.container.plist
+launchctl unload ~/Library/LaunchAgents/com.lethe.container.plist
+tail -f ~/.lethe/logs/container.log
 ```
+
+Mount additional directories by editing `~/.lethe/config/mounts.conf` and re-running `scripts/container-setup.sh`.
 
 ## Development
 
