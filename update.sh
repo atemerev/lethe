@@ -47,6 +47,16 @@ get_latest_release() {
 }
 
 detect_install_mode() {
+    # Container modes take priority — if you installed as container, update as container
+    if [ -f "/etc/systemd/system/lethe-container.service" ]; then
+        echo "container-nspawn"
+        return
+    fi
+    if [ -f "$HOME/Library/LaunchAgents/com.lethe.container.plist" ]; then
+        echo "container-apple"
+        return
+    fi
+
     # Root user: always use system-level service
     if [[ "$(id -u)" -eq 0 ]]; then
         if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
@@ -152,6 +162,7 @@ get_native_version() {
 update_native() {
     local install_dir="$1"
     local target_version="$2"
+    local skip_sync="${3:-}"
 
     cd "$install_dir"
 
@@ -206,12 +217,14 @@ update_native() {
         fi
     fi
 
-    # Update dependencies
-    info "Updating dependencies..."
-    if command -v uv &>/dev/null; then
-        if ! uv sync; then
-            restore_stash_on_failure
-            return 1
+    # Update dependencies (skip for container mode — deps sync inside the container)
+    if [ "$skip_sync" != "skip-sync" ]; then
+        info "Updating dependencies..."
+        if command -v uv &>/dev/null; then
+            if ! uv sync; then
+                restore_stash_on_failure
+                return 1
+            fi
         fi
     fi
     if [ -n "$stash_ref" ]; then
@@ -220,6 +233,57 @@ update_native() {
     fi
 
     success "Code updated to $target_version"
+}
+
+update_container_nspawn() {
+    local install_dir="$1"
+    local rootfs="/var/lib/machines/lethe"
+
+    if [ ! -d "$rootfs" ]; then
+        error "nspawn rootfs not found at $rootfs. Run install.sh to set up."
+    fi
+
+    info "Stopping container..."
+    sudo systemctl stop lethe-container 2>/dev/null || true
+    sleep 1
+    sudo machinectl terminate lethe 2>/dev/null || true
+
+    info "Updating rootfs..."
+    sudo cp "$install_dir"/pyproject.toml "$install_dir"/uv.lock "$rootfs/opt/lethe/"
+    sudo rm -rf "$rootfs/opt/lethe/src"
+    sudo cp -r "$install_dir"/src "$rootfs/opt/lethe/"
+
+    info "Syncing dependencies..."
+    sudo systemd-nspawn -D "$rootfs" bash -c \
+        'cd /opt/lethe && /usr/local/bin/uv sync --frozen && chown -R lethe:lethe /opt/lethe'
+
+    info "Starting container..."
+    sudo systemctl start lethe-container
+    success "Container updated and restarted"
+    echo ""
+    echo "  View logs: sudo journalctl -u lethe-container -f"
+}
+
+update_container_apple() {
+    local install_dir="$1"
+    local container_bin
+    container_bin="$(command -v container || true)"
+
+    if [ -z "$container_bin" ]; then
+        error "'container' CLI not found. Install: brew install container"
+    fi
+
+    info "Stopping container..."
+    launchctl unload "$HOME/Library/LaunchAgents/com.lethe.container.plist" 2>/dev/null || true
+
+    info "Rebuilding container image..."
+    "$container_bin" build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
+
+    info "Starting container..."
+    launchctl load "$HOME/Library/LaunchAgents/com.lethe.container.plist"
+    success "Container updated and restarted"
+    echo ""
+    echo "  View logs: tail -f $LETHE_HOME/logs/container.log"
 }
 
 main() {
@@ -231,31 +295,45 @@ main() {
 
     echo "  Install mode:   $install_mode"
 
+    local install_dir
+    install_dir=$(detect_install_dir)
+
+    if [ -z "$install_dir" ] || [ ! -d "$install_dir" ]; then
+        error "Could not find Lethe installation directory. Set LETHE_INSTALL_DIR or LETHE_HOME."
+    fi
+
+    current_version=$(get_native_version "$install_dir")
+
+    echo "  Install dir:    $install_dir"
+    echo "  Current:        $current_version"
+    echo "  Latest:         $latest_version"
+    echo ""
+
+    if [ "$current_version" == "$latest_version" ]; then
+        success "Already up to date!"
+        exit 0
+    fi
+
+    info "Update available: $current_version -> $latest_version"
+    echo ""
+
     case "$install_mode" in
-        native-systemd-system|native-systemd-system-new|native-systemd-user|native-launchd)
-            local install_dir=$(detect_install_dir)
-
-            if [ -z "$install_dir" ] || [ ! -d "$install_dir" ]; then
-                error "Could not find Lethe installation directory. Set LETHE_INSTALL_DIR or LETHE_HOME."
-            fi
-
-            current_version=$(get_native_version "$install_dir")
-
-            echo "  Install dir:    $install_dir"
-            echo "  Current:        $current_version"
-            echo "  Latest:         $latest_version"
-            echo ""
-
-            if [ "$current_version" == "$latest_version" ]; then
-                success "Already up to date!"
-                exit 0
-            fi
-
-            info "Update available: $current_version -> $latest_version"
-            echo ""
-
+        container-nspawn|container-apple)
+            update_native "$install_dir" "$latest_version" skip-sync
+            ;;
+        *)
             update_native "$install_dir" "$latest_version"
+            ;;
+    esac
 
+    case "$install_mode" in
+        container-nspawn)
+            update_container_nspawn "$install_dir"
+            ;;
+        container-apple)
+            update_container_apple "$install_dir"
+            ;;
+        native-systemd-system|native-systemd-system-new|native-systemd-user|native-launchd)
             # Migrate aux model: gemini-flash -> qwen3-coder-next (v0.4.1+)
             local env_file="$CONFIG_DIR/.env"
             if [ -f "$env_file" ] && grep -q "gemini.*flash" "$env_file"; then
@@ -317,14 +395,14 @@ EOF
                 echo ""
                 echo "  View logs: tail -f $LETHE_HOME/logs/lethe.log"
             fi
-            echo ""
-            success "Update complete! ($current_version -> $latest_version)"
             ;;
-
         *)
             error "Could not detect Lethe installation. Is Lethe installed?"
             ;;
     esac
+
+    echo ""
+    success "Update complete! ($current_version -> $latest_version)"
 }
 
 main "$@"
