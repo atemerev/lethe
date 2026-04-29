@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.14.0 - 2026-04-29
+
+### Added
+- **Container-first install**: default deployment now runs inside systemd-nspawn (Linux) or apple/container (macOS). Native install still available via `--yolo` flag.
+- **Containerfile and container-setup.sh** for reproducible, isolated builds.
+- **Workspace reuse on reinstall**: installer detects existing `~/.lethe` workspace (config, memory, notes) and offers to reuse it instead of starting fresh.
+- **Onboarding message**: first-start greeting when the message history is empty.
+- **Notes subdirectory support**: `NoteStore.create()` accepts a `subdir` parameter; listing and reindexing use recursive glob.
+
+### Changed
+- **Embedding engine rewrite**: replaced sentence-transformers + PyTorch (~2 GB) with ONNX Runtime + Snowflake arctic-embed-m-v2.0 — multilingual (76 languages), 768-dim vectors, 297 MB total. Shared `embeddings.py` module used by all memory subsystems.
+- **Automatic vector migration**: on startup, if the embedding model has changed, all archival/message tables are re-embedded and notes are reindexed. No manual intervention or data loss.
+- **LanceDB API compatibility**: `list_tables()` result handling adapts to both old (list) and new (object) return types.
+- **Dependency footprint reduced**: removed `sentence-transformers`, `torch`, and the PyTorch CPU index. Added `onnxruntime`, `tokenizers`, `huggingface-hub`.
+
+### Fixed
+- **macOS container installer**: XPC startup, PATH resolution, OAuth token capture, and onboarding flow for apple/container.
+
 ## v0.13.1 - 2026-04-23
 
 ### Fixed
