@@ -9,15 +9,11 @@ from typing import Optional, List
 import uuid
 
 import lancedb
-from lancedb.embeddings import get_registry
 import logging
 
+from lethe.memory.embeddings import embed, EMBEDDING_DIM
+
 logger = logging.getLogger(__name__)
-
-
-# Embedding model - small and fast, runs locally
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
 
 
 class ArchivalMemory:
@@ -29,27 +25,18 @@ class ArchivalMemory:
     
     TABLE_NAME = "archival_memory"
     
-    def __init__(self, db: lancedb.DBConnection, embedding_model: str = EMBEDDING_MODEL):
-        """Initialize archival memory.
-        
-        Args:
-            db: LanceDB connection
-            embedding_model: Sentence transformer model name
-        """
+    def __init__(self, db: lancedb.DBConnection):
         self.db = db
-        self.model_name = embedding_model
-        
-        # Get embedding function from registry
-        self.embedder = get_registry().get("sentence-transformers").create(
-            name=embedding_model
-        )
-        
         self._ensure_table()
-        logger.info(f"Archival memory initialized with {embedding_model}")
+        logger.info("Archival memory initialized")
+
+    def _table_names(self) -> list[str]:
+        result = self.db.list_tables()
+        return result.tables if hasattr(result, 'tables') else list(result)
     
     def _ensure_table(self):
         """Create table if it doesn't exist."""
-        if self.TABLE_NAME not in self.db.list_tables():
+        if self.TABLE_NAME not in self._table_names():
             # Create with initial data (LanceDB requires data for schema inference)
             init_vector = [0.0] * EMBEDDING_DIM
             self.db.create_table(
@@ -75,16 +62,8 @@ class ArchivalMemory:
         """Get the archival table."""
         return self.db.open_table(self.TABLE_NAME)
     
-    def _embed(self, text: str) -> List[float]:
-        """Generate embedding for text.
-        
-        Args:
-            text: Text to embed
-            
-        Returns:
-            Embedding vector
-        """
-        return self.embedder.compute_query_embeddings(text)[0]
+    def _embed(self, text: str, is_query: bool = True) -> List[float]:
+        return embed(text, is_query=is_query)
 
     def _parse_json_field(self, value: str, fallback):
         """Parse a JSON field safely."""
@@ -132,8 +111,7 @@ class ArchivalMemory:
         memory_id = f"mem-{uuid.uuid4()}"
         now = datetime.now(timezone.utc).isoformat()
         
-        # Generate embedding
-        vector = self._embed(text)
+        vector = self._embed(text, is_query=False)
         
         table = self._get_table()
         table.add([{
@@ -305,8 +283,7 @@ class ArchivalMemory:
         table = self._get_table()
         table.delete(f"id = '{memory_id}'")
         
-        # Re-add with updated tags (LanceDB doesn't have in-place update)
-        vector = self._embed(memory["text"])
+        vector = self._embed(memory["text"], is_query=False)
         table.add([{
             "id": memory_id,
             "text": memory["text"],

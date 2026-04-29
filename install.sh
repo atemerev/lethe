@@ -115,8 +115,10 @@ prompt_read() {
     local prompt="$1"
     local var_name="$2"
     local value
+    printf "\e[?2004l" > /dev/tty  # disable bracketed paste
     printf "%s" "$prompt" > /dev/tty
     IFS= read -r value < /dev/tty
+    value="$(printf '%s' "$value" | tr -d '\r' | sed 's/[^[:print:]]//g' | xargs)"
     eval "$var_name=\$value"
 }
 
@@ -381,17 +383,27 @@ prompt_api_key() {
     echo ""
     echo -e "${BLUE}$key_name required${NC}"
     if [[ "$key_name" == "ANTHROPIC_AUTH_TOKEN" ]]; then
-        echo "   Step 1: Run 'claude setup-token' in another terminal and complete login."
         if check_command claude; then
-            prompt_read "   Run 'claude setup-token' now? [Y/n]: " run_setup
+            prompt_read "   Run 'claude setup-token' to authenticate via browser? [Y/n]: " run_setup
             run_setup=${run_setup:-Y}
             if [[ "$run_setup" =~ ^[Yy] ]]; then
-                claude setup-token || warn "claude setup-token did not complete. You can run it manually and continue."
+                local tmpfile captured_token
+                tmpfile=$(mktemp /tmp/lethe-token.XXXXXX)
+                claude setup-token < /dev/tty > "$tmpfile"
+                captured_token=$(sed -e :a -e '/-$/N; s/-\n/-/; ta' "$tmpfile" | grep -oE '^sk-ant-oat01-[A-Za-z0-9_-]+$' | tail -1)
+                rm -f "$tmpfile"
+                if [[ -n "$captured_token" ]]; then
+                    API_KEY="$captured_token"
+                    SELECTED_AUTH_KEY_NAME="$key_name"
+                    success "Token obtained"
+                    return
+                fi
+                warn "Could not capture token automatically."
             fi
         else
             echo "   Claude CLI not found. Install Claude Code CLI, run 'claude setup-token', then paste token below."
         fi
-        echo "   Step 2: Paste your ANTHROPIC_AUTH_TOKEN."
+        echo "   Paste your ANTHROPIC_AUTH_TOKEN below."
     elif [[ "$key_name" == "OPENAI_AUTH_TOKEN" ]]; then
         echo "   Recommended: run OpenAI OAuth after install:"
         echo "     cd $INSTALL_DIR && uv run lethe oauth-login openai"
@@ -469,17 +481,79 @@ prompt_telegram() {
     fi
 }
 
-install_dependencies() {
+detect_existing_workspace() {
+    # Check if ~/.lethe has meaningful data from a previous install
+    if [[ ! -d "$LETHE_HOME" ]]; then
+        return 1
+    fi
+
+    local has_config=0
+    local has_memory=0
+    local has_workspace=0
+    local details=""
+
+    if [[ -f "$CONFIG_DIR/.env" ]]; then
+        has_config=1
+        local provider
+        provider="$(get_env_value "LLM_PROVIDER" "$CONFIG_DIR/.env" || true)"
+        local model
+        model="$(get_env_value "LLM_MODEL" "$CONFIG_DIR/.env" || true)"
+        details+="    Config:    ${provider:-unknown} / ${model:-default}\n"
+    fi
+
+    if [[ -d "$LETHE_HOME/data/memory/lancedb" ]]; then
+        has_memory=1
+        local db_size
+        db_size="$(du -sh "$LETHE_HOME/data/memory/lancedb" 2>/dev/null | cut -f1)"
+        details+="    Memory:    ${db_size} in lancedb\n"
+    fi
+
+    if [[ -d "$LETHE_HOME/workspace" ]]; then
+        local note_count
+        note_count="$(find "$LETHE_HOME/workspace" -name "*.md" 2>/dev/null | wc -l)"
+        if [[ "$note_count" -gt 0 ]]; then
+            has_workspace=1
+            details+="    Workspace: ${note_count} files\n"
+        fi
+    fi
+
+    # Need at least config to consider it a real workspace
+    if [[ "$has_config" == "0" ]]; then
+        return 1
+    fi
+
+    echo -e "${GREEN}Found existing Lethe workspace at $LETHE_HOME${NC}"
+    echo ""
+    echo -e "$details"
+    if [[ "$has_memory" == "1" ]]; then
+        echo -e "    ${YELLOW}Note: embeddings will be re-indexed on first start${NC}"
+        echo -e "    ${YELLOW}(upgraded model — this is automatic, no data loss)${NC}"
+    fi
+    echo ""
+    prompt_read "  Reuse this workspace? [Y/n]: " reuse
+    reuse=${reuse:-Y}
+
+    if [[ "$reuse" =~ ^[Yy] ]]; then
+        success "Reusing existing workspace"
+        return 0
+    else
+        prompt_read "  Start fresh? This will move the old workspace to ${LETHE_HOME}.bak [y/N]: " fresh
+        if [[ "$fresh" =~ ^[Yy] ]]; then
+            mv "$LETHE_HOME" "${LETHE_HOME}.bak.$(date +%s)"
+            info "Old workspace backed up"
+        fi
+        return 1
+    fi
+}
+
+install_base_deps() {
     local OS=$(detect_os)
     info "Detected OS: $OS"
 
-    # Install curl if missing
     if ! check_command curl; then
         info "Installing curl..."
         if [[ "$OS" == "mac" ]]; then
-            if ! check_command brew; then
-                error "Homebrew not found. Install Homebrew first: https://brew.sh"
-            fi
+            check_command brew || error "Homebrew not found. Install Homebrew first: https://brew.sh"
             brew install curl
         elif check_command apt-get; then
             maybe_sudo apt-get update -y && maybe_sudo apt-get install -y curl
@@ -489,13 +563,10 @@ install_dependencies() {
     fi
     success "curl found"
 
-    # Install git if missing
     if ! check_command git; then
         info "Installing git..."
         if [[ "$OS" == "mac" ]]; then
-            if ! check_command brew; then
-                error "Homebrew not found. Install Homebrew first: https://brew.sh"
-            fi
+            check_command brew || error "Homebrew not found. Install Homebrew first: https://brew.sh"
             brew install git
         elif check_command apt-get; then
             maybe_sudo apt-get install -y git
@@ -504,14 +575,45 @@ install_dependencies() {
         fi
     fi
     success "git found"
+}
 
-    # Install Node.js/npm if missing (needed for agent-browser)
+install_container_deps() {
+    local OS=$(detect_os)
+    install_base_deps
+
+    if [[ "$OS" == "mac" ]]; then
+        if ! check_command container; then
+            info "Installing apple/container..."
+            brew install container
+        fi
+        success "container CLI found"
+        if ! container system status &>/dev/null; then
+            info "Starting container system service..."
+            container system start
+        fi
+        success "container system service running"
+    else
+        if ! check_command systemd-nspawn; then
+            info "Installing systemd-container..."
+            if check_command dnf; then
+                maybe_sudo dnf install -y systemd-container
+            elif check_command apt-get; then
+                maybe_sudo apt-get install -y systemd-container
+            fi
+        fi
+        success "systemd-nspawn found"
+    fi
+}
+
+install_native_deps() {
+    local OS=$(detect_os)
+    install_base_deps
+
+    # Node.js/npm for agent-browser
     if ! check_command npm; then
         info "Installing Node.js..."
         if [[ "$OS" == "mac" ]]; then
-            if ! check_command brew; then
-                error "Homebrew not found. Install Homebrew first: https://brew.sh"
-            fi
+            check_command brew || error "Homebrew not found. Install Homebrew first: https://brew.sh"
             brew install node
         elif check_command apt-get; then
             maybe_sudo apt-get install -y nodejs npm
@@ -520,16 +622,14 @@ install_dependencies() {
         fi
     fi
 
-    # Install agent-browser for browser automation
     if ! check_command agent-browser; then
         info "Installing agent-browser..."
         npm install -g agent-browser 2>/dev/null || maybe_sudo npm install -g agent-browser
-        info "Installing browser dependencies..."
         agent-browser install --with-deps 2>/dev/null || maybe_sudo agent-browser install --with-deps
     fi
     success "agent-browser found"
 
-    # Install uv
+    # uv
     if ! check_command uv; then
         info "Installing uv (Python package manager)..."
         curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -538,14 +638,12 @@ install_dependencies() {
     fi
     success "uv found"
 
-    # Check Python
     if ! uv python list 2>/dev/null | grep -q "3.1[1-9]"; then
         info "Installing Python 3.12 via uv..."
         uv python install 3.12
     fi
     success "Python 3.11+ available"
 
-    # Capture uv path for service setup
     UV_BIN="$(command -v uv || true)"
     if [ -z "${UV_BIN:-}" ]; then
         error "uv is not in PATH after installation"
@@ -817,9 +915,14 @@ install_deps_and_run() {
 main() {
     print_header
 
+    local YOLO=0
+
     # Parse args
     for arg in "$@"; do
         case $arg in
+            --yolo)
+                YOLO=1
+                ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
@@ -827,11 +930,11 @@ main() {
                 echo ""
                 echo "Options:"
                 echo "  --help, -h    Show this help message"
+                echo "  --yolo        Install directly on the host (no container isolation)"
                 echo ""
                 echo "Environment variables:"
                 echo "  LETHE_HOME         Root directory for all Lethe data (default: ~/.lethe)"
                 echo "  LETHE_INSTALL_DIR  Where to clone the source (default: \$LETHE_HOME/install)"
-                echo "  LETHE_NO_SANDBOX   Set to 1 to disable OS-level write sandbox"
                 echo ""
                 echo "Supports OpenRouter, Anthropic, and OpenAI as LLM providers."
                 exit 0
@@ -839,43 +942,60 @@ main() {
         esac
     done
 
-    # Show sandbox info
     local OS=$(detect_os)
-    if [[ "$OS" == "linux" || "$OS" == "wsl" ]]; then
-        echo -e "${GREEN}Sandbox${NC}: Landlock (kernel-enforced write restrictions)"
-    elif [[ "$OS" == "mac" ]]; then
-        echo -e "${GREEN}Sandbox${NC}: Seatbelt (macOS sandbox-exec write restrictions)"
+
+    if [[ "$YOLO" == "1" ]]; then
+        echo -e "${YELLOW}Mode${NC}: Native install (--yolo) — no container isolation"
     else
-        echo -e "${YELLOW}Sandbox${NC}: not available on this platform"
+        echo -e "${GREEN}Mode${NC}: Container (systemd-nspawn on Linux, apple/container on macOS)"
+        echo -e "  Lethe runs isolated, with access only to directories you choose."
     fi
-    echo -e "  Writes restricted to ${CYAN}$LETHE_HOME${NC} and ${CYAN}/tmp${NC}"
     echo ""
 
-    # Detect existing keys
-    detect_api_keys
+    # Detect existing workspace
+    local REUSE_WORKSPACE=0
+    if detect_existing_workspace; then
+        REUSE_WORKSPACE=1
+    fi
 
-    # Prompts
-    prompt_provider
-    prompt_model
-    prompt_api_key
-    prompt_telegram
+    if [[ "$REUSE_WORKSPACE" == "0" ]]; then
+        detect_api_keys
+        prompt_provider
+        prompt_model
+        prompt_api_key
+        prompt_telegram
+    fi
 
     echo ""
     info "Installing Lethe..."
     echo ""
 
-    # Setup
-    install_dependencies
-    clone_or_detect_repo
-    setup_lethe_dirs
-    install_deps_and_run
-    setup_config
-
-    if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
-        warn "Skipping service start until OpenAI OAuth is configured."
-        warn "Run OAuth login, then start Lethe manually."
+    if [[ "$YOLO" == "1" ]]; then
+        install_native_deps
     else
-        setup_service
+        install_container_deps
+    fi
+
+    clone_or_detect_repo
+
+    if [[ "$REUSE_WORKSPACE" == "0" ]]; then
+        setup_lethe_dirs
+        setup_config
+    fi
+
+    if [[ "$YOLO" == "1" ]]; then
+        install_deps_and_run
+        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" != "1" ]]; then
+            setup_service
+        else
+            warn "OpenAI OAuth pending — configure before starting Lethe."
+        fi
+    else
+        info "Setting up container..."
+        "$INSTALL_DIR/scripts/container-setup.sh"
+        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
+            warn "OpenAI OAuth pending — configure before starting Lethe."
+        fi
     fi
 
     echo ""
@@ -883,38 +1003,16 @@ main() {
     echo -e "${GREEN}  Lethe installed successfully!${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo "  Provider:  $SELECTED_PROVIDER"
-    echo "  Model:     $SELECTED_MODEL (aux: $SELECTED_MODEL_AUX)"
     echo "  Home:      $LETHE_HOME"
-    echo "  Install:   $INSTALL_DIR"
-    echo "  Sandbox:   OS-level write restrictions active"
+    echo "  Config:    $CONFIG_DIR/.env"
+    if [[ "$YOLO" == "1" ]]; then
+        echo "  Mode:      native (no isolation)"
+    fi
+    if [[ "$REUSE_WORKSPACE" == "1" ]]; then
+        echo "  Workspace: reused from previous installation"
+    fi
     echo ""
     echo "  Message your bot on Telegram to get started!"
-    if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
-        echo ""
-        echo -e "${YELLOW}  OpenAI OAuth pending:${NC}"
-        echo "    Run: cd $INSTALL_DIR && $UV_BIN run lethe oauth-login openai"
-        echo "    Then start:   cd $INSTALL_DIR && $UV_BIN run lethe"
-    fi
-    echo ""
-    echo "  Useful commands:"
-    if [[ "$OS" == "linux" || "$OS" == "wsl" ]]; then
-        if [[ "$(id -u)" -eq 0 ]]; then
-            echo "    View logs:     journalctl -u lethe -f"
-            echo "    Restart:       systemctl restart lethe"
-            echo "    Stop:          systemctl stop lethe"
-        else
-            echo "    View logs:     journalctl --user -u lethe -f"
-            echo "    Restart:       systemctl --user restart lethe"
-            echo "    Stop:          systemctl --user stop lethe"
-        fi
-    elif [[ "$OS" == "mac" ]]; then
-        echo "    View logs:     tail -f $LETHE_HOME/logs/lethe.log"
-        echo "    Restart:       launchctl unload ~/Library/LaunchAgents/com.lethe.agent.plist && launchctl load ~/Library/LaunchAgents/com.lethe.agent.plist"
-        echo "    Stop:          launchctl unload ~/Library/LaunchAgents/com.lethe.agent.plist"
-    fi
-    echo "    Config:        $CONFIG_DIR/.env"
-    echo "    Sandbox off:   LETHE_NO_SANDBOX=1"
     echo ""
 }
 

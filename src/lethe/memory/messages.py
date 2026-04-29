@@ -9,14 +9,11 @@ from typing import Optional, List
 import uuid
 
 import lancedb
-from lancedb.embeddings import get_registry
 import logging
 
-logger = logging.getLogger(__name__)
+from lethe.memory.embeddings import embed, EMBEDDING_DIM
 
-# Embedding model - same as archival for consistency
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
+logger = logging.getLogger(__name__)
 
 
 class MessageHistory:
@@ -28,26 +25,17 @@ class MessageHistory:
     
     TABLE_NAME = "message_history"
     
-    def __init__(self, db: lancedb.DBConnection, embedding_model: str = EMBEDDING_MODEL):
-        """Initialize message history.
-        
-        Args:
-            db: LanceDB connection
-            embedding_model: Sentence transformer model name
-        """
+    def __init__(self, db: lancedb.DBConnection):
         self.db = db
-        self.model_name = embedding_model
-        
-        # Get embedding function from registry
-        self.embedder = get_registry().get("sentence-transformers").create(
-            name=embedding_model
-        )
-        
         self._ensure_table()
+
+    def _table_names(self) -> list[str]:
+        result = self.db.list_tables()
+        return result.tables if hasattr(result, 'tables') else list(result)
     
     def _ensure_table(self):
         """Create table if it doesn't exist."""
-        if self.TABLE_NAME not in self.db.list_tables():
+        if self.TABLE_NAME not in self._table_names():
             init_vector = [0.0] * EMBEDDING_DIM
             self.db.create_table(
                 self.TABLE_NAME,
@@ -72,19 +60,14 @@ class MessageHistory:
         """Get the messages table."""
         return self.db.open_table(self.TABLE_NAME)
     
-    def _embed(self, text) -> List[float]:
-        """Generate embedding for text (handles multimodal content)."""
-        # Handle multimodal content (list of parts)
+    def _embed(self, text, is_query: bool = True) -> List[float]:
         if isinstance(text, list):
             text_parts = []
             for part in text:
                 if isinstance(part, dict) and part.get("type") == "text":
                     text_parts.append(part.get("text", ""))
             text = " ".join(text_parts)
-        
-        if not text or not text.strip():
-            return [0.0] * EMBEDDING_DIM
-        return self.embedder.compute_query_embeddings(text)[0]
+        return embed(text or "", is_query=is_query)
     
     def add(
         self,
@@ -105,8 +88,7 @@ class MessageHistory:
         message_id = f"msg-{uuid.uuid4()}"
         now = datetime.now(timezone.utc).isoformat()
         
-        # Generate embedding (handles multimodal)
-        vector = self._embed(content)
+        vector = self._embed(content, is_query=False)
         
         # Serialize multimodal content as JSON for storage
         if isinstance(content, list):

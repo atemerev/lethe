@@ -1,6 +1,6 @@
 [project]
 name = "lethe"
-version = "0.13.1"
+version = "0.14.0"
 description = "Autonomous executive assistant with local memory and LLM"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,9 +13,9 @@ dependencies = [
     "pyte>=0.8.0", # Terminal emulator for TUI capture
     "pillow>=12.1.0",
     "lancedb>=0.27.1",
-    "sentence-transformers>=5.2.2",
-    # Keep torch direct so uv applies CPU index mapping during lock/sync.
-    "torch>=2.0.0",
+    "onnxruntime>=1.18.0",
+    "tokenizers>=0.19.0",
+    "huggingface-hub>=0.23.0",
     "python-dotenv>=1.2.1",
     "litellm>=1.81.6,!=1.82.7,!=1.82.8",
     "nicegui>=3.7.1",
@@ -51,14 +51,6 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
-# Use CPU-only PyTorch (saves ~2GB download, CUDA not needed for embeddings)
-[tool.uv]
-index = [
-    { name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu", explicit = true }
-]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
 
 [dependency-groups]
 dev = [
