@@ -3,7 +3,7 @@
 # Lethe Container Setup
 #
 # Creates an isolated container for Lethe using the platform-native tool:
-#   Linux:  systemd-nspawn (rootfs via dnf --installroot)
+#   Linux:  podman (rootless OCI container)
 #   macOS:  apple/container (requires macOS 26+)
 #
 # Usage: ./scripts/container-setup.sh [--rebuild]
@@ -37,7 +37,7 @@ prompt_read() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
-MACHINE_NAME="lethe"
+CONTAINER_NAME="lethe"
 MOUNTS_CONF="$LETHE_HOME/config/mounts.conf"
 REBUILD=0
 
@@ -50,7 +50,7 @@ for arg in "$@"; do
             echo "Sets up Lethe in an isolated container."
             echo "  --rebuild    Force rebuild even if container exists"
             echo ""
-            echo "Linux: uses systemd-nspawn (rootfs at /var/lib/machines/lethe)"
+            echo "Linux: uses podman (rootless)"
             echo "macOS: uses apple/container (OCI image)"
             exit 0
             ;;
@@ -202,15 +202,35 @@ cleanup_old_services() {
         found=1
     fi
 
-    # Existing container service (from previous container install)
+    # Old nspawn container service
     if [[ -f "/etc/systemd/system/lethe-container.service" ]]; then
-        info "Stopping existing container service..."
+        info "Stopping old nspawn container service..."
         sudo systemctl stop lethe-container 2>/dev/null || true
         sudo systemctl disable lethe-container 2>/dev/null || true
         sudo rm -f "/etc/systemd/system/lethe-container.service"
         sudo rm -f "/etc/systemd/nspawn/lethe.nspawn"
         sudo systemctl daemon-reload 2>/dev/null || true
-        success "Old container service removed"
+        success "Old nspawn container service removed"
+        found=1
+    fi
+
+    # Existing podman container service
+    if [[ -f "$HOME/.config/systemd/user/lethe-container.service" ]]; then
+        info "Stopping existing podman container service..."
+        systemctl --user stop lethe-container 2>/dev/null || true
+        systemctl --user disable lethe-container 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/lethe-container.service"
+        systemctl --user daemon-reload 2>/dev/null || true
+        success "Old podman container service removed"
+        found=1
+    fi
+
+    # Stop and remove existing podman container
+    if command -v podman &>/dev/null && podman container exists "$CONTAINER_NAME" 2>/dev/null; then
+        info "Removing existing podman container..."
+        podman stop "$CONTAINER_NAME" 2>/dev/null || true
+        podman rm "$CONTAINER_NAME" 2>/dev/null || true
+        success "Old podman container removed"
         found=1
     fi
 
@@ -238,7 +258,7 @@ cleanup_old_services() {
 }
 
 # ---------------------------------------------------------------------------
-# Build container image
+# macOS: build OCI image via apple/container
 # ---------------------------------------------------------------------------
 ensure_container_system() {
     if ! container system status &>/dev/null; then
@@ -248,7 +268,7 @@ ensure_container_system() {
     fi
 }
 
-build_image() {
+build_image_apple() {
     command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
     ensure_container_system
     info "Building container image..."
@@ -257,114 +277,75 @@ build_image() {
 }
 
 # ---------------------------------------------------------------------------
-# Linux: systemd-nspawn
+# Linux: podman (rootless)
 # ---------------------------------------------------------------------------
-setup_nspawn() {
-    command -v systemd-nspawn >/dev/null 2>&1 || error "systemd-nspawn not found. Install: sudo dnf install systemd-container"
-    command -v dnf >/dev/null 2>&1 || error "dnf is required to bootstrap the container rootfs"
+setup_podman() {
+    command -v podman >/dev/null 2>&1 || error "podman not found. Install it with your package manager (e.g. apt install podman, dnf install podman)"
 
-    local fedora_release
-    fedora_release="$(rpm -E '%{fedora}' 2>/dev/null || echo 43)"
-    local rootfs="/var/lib/machines/$MACHINE_NAME"
-
-    if [[ -d "$rootfs" && "$REBUILD" == "0" ]]; then
-        info "Container rootfs exists at $rootfs (use --rebuild to recreate)"
+    if podman image exists lethe:latest 2>/dev/null && [[ "$REBUILD" == "0" ]]; then
+        info "Image lethe:latest already exists (use --rebuild to recreate)"
     else
-        if [[ -d "$rootfs" ]]; then
-            info "Removing existing rootfs..."
-            sudo rm -rf "$rootfs"
-        fi
-
-        info "Bootstrapping Fedora rootfs..."
-        sudo mkdir -p "$rootfs"
-        sudo dnf --installroot="$rootfs" --releasever="$fedora_release" \
-            --setopt=install_weak_deps=False -y \
-            install coreutils-single bash python3.12 git-core curl findutils
-        sudo dnf --installroot="$rootfs" clean all
-
-        info "Installing uv..."
-        sudo systemd-nspawn -D "$rootfs" bash -c \
-            'curl -LsSf https://astral.sh/uv/install.sh | sh && ln -sf /root/.local/bin/uv /usr/local/bin/uv'
-
-        info "Creating lethe user..."
-        sudo systemd-nspawn -D "$rootfs" useradd -m -d /home/lethe -s /bin/bash lethe 2>/dev/null || true
-
-        info "Copying project files..."
-        sudo mkdir -p "$rootfs/opt/lethe"
-        sudo cp "$REPO_DIR"/pyproject.toml "$REPO_DIR"/uv.lock "$rootfs/opt/lethe/"
-        sudo cp -r "$REPO_DIR"/src "$rootfs/opt/lethe/"
-        sudo chown -R lethe:lethe "$rootfs/opt/lethe"
-
-        info "Installing Python dependencies..."
-        sudo systemd-nspawn -D "$rootfs" bash -c \
-            'cd /opt/lethe && /usr/local/bin/uv sync --frozen'
-
-        success "Rootfs created at $rootfs"
+        info "Building container image..."
+        podman build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
+        success "Container image built"
     fi
 
-    # Generate .nspawn unit with mount config
-    local nspawn_file="/etc/systemd/nspawn/$MACHINE_NAME.nspawn"
-    sudo mkdir -p /etc/systemd/nspawn
+    # Enable lingering so user services run without login session
+    if command -v loginctl &>/dev/null; then
+        loginctl enable-linger "$(whoami)" 2>/dev/null \
+            || sudo loginctl enable-linger "$(whoami)" 2>/dev/null \
+            || warn "Could not enable lingering — service may stop when you log out"
+    fi
 
-    local bind_lines=""
-    # Always mount .lethe
-    bind_lines+="Bind=$LETHE_HOME:/home/lethe/.lethe\n"
-    # .env into project dir (read-only)
-    bind_lines+="BindReadOnly=$LETHE_HOME/config/.env:/opt/lethe/.env\n"
-    # User directories
-    for mount in "${SELECTED_MOUNTS[@]}"; do
-        local pair
-        pair=$(resolve_mount "$mount")
-        bind_lines+="Bind=${pair}\n"
-    done
+    # Create systemd user service
+    local podman_bin
+    podman_bin="$(command -v podman)"
+    mkdir -p "$HOME/.config/systemd/user"
 
-    sudo tee "$nspawn_file" > /dev/null << EOF
-[Exec]
-Boot=no
-User=lethe
-WorkingDirectory=/opt/lethe
-Parameters=/usr/local/bin/uv run lethe
-Environment=HOME=/home/lethe
-Environment=LETHE_HOME=/home/lethe/.lethe
+    local svc="$HOME/.config/systemd/user/lethe-container.service"
+    {
+        echo "[Unit]"
+        echo "Description=Lethe Autonomous AI Agent (podman)"
+        echo "After=network-online.target"
+        echo ""
+        echo "[Service]"
+        echo "Type=simple"
+        echo "ExecStartPre=-$podman_bin rm -f $CONTAINER_NAME"
+        printf "ExecStart=$podman_bin run --rm --name $CONTAINER_NAME"
+        printf " \\\\\n    --userns=keep-id"
+        printf " \\\\\n    --security-opt label=disable"
+        printf " \\\\\n    --env LETHE_HOME=/home/lethe/.lethe"
+        printf " \\\\\n    -v $LETHE_HOME:/home/lethe/.lethe"
+        printf " \\\\\n    -v $LETHE_HOME/config/.env:/opt/lethe/.env:ro"
+        for mount in "${SELECTED_MOUNTS[@]}"; do
+            local pair
+            pair=$(resolve_mount "$mount")
+            printf " \\\\\n    -v $pair"
+        done
+        printf " \\\\\n    lethe:latest\n"
+        echo "ExecStop=$podman_bin stop $CONTAINER_NAME"
+        echo "Restart=always"
+        echo "RestartSec=10"
+        echo ""
+        echo "[Install]"
+        echo "WantedBy=default.target"
+    } > "$svc"
 
-[Files]
-$(echo -e "$bind_lines")
-[Network]
-VirtualEthernet=no
-EOF
-
-    # Create systemd service
-    sudo tee /etc/systemd/system/lethe-container.service > /dev/null << EOF
-[Unit]
-Description=Lethe Autonomous AI Agent (container)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=systemd-nspawn --machine=$MACHINE_NAME --quiet
-Restart=always
-RestartSec=10
-KillMode=mixed
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable lethe-container
-    sudo systemctl start lethe-container
-    success "nspawn container started"
+    systemctl --user daemon-reload
+    systemctl --user enable lethe-container
+    systemctl --user start lethe-container
+    success "Podman container started"
     echo ""
-    echo "  Rootfs:    $rootfs"
-    echo "  Config:    $nspawn_file"
-    echo "  Service:   lethe-container.service"
+    echo "  Image:     lethe:latest"
+    echo "  Container: $CONTAINER_NAME"
+    echo "  Service:   ~/.config/systemd/user/lethe-container.service"
     echo ""
     echo "  Commands:"
-    echo "    Start:   sudo systemctl start lethe-container"
-    echo "    Stop:    sudo systemctl stop lethe-container"
-    echo "    Logs:    sudo journalctl -u lethe-container -f"
-    echo "    Shell:   sudo systemd-nspawn -M $MACHINE_NAME --user lethe /bin/bash"
-    echo "    Install: sudo systemd-nspawn -M $MACHINE_NAME microdnf install <pkg>"
+    echo "    Start:   systemctl --user start lethe-container"
+    echo "    Stop:    systemctl --user stop lethe-container"
+    echo "    Logs:    journalctl --user -u lethe-container -f"
+    echo "    Shell:   podman exec -it $CONTAINER_NAME /bin/bash"
+    echo "    Root:    podman exec -u 0 -it $CONTAINER_NAME /bin/bash"
 }
 
 # ---------------------------------------------------------------------------
@@ -378,7 +359,7 @@ setup_apple_container() {
     if container image ls 2>/dev/null | grep -q "lethe" && [[ "$REBUILD" == "0" ]]; then
         info "Image lethe:latest already exists (use --rebuild to recreate)"
     else
-        build_image
+        build_image_apple
     fi
 
     # Create launch script
@@ -482,8 +463,8 @@ main() {
     local os=$(detect_os)
     case "$os" in
         linux)
-            info "Platform: Linux (systemd-nspawn)"
-            setup_nspawn
+            info "Platform: Linux (podman)"
+            setup_podman
             ;;
         mac)
             info "Platform: macOS (apple/container)"
@@ -508,7 +489,6 @@ main() {
     fi
     echo "  Mounts config: $MOUNTS_CONF"
     echo ""
-    echo "  The container can install software via microdnf."
     echo "  Host filesystem is isolated except for the directories above."
 }
 

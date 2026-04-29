@@ -2,10 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.15.0 - 2026-04-30
+
+### Changed
+- **Linux container: nspawn → podman**: replaced systemd-nspawn (required root) with rootless podman. No sudo needed anywhere — builds, runs, and manages as the current user via systemd user service.
+- **Automatic nspawn→podman migration**: `update.sh` detects old systemd-nspawn installs, removes them, and sets up podman automatically.
+- **Container image**: added `sudo`, `which`, `file`, `tar`, `gzip`, `unzip`, `diff`, `procps-ng` to the Containerfile. Lethe user has passwordless sudo inside the container.
+- **SELinux compatibility**: uses `--security-opt label=disable` instead of `:z` volume relabeling (which failed on non-relabelable files).
+- **Uninstaller**: handles both old nspawn and current podman container cleanup.
+
 ## v0.14.0 - 2026-04-29
 
 ### Added
-- **Container-first install**: default deployment now runs inside systemd-nspawn (Linux) or apple/container (macOS). Native install still available via `--yolo` flag.
+- **Container-first install**: default deployment now runs inside a rootless podman container (Linux) or apple/container (macOS). Native install still available via `--yolo` flag.
 - **Containerfile and container-setup.sh** for reproducible, isolated builds.
 - **Workspace reuse on reinstall**: installer detects existing `~/.lethe` workspace (config, memory, notes) and offers to reuse it instead of starting fresh.
 - **Onboarding message**: first-start greeting when the message history is empty.

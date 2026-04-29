@@ -3,7 +3,7 @@
 # Lethe Installer
 # Usage: curl -fsSL https://lethe.gg/install | bash
 #
-# Default: container install (systemd-nspawn on Linux, apple/container on macOS).
+# Default: container install (podman on Linux, apple/container on macOS).
 # Use --yolo for native (non-containerized) install.
 #
 # Supports multiple LLM providers: OpenRouter, Anthropic, OpenAI
@@ -592,15 +592,19 @@ install_container_deps() {
         fi
         success "container system service running"
     else
-        if ! check_command systemd-nspawn; then
-            info "Installing systemd-container..."
+        if ! check_command podman; then
+            info "Installing podman..."
             if check_command dnf; then
-                maybe_sudo dnf install -y systemd-container
+                maybe_sudo dnf install -y podman
             elif check_command apt-get; then
-                maybe_sudo apt-get install -y systemd-container
+                maybe_sudo apt-get update -y && maybe_sudo apt-get install -y podman
+            elif check_command pacman; then
+                maybe_sudo pacman -S --noconfirm podman
+            elif check_command zypper; then
+                maybe_sudo zypper install -y podman
             fi
         fi
-        success "systemd-nspawn found"
+        success "podman found"
     fi
 }
 
@@ -946,7 +950,7 @@ main() {
     if [[ "$YOLO" == "1" ]]; then
         echo -e "${YELLOW}Mode${NC}: Native install (--yolo) — no container isolation"
     else
-        echo -e "${GREEN}Mode${NC}: Container (systemd-nspawn on Linux, apple/container on macOS)"
+        echo -e "${GREEN}Mode${NC}: Container (podman on Linux, apple/container on macOS)"
         echo -e "  Lethe runs isolated, with access only to directories you choose."
     fi
     echo ""

@@ -48,8 +48,13 @@ get_latest_release() {
 
 detect_install_mode() {
     # Container modes take priority — if you installed as container, update as container
+    if [ -f "$HOME/.config/systemd/user/lethe-container.service" ]; then
+        echo "container-podman"
+        return
+    fi
+    # Old nspawn container (pre-v0.15) — migrate to podman
     if [ -f "/etc/systemd/system/lethe-container.service" ]; then
-        echo "container-nspawn"
+        echo "container-nspawn-migrate"
         return
     fi
     if [ -f "$HOME/Library/LaunchAgents/com.lethe.container.plist" ]; then
@@ -235,34 +240,68 @@ update_native() {
     success "Code updated to $target_version"
 }
 
-update_container_nspawn() {
+update_container_podman() {
     local install_dir="$1"
-    local rootfs="/var/lib/machines/lethe"
 
-    if [ ! -d "$rootfs" ]; then
-        error "nspawn rootfs not found at $rootfs. Run install.sh to set up."
-    fi
+    command -v podman &>/dev/null || error "podman not found"
 
     info "Stopping container..."
-    sudo systemctl stop lethe-container 2>/dev/null || true
-    sleep 1
-    sudo machinectl terminate lethe 2>/dev/null || true
+    systemctl --user stop lethe-container 2>/dev/null || true
 
-    info "Updating rootfs..."
-    sudo cp "$install_dir"/pyproject.toml "$install_dir"/uv.lock "$rootfs/opt/lethe/"
-    sudo rm -rf "$rootfs/opt/lethe/src"
-    sudo cp -r "$install_dir"/src "$rootfs/opt/lethe/"
-    sudo chown -R lethe:lethe "$rootfs/opt/lethe"
-
-    info "Syncing dependencies..."
-    sudo systemd-nspawn -D "$rootfs" bash -c \
-        'cd /opt/lethe && /usr/local/bin/uv sync --frozen'
+    info "Rebuilding container image..."
+    podman build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
 
     info "Starting container..."
-    sudo systemctl start lethe-container
+    systemctl --user start lethe-container
     success "Container updated and restarted"
     echo ""
-    echo "  View logs: sudo journalctl -u lethe-container -f"
+    echo "  View logs: journalctl --user -u lethe-container -f"
+}
+
+migrate_nspawn_to_podman() {
+    local install_dir="$1"
+
+    info "Migrating from nspawn to podman..."
+
+    # Check podman is available
+    if ! command -v podman &>/dev/null; then
+        info "Installing podman..."
+        if command -v dnf &>/dev/null; then
+            sudo dnf install -y podman
+        elif command -v apt-get &>/dev/null; then
+            sudo apt-get update -y && sudo apt-get install -y podman
+        elif command -v pacman &>/dev/null; then
+            sudo pacman -S --noconfirm podman
+        elif command -v zypper &>/dev/null; then
+            sudo zypper install -y podman
+        else
+            error "Could not install podman. Install it manually and re-run."
+        fi
+    fi
+
+    # Stop and remove old nspawn service
+    info "Removing old nspawn container..."
+    sudo systemctl stop lethe-container 2>/dev/null || true
+    sudo systemctl disable lethe-container 2>/dev/null || true
+    sudo rm -f "/etc/systemd/system/lethe-container.service"
+    sudo rm -f "/etc/systemd/nspawn/lethe.nspawn"
+    sudo systemctl daemon-reload 2>/dev/null || true
+
+    # Remove nspawn rootfs
+    if [ -d "/var/lib/machines/lethe" ]; then
+        info "Removing old nspawn rootfs..."
+        sudo rm -rf "/var/lib/machines/lethe"
+    fi
+
+    success "Old nspawn container removed"
+
+    # Set up podman via container-setup.sh
+    info "Setting up podman container..."
+    "$install_dir/scripts/container-setup.sh"
+
+    success "Migration complete: nspawn → podman"
+    echo ""
+    echo "  View logs: journalctl --user -u lethe-container -f"
 }
 
 update_container_apple() {
@@ -319,7 +358,7 @@ main() {
     echo ""
 
     case "$install_mode" in
-        container-nspawn|container-apple)
+        container-podman|container-apple|container-nspawn-migrate)
             update_native "$install_dir" "$latest_version" skip-sync
             ;;
         *)
@@ -328,8 +367,11 @@ main() {
     esac
 
     case "$install_mode" in
-        container-nspawn)
-            update_container_nspawn "$install_dir"
+        container-podman)
+            update_container_podman "$install_dir"
+            ;;
+        container-nspawn-migrate)
+            migrate_nspawn_to_podman "$install_dir"
             ;;
         container-apple)
             update_container_apple "$install_dir"

@@ -14,7 +14,7 @@ Lethe runs 24/7 in an isolated container, communicates via Telegram, remembers y
 curl -fsSL https://lethe.gg/install | bash
 ```
 
-The installer sets up `~/.lethe` as the runtime root, builds an isolated container (systemd-nspawn on Linux, apple/container on macOS), and walks you through provider selection and Telegram bot setup. If an existing workspace is detected, you can reuse it without reconfiguring.
+The installer sets up `~/.lethe` as the runtime root, builds an isolated container (podman on Linux, apple/container on macOS), and walks you through provider selection and Telegram bot setup. If an existing workspace is detected, you can reuse it without reconfiguring.
 
 **Prerequisites:** A Telegram bot token and an LLM provider (Anthropic subscription, OpenRouter API key, OpenAI, or a local server). The installer handles all other dependencies.
 
@@ -85,7 +85,7 @@ System prompt content is split by update lifecycle:
 
 Lethe runs in an isolated container by default:
 
-- **Linux**: [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html) container with bind-mounted access only to `~/.lethe` and directories you choose during install.
+- **Linux**: [Podman](https://podman.io/) rootless container with volume-mounted access only to `~/.lethe` and directories you choose during install.
 - **macOS**: [apple/container](https://github.com/apple/container) with equivalent volume mounts.
 
 Native mode (`--yolo`) runs without isolation — use at your own risk.
@@ -210,12 +210,12 @@ System instructions (communication style, output format) are in `config/prompts/
 The installer creates the container and service automatically. Useful commands:
 
 ```bash
-# Linux (systemd-nspawn)
-sudo systemctl start lethe-container
-sudo systemctl stop lethe-container
-sudo journalctl -u lethe-container -f
-sudo systemd-nspawn -M lethe --user lethe /bin/bash   # shell into container
-sudo systemd-nspawn -M lethe microdnf install <pkg>   # install packages
+# Linux (podman)
+systemctl --user start lethe-container
+systemctl --user stop lethe-container
+journalctl --user -u lethe-container -f
+podman exec -it lethe /bin/bash                        # shell into container
+podman exec -u 0 -it lethe /bin/bash                   # root shell (install packages)
 
 # macOS (apple/container)
 launchctl load ~/Library/LaunchAgents/com.lethe.container.plist

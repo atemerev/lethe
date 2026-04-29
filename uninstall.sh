@@ -69,31 +69,46 @@ OS=$(detect_os)
 
 # --- Linux services ---
 
-# Container service (systemd-nspawn)
+# Podman container service (current)
+if [[ -f "$HOME/.config/systemd/user/lethe-container.service" ]]; then
+    info "Stopping podman container service..."
+    systemctl --user stop lethe-container 2>/dev/null || true
+    systemctl --user disable lethe-container 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/lethe-container.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    success "Podman container service removed"
+fi
+
+if command -v podman &>/dev/null; then
+    if podman container exists lethe 2>/dev/null; then
+        info "Removing podman container..."
+        podman stop lethe 2>/dev/null || true
+        podman rm lethe 2>/dev/null || true
+        success "Podman container removed"
+    fi
+    if podman image exists localhost/lethe:latest 2>/dev/null; then
+        info "Removing podman container image..."
+        podman rmi localhost/lethe:latest 2>/dev/null || true
+        success "Podman container image removed"
+    fi
+fi
+
+# Old nspawn container service (pre-v0.15)
 if [[ -f "/etc/systemd/system/lethe-container.service" ]]; then
-    info "Stopping container service..."
+    info "Stopping old nspawn container service..."
     sudo systemctl stop lethe-container 2>/dev/null || true
     sudo systemctl disable lethe-container 2>/dev/null || true
     sudo rm -f "/etc/systemd/system/lethe-container.service"
     sudo rm -f "/etc/systemd/nspawn/lethe.nspawn"
     sudo systemctl daemon-reload 2>/dev/null || true
-    success "Container service removed"
+    success "Old nspawn container service removed"
 fi
 
-# nspawn rootfs
+# Old nspawn rootfs
 if [[ -d "/var/lib/machines/lethe" ]]; then
-    info "Removing container rootfs..."
+    info "Removing old nspawn rootfs..."
     sudo rm -rf "/var/lib/machines/lethe"
-    success "Container rootfs removed"
-fi
-
-# Container image from previous podman-based installs
-if command -v podman &>/dev/null; then
-    if podman image exists localhost/lethe:latest 2>/dev/null; then
-        info "Removing legacy podman container image..."
-        podman rmi localhost/lethe:latest 2>/dev/null || true
-        success "Container image removed"
-    fi
+    success "Old nspawn rootfs removed"
 fi
 
 # Old native systemd user service
