@@ -293,10 +293,11 @@ setup_nspawn() {
         sudo mkdir -p "$rootfs/opt/lethe"
         sudo cp "$REPO_DIR"/pyproject.toml "$REPO_DIR"/uv.lock "$rootfs/opt/lethe/"
         sudo cp -r "$REPO_DIR"/src "$rootfs/opt/lethe/"
+        sudo chown -R lethe:lethe "$rootfs/opt/lethe"
 
         info "Installing Python dependencies..."
         sudo systemd-nspawn -D "$rootfs" bash -c \
-            'cd /opt/lethe && uv sync --frozen && chown -R lethe:lethe /opt/lethe'
+            'cd /opt/lethe && /usr/local/bin/uv sync --frozen'
 
         success "Rootfs created at $rootfs"
     fi

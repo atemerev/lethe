@@ -252,10 +252,11 @@ update_container_nspawn() {
     sudo cp "$install_dir"/pyproject.toml "$install_dir"/uv.lock "$rootfs/opt/lethe/"
     sudo rm -rf "$rootfs/opt/lethe/src"
     sudo cp -r "$install_dir"/src "$rootfs/opt/lethe/"
+    sudo chown -R lethe:lethe "$rootfs/opt/lethe"
 
     info "Syncing dependencies..."
     sudo systemd-nspawn -D "$rootfs" bash -c \
-        'cd /opt/lethe && /usr/local/bin/uv sync --frozen && chown -R lethe:lethe /opt/lethe'
+        'cd /opt/lethe && /usr/local/bin/uv sync --frozen'
 
     info "Starting container..."
     sudo systemctl start lethe-container
