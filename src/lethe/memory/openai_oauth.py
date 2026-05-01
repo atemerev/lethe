@@ -464,6 +464,35 @@ class OpenAIOAuth:
     def _parse_streamed_response(self, raw: str) -> Dict[str, Any]:
         """Parse Codex SSE response text and return a response object payload."""
         latest_response: Optional[Dict[str, Any]] = None
+        output_items: Dict[str, Dict[str, Any]] = {}
+        output_order: List[str] = []
+        output_text_deltas: List[str] = []
+
+        def _record_output_item(item: Any) -> None:
+            if not isinstance(item, dict):
+                return
+
+            item_id = item.get("id") or item.get("call_id")
+            if not isinstance(item_id, str) or not item_id:
+                item_id = f"item_{len(output_order)}"
+
+            existing = output_items.get(item_id)
+            if existing is None:
+                output_items[item_id] = dict(item)
+                output_order.append(item_id)
+                return
+
+            # Merge partial item updates from streamed events, preserving richer content.
+            merged = dict(existing)
+            for key, value in item.items():
+                if key == "content":
+                    if isinstance(value, list) and value:
+                        merged["content"] = value
+                    continue
+                if value is not None:
+                    merged[key] = value
+            output_items[item_id] = merged
+
         for event_name, data in self._iter_sse_events(raw):
             if not data:
                 continue
@@ -476,9 +505,53 @@ class OpenAIOAuth:
 
             response = payload.get("response")
             if isinstance(response, dict):
-                latest_response = response
-                if event_name == "response.completed":
-                    return response
+                if latest_response is None:
+                    latest_response = dict(response)
+                else:
+                    for key, value in response.items():
+                        if key == "output":
+                            # Keep existing output unless the new payload has a non-empty list.
+                            if isinstance(value, list) and value:
+                                latest_response["output"] = value
+                            elif "output" not in latest_response:
+                                latest_response["output"] = value
+                            continue
+                        if value is not None:
+                            latest_response[key] = value
+
+            _record_output_item(payload.get("item"))
+            _record_output_item(payload.get("output_item"))
+
+            payload_type = payload.get("type")
+            if payload_type in {"response.output_text.delta", "response.refusal.delta"}:
+                delta = payload.get("delta")
+                if isinstance(delta, str) and delta:
+                    output_text_deltas.append(delta)
+
+            if event_name == "response.completed" or payload_type == "response.completed":
+                break
+
+        if output_items:
+            assembled_output = [output_items[item_id] for item_id in output_order]
+            if latest_response is None:
+                latest_response = {}
+            existing_output = latest_response.get("output")
+            if not isinstance(existing_output, list) or not existing_output:
+                latest_response["output"] = assembled_output
+
+        if output_text_deltas:
+            if latest_response is None:
+                latest_response = {}
+            existing_output = latest_response.get("output")
+            if not isinstance(existing_output, list) or not existing_output:
+                latest_response["output"] = [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "".join(output_text_deltas)}
+                        ],
+                    }
+                ]
 
         if latest_response is not None:
             return latest_response
@@ -501,7 +574,7 @@ class OpenAIOAuth:
                 for content in item.get("content", []) or []:
                     if (
                         isinstance(content, dict)
-                        and content.get("type") == "output_text"
+                        and content.get("type") in {"output_text", "text"}
                         and isinstance(content.get("text"), str)
                     ):
                         text_parts.append(content["text"])
@@ -522,6 +595,11 @@ class OpenAIOAuth:
                         },
                     }
                 )
+
+        if not text_parts:
+            output_text = response.get("output_text")
+            if isinstance(output_text, str) and output_text:
+                text_parts.append(output_text)
 
         message: Dict[str, Any] = {
             "role": "assistant",
