@@ -183,6 +183,11 @@ Key flags: `--split-mode tensor` for true tensor parallelism across GPUs, `--jin
 |----------|-------------|---------|
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather | required |
 | `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated user IDs | all |
+| `TELEGRAM_TRANSCRIPTION_ENABLED` | Transcribe Telegram voice/audio messages | `true` |
+| `TRANSCRIPTION_PROVIDER` | `auto`, `openrouter`, `openai`, or `local` | `auto` |
+| `TRANSCRIPTION_MODEL` | Whisper/STT model override | provider default |
+| `TRANSCRIPTION_LANGUAGE` | Optional language hint, e.g. `en` | auto-detect |
+| `TRANSCRIPTION_LOCAL_COMMAND` | Local Whisper CLI command | `whisper` |
 | `LLM_PROVIDER` | Force provider | auto-detect |
 | `LLM_MODEL` | Main model | required |
 | `LLM_MODEL_AUX` | Aux model | same as main |

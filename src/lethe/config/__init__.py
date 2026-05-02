@@ -25,6 +25,10 @@ class Settings(BaseSettings):
         default="",
         description="Comma-separated list of allowed Telegram user IDs (empty = allow all)",
     )
+    telegram_transcription_enabled: bool = Field(
+        default=True,
+        description="Transcribe Telegram voice/audio messages before sending them to the agent",
+    )
 
     @property
     def allowed_user_ids(self) -> list[int]:
@@ -37,6 +41,10 @@ class Settings(BaseSettings):
     openrouter_api_key: Optional[str] = Field(
         default=None,
         description="OpenRouter API key (reads from OPENROUTER_API_KEY env var)",
+    )
+    openai_api_key: Optional[str] = Field(
+        default=None,
+        description="OpenAI API key (reads from OPENAI_API_KEY env var)",
     )
     llm_model: str = Field(
         default="",
@@ -65,6 +73,24 @@ class Settings(BaseSettings):
     llm_messages_summarize: int = Field(
         default=100,
         description="Number of messages before recent to summarize at startup",
+    )
+
+    # Speech-to-text
+    transcription_provider: str = Field(
+        default="",
+        description="Speech-to-text provider: openrouter, openai, or empty for auto-detect",
+    )
+    transcription_model: str = Field(
+        default="",
+        description="Speech-to-text model (empty = provider default Whisper model)",
+    )
+    transcription_language: Optional[str] = Field(
+        default=None,
+        description="Optional ISO language code hint for transcription",
+    )
+    transcription_local_command: str = Field(
+        default="whisper",
+        description="Local Whisper CLI command used when TRANSCRIPTION_PROVIDER=local",
     )
 
     # Agent
