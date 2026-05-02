@@ -733,6 +733,14 @@ LLM_MODEL_AUX=$SELECTED_MODEL_AUX
 LLM_API_BASE=$SELECTED_API_BASE
 $api_key_line
 
+# Telegram voice/audio transcription
+# Auto uses OpenRouter/OpenAI API keys first, then local Whisper if installed.
+TELEGRAM_TRANSCRIPTION_ENABLED=true
+TRANSCRIPTION_PROVIDER=auto
+# TRANSCRIPTION_MODEL=
+# TRANSCRIPTION_LANGUAGE=
+# TRANSCRIPTION_LOCAL_COMMAND=whisper
+
 # Paths
 LETHE_HOME=$LETHE_HOME
 
