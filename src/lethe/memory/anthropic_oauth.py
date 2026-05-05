@@ -155,6 +155,17 @@ class AnthropicOAuth:
         # Shared rate limit state: all callers check this before making requests
         self._rate_limit_until: float = 0  # monotonic time when rate limit expires
         self._rate_limit_lock = asyncio.Lock()
+
+        # Concurrency cap for the messages endpoint. Claude Max/Pro OAuth tokens
+        # have very tight burst limits — when several actors fire in parallel,
+        # Anthropic returns 403 permission_error ("OAuth authentication is
+        # currently not allowed for this organization") instead of 429. Default
+        # to 1 (full serialization). Override via LETHE_OAUTH_MAX_CONCURRENCY.
+        try:
+            cap = max(1, int(os.environ.get("LETHE_OAUTH_MAX_CONCURRENCY", "1")))
+        except ValueError:
+            cap = 1
+        self._request_semaphore = asyncio.Semaphore(cap)
         
         # Try loading from env or file if not provided
         if not self.access_token:
@@ -668,34 +679,53 @@ class AnthropicOAuth:
             body["messages"] = api_messages
         
         logger.info(f"OAuth API call: model={model}, messages={len(api_messages)}, tools={len(api_tools)}")
-        
-        # Wait for any active rate limit cooldown before making the request
-        await self._wait_for_rate_limit()
-        
-        response = await client.post(url, headers=headers, json=body)
-        
-        if response.status_code == 429:
-            self._set_rate_limit(response)
-            error_text = response.text[:500]
-            logger.warning(f"OAuth rate limited (429): {error_text}")
-            raise RateLimitError(
-                f"Anthropic OAuth rate limited (429) - {error_text}",
-                retry_after=self._parse_retry_after(response),
-            )
-        
-        if response.status_code == 529:
-            error_text = response.text[:500]
-            logger.warning(f"OAuth overloaded (529): {error_text}")
-            raise RuntimeError(
-                f"Anthropic OAuth overloaded (529) - {error_text}"
-            )
-        
-        if response.status_code != 200:
-            error_text = response.text[:500]
-            logger.error(f"OAuth API error: {response.status_code} {error_text}")
-            raise RuntimeError(
-                f"Anthropic OAuth API error: {response.status_code} - {error_text}"
-            )
+
+        # Serialize requests + honor any active cooldown. Both must happen
+        # under the semaphore so a 403/429 from one caller forces queued
+        # callers to see the cooldown when they wake up.
+        async with self._request_semaphore:
+            await self._wait_for_rate_limit()
+            response = await client.post(url, headers=headers, json=body)
+
+            if response.status_code == 429:
+                self._set_rate_limit(response)
+                error_text = response.text[:500]
+                logger.warning(f"OAuth rate limited (429): {error_text}")
+                raise RateLimitError(
+                    f"Anthropic OAuth rate limited (429) - {error_text}",
+                    retry_after=self._parse_retry_after(response),
+                )
+
+            # 403 "permission_error" with an OAuth-related message is what
+            # Anthropic returns when burst-throttling Claude Max/Pro OAuth
+            # tokens. Treat it like a rate limit so retries back off and
+            # other concurrent callers wait, instead of hammering the API.
+            if response.status_code == 403:
+                error_text = response.text[:500]
+                if "permission_error" in error_text or "OAuth authentication" in error_text:
+                    wait = self._parse_retry_after(response)
+                    self._rate_limit_until = time.monotonic() + wait
+                    logger.warning(
+                        f"OAuth 403 permission_error (burst throttle): cooling down {wait:.0f}s"
+                    )
+                    raise RateLimitError(
+                        f"Anthropic OAuth throttled (403 permission_error) - {error_text}",
+                        retry_after=wait,
+                    )
+
+            if response.status_code == 529:
+                error_text = response.text[:500]
+                logger.warning(f"OAuth overloaded (529): {error_text}")
+                raise RuntimeError(
+                    f"Anthropic OAuth overloaded (529) - {error_text}"
+                )
+
+            if response.status_code != 200:
+                error_text = response.text[:500]
+                logger.error(f"OAuth API error: {response.status_code} {error_text}")
+                raise RuntimeError(
+                    f"Anthropic OAuth API error: {response.status_code} - {error_text}"
+                )
         
         data = response.json()
         usage = data.get("usage", {})
