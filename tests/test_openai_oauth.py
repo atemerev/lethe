@@ -129,6 +129,46 @@ def test_openai_oauth_parse_streamed_response_prefers_completed_event():
     assert parsed["output"][0]["type"] == "message"
 
 
+def test_openai_oauth_parse_streamed_response_reconstructs_delta_only_output():
+    oauth = OpenAIOAuth(access_token="access-token")
+    sse = (
+        'event: response.created\n'
+        'data: {"type":"response.created","response":{"id":"resp_2","model":"gpt-5.4"}}\n\n'
+        'event: response.output_text.delta\n'
+        'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
+        'event: response.output_text.delta\n'
+        'data: {"type":"response.output_text.delta","delta":" there"}\n\n'
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"resp_2","model":"gpt-5.4","stop_reason":"stop"}}\n\n'
+    )
+
+    parsed = oauth._parse_streamed_response(sse)
+    assert parsed["id"] == "resp_2"
+    assert parsed["output"][0]["type"] == "message"
+    assert parsed["output"][0]["content"][0]["text"] == "Hello there"
+
+
+def test_openai_oauth_parse_response_accepts_message_text_block_type():
+    oauth = OpenAIOAuth(access_token="access-token")
+    payload = {
+        "id": "resp_3",
+        "model": "gpt-5.4",
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {"type": "text", "text": "Bonjour"},
+                ],
+            }
+        ],
+        "stop_reason": "stop",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+    parsed = oauth._parse_response(payload)
+    assert parsed["choices"][0]["message"]["content"] == "Bonjour"
+
+
 @pytest.mark.asyncio
 async def test_openai_oauth_call_messages_uses_stream_and_instructions(monkeypatch):
     class _Resp:
