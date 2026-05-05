@@ -116,14 +116,16 @@ class Agent:
         if self._initialized:
             return
         await self._load_message_history()
-        # Run memory curator (harvest + curate) on startup
+        self._initialized = True
+
+    async def run_startup_curator(self):
+        """Run memory curator in background after bot starts."""
         try:
             stats = await run_curator(self.notes, self.memory.archival, self.memory.messages, force=True)
             if not stats.get("skipped"):
                 logger.info(f"Memory curator: {stats}")
         except Exception as e:
             logger.error(f"Memory curator failed (non-fatal): {e}")
-        self._initialized = True
     
     async def _load_message_history(self):
         """Load recent message history into LLM context.

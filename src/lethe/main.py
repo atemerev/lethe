@@ -470,6 +470,7 @@ async def run():
 
     bot_task = asyncio.create_task(telegram_bot.start())
     heartbeat_task = asyncio.create_task(heartbeat.start())
+    asyncio.create_task(agent.run_startup_curator())
 
     if stats['total_messages'] == 0 and fallback_chat_id:
         async def onboarding():

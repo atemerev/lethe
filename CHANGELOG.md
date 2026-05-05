@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.15.2 - 2026-05-05
+
+### Fixed
+- **Anthropic OAuth burst throttling**: Claude Max/Pro returns 403 `permission_error` (not 429) when several actors hit the messages endpoint concurrently. A global `asyncio.Semaphore` (default 1, configurable via `LETHE_OAUTH_MAX_CONCURRENCY`) now serializes requests, and 403 burst-throttle responses are promoted to `RateLimitError` so `_call_with_retry_oauth` backs off and the shared cooldown reaches every queued caller. Resolves curator cascading-failure bursts. (#16)
+- **OpenAI Codex OAuth streamed response parsing**: SSE streams that delivered text via `response.output_text.delta` events with no full output items returned an empty payload, causing Lethe to send the generic `"Done."` Telegram fallback. The parser now assembles output items from `item` / `output_item` events, reconstructs assistant text from delta events, accepts both `output_text` and `text` content block types, and falls back to top-level `output_text`. (#15)
+- **`lethe.__version__` was stuck at `0.11.1`**: the constant in `src/lethe/__init__.py` had drifted from `pyproject.toml`. It now reads from package metadata via `importlib.metadata`, so it always matches the installed version (and the brainstem version-detection fallback stays accurate).
+
+### Changed
+- **Startup curator runs in the background**: `Agent.initialize()` no longer blocks on the harvest+curate pass; `main.run()` schedules `agent.run_startup_curator()` as a fire-and-forget task so the Telegram bot becomes responsive immediately on cold start.
+
 ## v0.15.1 - 2026-04-30
 
 ### Added

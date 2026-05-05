@@ -891,7 +891,7 @@ wheels = [
 
 [[package]]
 name = "lethe"
-version = "0.13.1"
+version = "0.15.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
