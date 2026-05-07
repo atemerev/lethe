@@ -282,9 +282,31 @@ ensure_container_system() {
     fi
 }
 
+# apple/container's buildkit VM enables Rosetta by default (build.rosetta=true).
+# On arm64 hosts without Rosetta installed, the buildkit VM fails to bootstrap
+# with: VZErrorDomain Code=2 "Rosetta is not installed". Detect this and
+# disable build.rosetta so the build uses QEMU fallback instead. Native arm64
+# builds (the Lethe default) are unaffected.
+ensure_builder_rosetta_compatible() {
+    [[ "$(uname -m)" == "arm64" ]] || return 0
+    # Rosetta present iff a x86_64 binary can be launched via arch(1).
+    if arch -arch x86_64 /usr/bin/true >/dev/null 2>&1; then
+        return 0
+    fi
+    local current
+    current="$(container system property get build.rosetta 2>/dev/null || echo true)"
+    if [[ "$current" == "true" ]]; then
+        warn "Rosetta not installed; disabling build.rosetta to avoid buildkit bootstrap failure"
+        container system property set build.rosetta false >/dev/null
+        # Restart any running builder so the new property takes effect.
+        container builder stop >/dev/null 2>&1 || true
+    fi
+}
+
 build_image_apple() {
     command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
     ensure_container_system
+    ensure_builder_rosetta_compatible
     info "Building container image (arch: $ARCH)..."
     container build --arch "$ARCH" -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
     success "Container image built"
