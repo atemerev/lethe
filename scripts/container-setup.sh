@@ -65,6 +65,20 @@ detect_os() {
     esac
 }
 
+# Map host arch to OCI arch names. Without this, apple/container has been
+# observed to default to linux/amd64 on Apple Silicon, producing an x86_64
+# rootfs that runs under emulation. Always pass it explicitly.
+detect_arch() {
+    case "$(uname -m)" in
+        arm64|aarch64) echo "arm64" ;;
+        x86_64|amd64)  echo "amd64" ;;
+        *)             warn "Unknown host arch '$(uname -m)', defaulting to amd64"; echo "amd64" ;;
+    esac
+}
+
+ARCH="$(detect_arch)"
+PLATFORM="linux/${ARCH}"
+
 # ---------------------------------------------------------------------------
 # Directory mount configuration
 # ---------------------------------------------------------------------------
@@ -271,8 +285,8 @@ ensure_container_system() {
 build_image_apple() {
     command -v container >/dev/null 2>&1 || error "'container' CLI not found. Install: brew install container (requires macOS 26+)"
     ensure_container_system
-    info "Building container image..."
-    container build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
+    info "Building container image (arch: $ARCH)..."
+    container build --arch "$ARCH" -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
     success "Container image built"
 }
 
@@ -285,8 +299,8 @@ setup_podman() {
     if podman image exists lethe:latest 2>/dev/null && [[ "$REBUILD" == "0" ]]; then
         info "Image lethe:latest already exists (use --rebuild to recreate)"
     else
-        info "Building container image..."
-        podman build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
+        info "Building container image (platform: $PLATFORM)..."
+        podman build --platform "$PLATFORM" -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
         success "Container image built"
     fi
 
@@ -367,6 +381,7 @@ setup_apple_container() {
         echo '#!/usr/bin/env bash'
         printf '"%s" system status &>/dev/null || "%s" system start\n' "$container_bin" "$container_bin"
         printf 'exec "%s" run \\\n' "$container_bin"
+        printf '    --arch %s \\\n' "$ARCH"
         printf '    --memory 4G \\\n'
         printf '    --env LETHE_HOME=/home/lethe/.lethe \\\n'
         printf '    --volume "%s:/home/lethe/.lethe" \\\n' "$LETHE_HOME"
@@ -392,7 +407,7 @@ setup_apple_container() {
     echo "    Start:   launchctl load ~/Library/LaunchAgents/com.lethe.container.plist"
     echo "    Stop:    launchctl unload ~/Library/LaunchAgents/com.lethe.container.plist"
     echo "    Logs:    tail -f $LETHE_HOME/logs/container.log"
-    echo "    Shell:   container run --volume $LETHE_HOME:/home/lethe/.lethe -it lethe:latest /bin/bash"
+    echo "    Shell:   container run --arch $ARCH --volume $LETHE_HOME:/home/lethe/.lethe -it lethe:latest /bin/bash"
 }
 
 # ---------------------------------------------------------------------------
@@ -417,8 +432,8 @@ setup_podman_mac() {
     if podman image exists lethe:latest 2>/dev/null && [[ "$REBUILD" == "0" ]]; then
         info "Image lethe:latest already exists (use --rebuild to recreate)"
     else
-        info "Building container image..."
-        podman build -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
+        info "Building container image (platform: $PLATFORM)..."
+        podman build --platform "$PLATFORM" -t lethe:latest -f "$REPO_DIR/Containerfile" "$REPO_DIR"
         success "Container image built"
     fi
 

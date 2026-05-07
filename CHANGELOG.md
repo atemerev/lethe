@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.15.3 - 2026-05-07
+
+### Fixed
+- **ARM Macs got an x86_64 container image**: `container build` (apple/container) and `podman build` were called without an architecture flag, so on Apple Silicon the resulting `lethe:latest` rootfs was `linux/amd64` running under emulation. `scripts/container-setup.sh` now detects host arch via `uname -m` and passes `--arch $ARCH` to `container build`/`run` and `--platform linux/$ARCH` to `podman build` on both Linux and macOS. The generated `run-container.sh` and printed Shell hint also carry the flag so copy-pasted commands stay consistent. **Existing users on ARM Macs:** rerun `./scripts/container-setup.sh --rebuild` to discard the cached x86 image; macOS-podman users with an amd64-initialized VM should also `podman machine rm && podman machine init --cpus 2 --memory 4096` first. Verify with `container run --arch arm64 lethe:latest uname -m` (should print `aarch64`).
+
 ## v0.15.2 - 2026-05-05
 
 ### Fixed
