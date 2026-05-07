@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.15.4 - 2026-05-07
+
+### Fixed
+- **`container-setup.sh --rebuild` failed on Apple Silicon Macs without Rosetta**: apple/container's buildkit VM enables `build.rosetta=true` by default and aborts bootstrap on hosts where Rosetta isn't installed (`VZErrorDomain Code=2 "Rosetta is not installed"`). The setup script now probes Rosetta on arm64 hosts via `arch -arch x86_64 /usr/bin/true` and, if absent, sets `build.rosetta=false` and stops any running builder so the property takes effect. Native arm64 builds (Lethe's default) are unaffected; cross-arch amd64 builds fall back to QEMU. (#19)
+
 ## v0.15.3 - 2026-05-07
 
 ### Fixed
