@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.16.0 - 2026-05-11
+
+### Added
+- **Telegram voice/audio transcription** (#17): voice notes and audio files are now downloaded, transcribed, and fed into the conversation pipeline as text. Providers are auto-selected (OpenRouter → OpenAI → local Whisper CLI) based on available API keys; explicit selection via `TRANSCRIPTION_PROVIDER`. New settings: `TELEGRAM_TRANSCRIPTION_ENABLED`, `TRANSCRIPTION_PROVIDER`, `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_LANGUAGE`, `TRANSCRIPTION_LOCAL_COMMAND`. Transcription failures surface a clear error to the user instead of dropping the message silently.
+- **Telegram sticker ingestion** (#18): stickers (static `.webp` and video `.webm`) are downloaded, cached by `file_unique_id`, normalized, and (for vision-capable models) described via a short LLM vision call. Falls back to metadata-only description (emoji + set name) when the model isn't vision-capable or rendering fails. `.tgs` (Lottie) is recognized but not rendered. Cache lives under `<cache_dir>/telegram/stickers/`.
+- **`ffmpeg-free` in the Fedora container image**: needed for `.webm` sticker preview rendering. Without it the sticker handler degrades gracefully to metadata-only.
+
 ## v0.15.6 - 2026-05-11
 
 ### Internal

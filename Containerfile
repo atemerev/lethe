@@ -3,6 +3,7 @@ FROM registry.fedoraproject.org/fedora-minimal:43
 RUN microdnf install -y --setopt=install_weak_deps=0 \
         python3.12 git sudo curl findutils \
         which file tar gzip unzip diffutils procps-ng \
+        ffmpeg-free \
     && microdnf clean all \
     && useradd -m -d /home/lethe -s /bin/bash lethe \
     && echo 'lethe ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/lethe
