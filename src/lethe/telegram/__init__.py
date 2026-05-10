@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from io import BytesIO
 from typing import Callable, Optional
 
 from aiogram import Bot, Dispatcher, F
@@ -13,6 +14,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
 from lethe.models import MODEL_CATALOG, get_available_providers, provider_for_model, _PROVIDER_LABELS
+from lethe.transcription import TranscriptionError, transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +260,77 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Failed to process photo: {e}")
                 await message.answer(f"Failed to process photo: {e}")
+
+        @self.dp.message(F.voice | F.audio)
+        async def handle_audio_message(message: Message):
+            """Handle Telegram voice/audio messages by transcribing them."""
+            if not self._is_authorized(message.from_user.id):
+                await message.answer("Unauthorized.")
+                return
+
+            if not self.conversation_manager or not self.process_callback:
+                await message.answer("Bot not fully initialized.")
+                return
+
+            # Store last message ID for reactions
+            self._last_message_id = message.message_id
+            self._last_chat_id = message.chat.id
+
+            if not self.settings.telegram_transcription_enabled:
+                await message.answer("Voice transcription is disabled.")
+                return
+
+            media = message.voice or message.audio
+            if not media:
+                return
+
+            is_voice = message.voice is not None
+            file_name = getattr(media, "file_name", None) or f"telegram_{'voice' if is_voice else 'audio'}_{media.file_id}.ogg"
+            mime_type = getattr(media, "mime_type", None) or ("audio/ogg" if is_voice else None)
+
+            try:
+                file = await self.bot.get_file(media.file_id)
+                bio = BytesIO()
+                await self.bot.download_file(file.file_path, bio)
+                audio_bytes = bio.getvalue()
+                transcript = await transcribe_audio(
+                    audio_bytes,
+                    filename=file_name,
+                    mime_type=mime_type,
+                    settings=self.settings,
+                )
+
+                caption = (message.caption or "").strip()
+                media_label = "voice message" if is_voice else "audio message"
+                content = f"[Transcribed {media_label}: {transcript}]"
+                if caption:
+                    content = f"{content}\nCaption: {caption}"
+
+                await self.conversation_manager.add_message(
+                    chat_id=message.chat.id,
+                    user_id=message.from_user.id,
+                    content=content,
+                    metadata={
+                        "username": message.from_user.username,
+                        "first_name": message.from_user.first_name,
+                        "message_id": message.message_id,
+                        "is_voice": is_voice,
+                        "is_audio": not is_voice,
+                        "file_name": file_name,
+                        "mime_type": mime_type,
+                        "duration": getattr(media, "duration", None),
+                        "file_size": getattr(media, "file_size", None),
+                        "transcription_provider": self.settings.transcription_provider or "auto",
+                        "transcription_model": self.settings.transcription_model or "default",
+                    },
+                    process_callback=self.process_callback,
+                )
+            except TranscriptionError as e:
+                logger.warning("Failed to transcribe Telegram audio: %s", e)
+                await message.answer(f"Failed to transcribe audio: {e}")
+            except Exception as e:
+                logger.exception("Failed to process Telegram audio")
+                await message.answer(f"Failed to process audio: {e}")
 
         @self.dp.message(F.document)
         async def handle_document(message: Message):
