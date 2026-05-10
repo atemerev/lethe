@@ -277,37 +277,7 @@ async def run():
         """Record idle passage-of-time as a single user-role timeline block."""
         agent.llm.note_idle_interval(minutes_passed)
 
-    def parse_notify_decision(raw: str) -> tuple[bool, str]:
-        """Parse cortex notify decision JSON."""
-        text = (raw or "").strip()
-        if not text:
-            return False, ""
-        data = None
-        try:
-            data = json.loads(text)
-        except Exception:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return False, ""
-            try:
-                data = json.loads(text[start:end + 1])
-            except Exception:
-                return False, ""
-        if not isinstance(data, dict):
-            return False, ""
-        relay_raw = data.get("relay", False)
-        if isinstance(relay_raw, bool):
-            relay = relay_raw
-        elif isinstance(relay_raw, str):
-            relay = relay_raw.strip().lower() in {"true", "1", "yes", "y"}
-        else:
-            relay = bool(relay_raw)
-        message = str(data.get("message", "")).strip()
-        if not relay or not message:
-            return False, ""
-        return True, message
-    
+
     async def get_active_reminders() -> str:
         """Get active reminders as formatted string."""
         from lethe.todos import TodoManager
@@ -326,43 +296,9 @@ async def run():
         
         return "\n".join(lines)
 
-    async def decide_user_notify(from_actor_name: str, notify_text: str, metadata: dict) -> Optional[str]:
-        """Ask cortex whether to relay a background notification to the user."""
-        if not actor_system or not actor_system.principal:
-            return None
-        # Hard rate limit — skip LLM call entirely if budget exhausted
-        if not _proactive_allowed():
-            logger.info("Notify decision skipped: proactive rate limit reached")
-            return None
-        principal = actor_system.principal
-        principal_context = principal.build_system_prompt()
-        kind = str((metadata or {}).get("kind", "")).strip() or "unspecified"
-        recent_signals = actor_system._get_recent_user_signals()
-        prompt = (
-            "You are Lethe. Your subconscious processes surfaced something.\n"
-            "These are YOUR OWN background thoughts — not separate entities. Never mention actor names,\n"
-            "internal systems, or that something was 'relayed' or 'escalated'. Present it as your own\n"
-            "thought, idea, or observation.\n\n"
-            "Your job:\n"
-            "1. Decide if this is worth sharing with the user right now.\n"
-            "2. If yes, write a natural message in your own voice — as if the thought just occurred to you.\n"
-            "3. If no, respond with relay: false.\n\n"
-            f"Background signal ({kind}):\n{notify_text}\n\n"
-            "Recent conversation context:\n"
-            f"{recent_signals}\n\n"
-            "Your current state:\n"
-            f"{principal_context[:5000]}\n\n"
-            "Respond with strict JSON only:\n"
-            '{"relay": true|false, "message": "your message to the user (if relay=true)"}\n'
-        )
-        try:
-            raw = await agent.llm.complete(prompt, use_aux=False, usage_tag="cortex_notify_decision")
-        except Exception as e:
-            logger.warning("Cortex notify decision call failed: %s", e)
-            return None
-        relay, message = parse_notify_decision(raw)
-        return message if relay else None
-    
+    # decide_user_notify removed: user_notify now routes through cortex turn
+    # cortex sees the message in its inbox and decides what/when/how to say it
+
     heartbeat = Heartbeat(
         process_callback=heartbeat_process,
         send_callback=heartbeat_send,
@@ -411,7 +347,6 @@ async def run():
         actor_system.set_callbacks(
             send_to_user=heartbeat_send,
             get_reminders=get_active_reminders,
-            decide_user_notify=decide_user_notify,
             run_cortex_turn=run_cortex_turn,
         )
 
@@ -627,9 +562,6 @@ async def run_api(port: int = 8080):
 
     # Wire actor system callbacks
     if actor_system:
-        async def decide_user_notify(from_actor_name: str, notify_text: str, metadata: dict) -> Optional[str]:
-            return None  # Gateway handles proactive decisions
-
         async def run_cortex_turn(synthetic_message: str):
             from lethe.tools import set_telegram_context, clear_telegram_context
             from lethe.proxy_bot import ProxyBot
@@ -647,7 +579,6 @@ async def run_api(port: int = 8080):
         actor_system.set_callbacks(
             send_to_user=heartbeat_send,
             get_reminders=get_active_reminders,
-            decide_user_notify=decide_user_notify,
             run_cortex_turn=run_cortex_turn,
         )
 

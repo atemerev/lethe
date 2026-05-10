@@ -324,7 +324,8 @@ async def test_principal_monitor_keeps_done_and_failed_updates_in_cortex(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
+async def test_brainstem_user_notify_triggers_cortex_turn(monkeypatch):
+    """user_notify from brainstem triggers a cortex turn instead of auto-relaying."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
@@ -349,16 +350,12 @@ async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
     actor_system = ActorSystem(agent)
     await actor_system.setup()
     send_to_user = AsyncMock()
-    seen = {"important": 0}
+    run_cortex_turn = AsyncMock()
 
-    async def _decide(from_actor_name: str, text: str, metadata: dict):
-        if from_actor_name == "brainstem" and text == "Important insight":
-            seen["important"] += 1
-            return "Important insight" if seen["important"] == 1 else None
-        return None
-
-    decide_user_notify = AsyncMock(side_effect=_decide)
-    actor_system.set_callbacks(send_to_user=send_to_user, decide_user_notify=decide_user_notify)
+    actor_system.set_callbacks(
+        send_to_user=send_to_user,
+        run_cortex_turn=run_cortex_turn,
+    )
 
     principal = actor_system.principal
     brainstem_actor = actor_system.registry.spawn(
@@ -366,47 +363,40 @@ async def test_brainstem_user_notify_is_cortex_gated(monkeypatch):
         spawned_by=principal.id,
     )
 
+    # Let setup-time notifications settle
+    await asyncio.sleep(2.0)
+    run_cortex_turn.reset_mock()
+    send_to_user.reset_mock()
+
     await brainstem_actor.send_to(
         principal.id,
         "Important insight",
         metadata={"channel": "user_notify", "kind": "insight"},
     )
     await asyncio.sleep(1.2)
-    assert any(
-        call.args and call.args[0] == "Important insight"
-        for call in send_to_user.await_args_list
-    )
+
+    # Cortex turn should be triggered, NOT direct send_to_user
+    assert run_cortex_turn.await_count >= 1
+    synthetic = run_cortex_turn.await_args_list[0].args[0]
+    assert "brainstem" in synthetic
+    assert "user_notify" in synthetic or "notify the user" in synthetic
+
+    # send_to_user should NOT have been called directly
+    assert send_to_user.await_count == 0
+
     events = actor_system.registry.events.query(
-        event_type="background_notify_relayed_to_user",
+        event_type="background_notify_deferred_to_cortex",
         actor_id=principal.id,
     )
     assert events
     assert events[-1].payload.get("from_actor_name") == "brainstem"
 
-    await brainstem_actor.send_to(
-        principal.id,
-        "Important insight",
-        metadata={"channel": "user_notify", "kind": "insight"},
-    )
-    await asyncio.sleep(1.2)
-    assert seen["important"] >= 2
-    relay_matches = [
-        call for call in send_to_user.await_args_list
-        if call.args and call.args[0] == "Important insight"
-    ]
-    assert len(relay_matches) == 1
-    dropped = actor_system.registry.events.query(
-        event_type="background_notify_dropped_by_cortex",
-        actor_id=principal.id,
-    )
-    assert dropped
-    assert dropped[-1].payload.get("from_actor_name") == "brainstem"
-
     await actor_system.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
+async def test_dmn_user_notify_triggers_cortex_turn(monkeypatch):
+    """user_notify from DMN triggers a cortex turn instead of auto-relaying."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
@@ -431,20 +421,23 @@ async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
     actor_system = ActorSystem(agent)
     await actor_system.setup()
     send_to_user = AsyncMock()
+    run_cortex_turn = AsyncMock()
 
-    async def _decide(from_actor_name: str, text: str, metadata: dict):
-        if from_actor_name == "dmn" and text == "Urgent deadline tomorrow":
-            return "Urgent deadline tomorrow"
-        return None
-
-    decide_user_notify = AsyncMock(side_effect=_decide)
-    actor_system.set_callbacks(send_to_user=send_to_user, decide_user_notify=decide_user_notify)
+    actor_system.set_callbacks(
+        send_to_user=send_to_user,
+        run_cortex_turn=run_cortex_turn,
+    )
 
     principal = actor_system.principal
     dmn_actor = actor_system.registry.spawn(
         ActorConfig(name="dmn", group="main", goals="background notify"),
         spawned_by=principal.id,
     )
+
+    # Let setup-time notifications (brainstem restart etc.) settle
+    await asyncio.sleep(2.0)
+    run_cortex_turn.reset_mock()
+    send_to_user.reset_mock()
 
     await dmn_actor.send_to(
         principal.id,
@@ -453,20 +446,13 @@ async def test_dmn_user_notify_is_cortex_gated(monkeypatch):
     )
     await asyncio.sleep(1.2)
 
-    assert any(
-        call.args and call.args[0] == "Urgent deadline tomorrow"
-        for call in send_to_user.await_args_list
-    )
-    assert any(
-        call.args and call.args[0] == "dmn" and call.args[1] == "Urgent deadline tomorrow"
-        for call in decide_user_notify.await_args_list
-    )
-    events = actor_system.registry.events.query(
-        event_type="background_notify_relayed_to_user",
-        actor_id=principal.id,
-    )
-    assert events
-    assert events[-1].payload.get("from_actor_name") == "dmn"
+    # Cortex turn should be triggered
+    assert run_cortex_turn.await_count >= 1
+    synthetic = run_cortex_turn.await_args_list[0].args[0]
+    assert "dmn" in synthetic
+
+    # send_to_user should NOT have been called directly
+    assert send_to_user.await_count == 0
 
     await actor_system.shutdown()
 
