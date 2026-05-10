@@ -14,6 +14,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
 from lethe.models import MODEL_CATALOG, get_available_providers, provider_for_model, _PROVIDER_LABELS
+from lethe.telegram.stickers import StickerProcessor
 from lethe.transcription import TranscriptionError, transcribe_audio
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,10 @@ class TelegramBot:
         self.dp = Dispatcher()
         self._running = False
         self._typing_tasks: dict[int, asyncio.Task] = {}
+        self._sticker_tasks: dict[int, asyncio.Task] = {}
         self._last_message_id: Optional[int] = None
         self._last_chat_id: Optional[int] = None
+        self._sticker_processor: Optional[StickerProcessor] = None
 
         self._setup_handlers()
 
@@ -261,6 +264,28 @@ class TelegramBot:
                 logger.error(f"Failed to process photo: {e}")
                 await message.answer(f"Failed to process photo: {e}")
 
+        @self.dp.message(F.sticker)
+        async def handle_sticker(message: Message):
+            """Handle Telegram sticker messages with async normalization."""
+            if not self._is_authorized(message.from_user.id):
+                await message.answer("Unauthorized.")
+                return
+
+            if not self.conversation_manager or not self.process_callback:
+                await message.answer("Bot not fully initialized.")
+                return
+
+            self._last_message_id = message.message_id
+            self._last_chat_id = message.chat.id
+
+            task = asyncio.create_task(self._process_sticker_message(message))
+            self._sticker_tasks[message.message_id] = task
+
+            def _cleanup(_task: asyncio.Task):
+                self._sticker_tasks.pop(message.message_id, None)
+
+            task.add_done_callback(_cleanup)
+
         @self.dp.message(F.voice | F.audio)
         async def handle_audio_message(message: Message):
             """Handle Telegram voice/audio messages by transcribing them."""
@@ -386,6 +411,78 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Failed to process document: {e}")
                 await message.answer(f"Failed to download file: {e}")
+
+    def _get_sticker_processor(self) -> Optional[StickerProcessor]:
+        if self._sticker_processor is not None:
+            return self._sticker_processor
+        if not self.agent:
+            return None
+        self._sticker_processor = StickerProcessor(
+            settings=self.settings,
+            bot=self.bot,
+            llm_client_provider=lambda: self.agent.llm,
+        )
+        return self._sticker_processor
+
+    async def _process_sticker_message(self, message: Message):
+        processor = self._get_sticker_processor()
+        sticker = message.sticker
+
+        if not sticker:
+            await message.answer("Failed to process sticker: missing payload")
+            return
+
+        try:
+            if processor is None:
+                logger.warning("Sticker processor unavailable; falling back to metadata-only context")
+                content = self._format_sticker_fallback(sticker)
+                metadata = self._build_sticker_metadata(message, None, None, "sticker processor unavailable")
+            else:
+                context = await processor.process(message)
+                content = context.to_message_content(include_preview=processor._can_use_preview_description())
+                metadata = self._build_sticker_metadata(message, context.local_path, context.preview_path, context.error)
+
+            await self.conversation_manager.add_message(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                content=content,
+                metadata=metadata,
+                process_callback=self.process_callback,
+            )
+        except Exception as e:
+            logger.exception("Failed to process Telegram sticker")
+            await message.answer(f"Failed to process sticker: {e}")
+
+    def _build_sticker_metadata(self, message: Message, local_path: Optional[object], preview_path: Optional[object], error: Optional[str]) -> dict:
+        sticker = message.sticker
+        assert sticker is not None
+        return {
+            "username": message.from_user.username if message.from_user else None,
+            "first_name": message.from_user.first_name if message.from_user else None,
+            "message_id": message.message_id,
+            "is_sticker": True,
+            "file_id": sticker.file_id,
+            "file_unique_id": getattr(sticker, "file_unique_id", None),
+            "emoji": getattr(sticker, "emoji", None),
+            "set_name": getattr(sticker, "set_name", None),
+            "is_animated": bool(getattr(sticker, "is_animated", False)),
+            "is_video": bool(getattr(sticker, "is_video", False)),
+            "width": getattr(sticker, "width", None),
+            "height": getattr(sticker, "height", None),
+            "file_size": getattr(sticker, "file_size", None),
+            "file_path": str(local_path) if local_path else None,
+            "preview_path": str(preview_path) if preview_path else None,
+            "error": error,
+        }
+
+    def _format_sticker_fallback(self, sticker) -> str:
+        parts = ["[Sticker received:"]
+        if getattr(sticker, "emoji", None):
+            parts.append(f' emoji="{sticker.emoji}"')
+        if getattr(sticker, "set_name", None):
+            parts.append(f' set="{sticker.set_name}"')
+        parts.append(" visual description unavailable]")
+        return "".join(parts)
 
     def _get_current_auth(self) -> str:
         """Return current auth type: 'sub' if OAuth is active, 'API' otherwise."""
