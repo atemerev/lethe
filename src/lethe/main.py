@@ -1,7 +1,6 @@
 """Main entry point for Lethe."""
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -277,7 +276,6 @@ async def run():
         """Record idle passage-of-time as a single user-role timeline block."""
         agent.llm.note_idle_interval(minutes_passed)
 
-
     async def get_active_reminders() -> str:
         """Get active reminders as formatted string."""
         from lethe.todos import TodoManager
@@ -295,9 +293,6 @@ async def run():
             lines.append(f"- [{priority}] {todo['title']}{due_str}")
         
         return "\n".join(lines)
-
-    # decide_user_notify removed: user_notify now routes through cortex turn
-    # cortex sees the message in its inbox and decides what/when/how to say it
 
     heartbeat = Heartbeat(
         process_callback=heartbeat_process,

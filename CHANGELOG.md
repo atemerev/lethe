@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.15.6 - 2026-05-11
+
+### Internal
+- Remove orphaned helpers left over from the v0.15.5 cortex routing change: `_get_recent_user_signals` in `actor/integration.py` and the now-unused `json` imports in `main.py` and `actor/integration.py`. No behavior change.
+
+## v0.15.5 - 2026-05-10
+
+### Fixed
+- **Background notifications bypassed cortex**: DMN/brainstem `user_notify` messages were relayed straight to Telegram via a separate `_decide_user_notify` LLM call, which lacked full conversation/time context — producing artifacts like "Good morning" sent at midnight. The auto-relay pipeline (`_decide_user_notify` callback, `parse_notify_decision` helper) is removed; `user_notify` from brainstem/dmn now triggers `_run_cortex_turn` with a synthetic system prompt, so cortex wakes, reads its inbox, and decides whether/when/how to relay the thought in its own voice. Same pattern already used for subagent task updates. Event renamed `background_notify_relayed_to_user`/`_dropped_by_cortex` → `background_notify_deferred_to_cortex`.
+
 ## v0.15.4 - 2026-05-07
 
 ### Fixed

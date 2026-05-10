@@ -10,7 +10,6 @@ and notifies the cortex when something needs user attention.
 """
 
 import asyncio
-import json
 import logging
 import os
 from typing import Awaitable, Callable, Dict, List, Optional
@@ -76,7 +75,6 @@ class ActorSystem:
         # Callbacks set by main.py
         self._send_to_user: Optional[Callable] = None
         self._get_reminders: Optional[Callable] = None
-        # _decide_user_notify removed: user_notify now routes through cortex turn
         self._run_cortex_turn: Optional[Callable[[str], Awaitable[None]]] = None
 
     def _get_principal_context(self) -> str:
@@ -550,33 +548,3 @@ class ActorSystem:
             "dmn": dmn_status,
         }
 
-    def _get_recent_user_signals(self) -> str:
-        """Build compact recent user signal context for background decisions."""
-        try:
-            recent = self.agent.memory.messages.get_recent(limit=14) or []
-            user_messages = [m for m in recent if m.get("role") == "user"]
-            if not user_messages:
-                return "(no recent user messages)"
-
-            def _clean(content: str) -> str:
-                text = content or ""
-                if text.startswith("[") and text.endswith("]"):
-                    # Stored multimodal payload as JSON list.
-                    try:
-                        data = json.loads(text)
-                        if isinstance(data, list):
-                            parts = [p.get("text", "") for p in data if isinstance(p, dict) and p.get("type") == "text"]
-                            text = " ".join(parts) or text
-                    except Exception:
-                        pass
-                text = " ".join(text.split())
-                return text[:500]
-
-            lines = []
-            for item in user_messages[-8:]:
-                created = (item.get("created_at") or "")[:19]
-                lines.append(f"- [{created}] {_clean(item.get('content', ''))}")
-            return "\n".join(lines)
-        except Exception as e:
-            logger.warning(f"Failed to build recent user signals: {e}")
-            return f"(failed to build user signals: {e})"
