@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Optional
 
+from lethe.reaction_transport import send_message_reaction
+
 # Context variables set by worker before tool execution
 _current_bot: ContextVar[Any] = ContextVar('current_bot', default=None)
 _current_chat_id: ContextVar[Optional[int]] = ContextVar('current_chat_id', default=None)
@@ -260,8 +262,6 @@ async def telegram_react_async(emoji: str = "👍", message_id: int = 0) -> str:
     Returns:
         JSON with success status
     """
-    from aiogram.types import ReactionTypeEmoji
-    
     bot = _current_bot.get()
     chat_id = _current_chat_id.get()
     target_message_id = message_id or _last_message_id.get()
@@ -269,11 +269,7 @@ async def telegram_react_async(emoji: str = "👍", message_id: int = 0) -> str:
     if not bot or not chat_id or not target_message_id:
         raise RuntimeError("Telegram context not set or no message to react to.")
     
-    await bot.set_message_reaction(
-        chat_id=chat_id,
-        message_id=target_message_id,
-        reaction=[ReactionTypeEmoji(emoji=emoji)]
-    )
+    await send_message_reaction(bot, chat_id, target_message_id, emoji)
     
     return json.dumps({
         "success": True,

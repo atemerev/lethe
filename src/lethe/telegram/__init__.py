@@ -14,6 +14,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
 from lethe.models import MODEL_CATALOG, get_available_providers, provider_for_model, _PROVIDER_LABELS
+from lethe.reaction_transport import send_message_reaction
 from lethe.telegram.stickers import StickerProcessor
 from lethe.transcription import TranscriptionError, transcribe_audio
 
@@ -747,13 +748,8 @@ class TelegramBot:
     
     async def react_to_message(self, chat_id: int, message_id: int, emoji: str = "👍"):
         """React to a message with an emoji."""
-        from aiogram.types import ReactionTypeEmoji
         try:
-            await self.bot.set_message_reaction(
-                chat_id=chat_id,
-                message_id=message_id,
-                reaction=[ReactionTypeEmoji(emoji=emoji)]
-            )
+            await send_message_reaction(self.bot, chat_id, message_id, emoji)
             logger.info(f"Reacted to message {message_id} with {emoji}")
         except Exception as e:
             logger.warning(f"Failed to react to message: {e}")
