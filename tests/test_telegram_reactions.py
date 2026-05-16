@@ -10,6 +10,14 @@ pytest.importorskip("aiogram")
 from lethe.telegram import TelegramBot
 
 
+class DummyReactionBot:
+    def __init__(self):
+        self.calls = []
+
+    async def set_message_reaction(self, chat_id: int, message_id: int, reaction: list, **kwargs):
+        self.calls.append((chat_id, message_id, reaction))
+
+
 class TestTelegramReactionHelpers:
     def _make_bot(self, tmp_path, allowed_user_ids=None):
         settings = SimpleNamespace(
@@ -38,6 +46,18 @@ class TestTelegramReactionHelpers:
             old_reaction=[],
             new_reaction=[SimpleNamespace(emoji=emoji)],
         )
+
+    @pytest.mark.asyncio
+    async def test_react_to_message_uses_shared_transport(self, tmp_path):
+        bot, _ = self._make_bot(tmp_path)
+        recorder = DummyReactionBot()
+        bot.bot = recorder
+
+        await bot.react_to_message(chat_id=99, message_id=77, emoji="🔥")
+
+        assert recorder.calls[0][0] == 99
+        assert recorder.calls[0][1] == 77
+        assert getattr(recorder.calls[0][2][0], "emoji", None) == "🔥"
 
     def test_build_message_metadata_includes_message_id(self, tmp_path):
         bot, _ = self._make_bot(tmp_path)
