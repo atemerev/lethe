@@ -249,11 +249,13 @@ def set_last_message_id(message_id: int):
     _last_message_id.set(message_id)
 
 
-async def telegram_react_async(emoji: str = "👍") -> str:
+async def telegram_react_async(emoji: str = "👍", message_id: int = 0) -> str:
     """React to the user's last message with an emoji.
     
     Args:
         emoji: Emoji to react with (e.g., "👍", "❤️", "😂", "🔥", "👀")
+        message_id: Optional message ID to react to. Use 0 to fall back to the
+            last tracked inbound message.
     
     Returns:
         JSON with success status
@@ -262,26 +264,26 @@ async def telegram_react_async(emoji: str = "👍") -> str:
     
     bot = _current_bot.get()
     chat_id = _current_chat_id.get()
-    message_id = _last_message_id.get()
+    target_message_id = message_id or _last_message_id.get()
     
-    if not bot or not chat_id or not message_id:
+    if not bot or not chat_id or not target_message_id:
         raise RuntimeError("Telegram context not set or no message to react to.")
     
     await bot.set_message_reaction(
         chat_id=chat_id,
-        message_id=message_id,
+        message_id=target_message_id,
         reaction=[ReactionTypeEmoji(emoji=emoji)]
     )
     
     return json.dumps({
         "success": True,
         "emoji": emoji,
-        "message_id": message_id,
+        "message_id": target_message_id,
     })
 
 
 @_is_tool
-def telegram_react(emoji: str = "👍") -> str:
+def telegram_react(emoji: str = "👍", message_id: int = 0) -> str:
     """React to the user's last message with an emoji.
     
     Use this sparingly to acknowledge emotionally meaningful moments, not every message.
@@ -290,6 +292,8 @@ def telegram_react(emoji: str = "👍") -> str:
     
     Args:
         emoji: Emoji to react with
+        message_id: Optional message ID to react to. Use 0 to fall back to the
+            last tracked inbound message.
     
     Returns:
         JSON with success status
