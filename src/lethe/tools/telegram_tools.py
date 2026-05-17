@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from lethe.reaction_transport import send_message_reaction
+from lethe.telegram_turn_guard import queue_pending_reaction
 
 # Context variables set by worker before tool execution
 _current_bot: ContextVar[Any] = ContextVar('current_bot', default=None)
@@ -268,6 +269,14 @@ async def telegram_react_async(emoji: str = "👍", message_id: int = 0) -> str:
     
     if not bot or not chat_id or not target_message_id:
         raise RuntimeError("Telegram context not set or no message to react to.")
+    
+    if queue_pending_reaction(bot, chat_id, target_message_id, emoji):
+        return json.dumps({
+            "success": True,
+            "queued": True,
+            "emoji": emoji,
+            "message_id": target_message_id,
+        })
     
     await send_message_reaction(bot, chat_id, target_message_id, emoji)
     

@@ -858,6 +858,32 @@ class TestTelegramReactTool:
         assert payload["message_id"] == 42
         assert bot.calls[0][1] == 42
 
+    @pytest.mark.asyncio
+    async def test_telegram_react_queues_when_guard_active(self):
+        from lethe.telegram_turn_guard import clear_telegram_turn_guard, start_telegram_turn_guard
+        from lethe.tools.telegram_tools import (
+            clear_telegram_context,
+            set_last_message_id,
+            set_telegram_context,
+            telegram_react_async,
+        )
+
+        bot = DummyTelegramBot()
+        start_telegram_turn_guard(rng=lambda: 0.25)
+        set_telegram_context(bot, 99)
+        set_last_message_id(42)
+
+        try:
+            payload = json.loads(await telegram_react_async("🔥", message_id=77))
+        finally:
+            clear_telegram_context()
+            clear_telegram_turn_guard()
+
+        assert payload["success"] is True
+        assert payload["queued"] is True
+        assert payload["message_id"] == 77
+        assert bot.calls == []
+
 
 # ============================================================================
 # Integration Tests
