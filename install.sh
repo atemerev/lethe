@@ -1,109 +1,27 @@
 #!/usr/bin/env bash
 #
-# Lethe Installer
+# Lethe Rust installer.
 # Usage: curl -fsSL https://lethe.gg/install | bash
 #
-# Default: container install (podman on Linux, apple/container on macOS).
-# Use --yolo for native (non-containerized) install.
-#
-# Supports multiple LLM providers: OpenRouter, Anthropic, OpenAI
-#
+# Installs a native Rust binary into $LETHE_HOME/bin/lethe.
 
 set -euo pipefail
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Config
-REPO_URL="https://github.com/atemerev/lethe.git"
-REPO_OWNER="atemerev"
-REPO_NAME="lethe"
+REPO_URL="${LETHE_REPO_URL:-https://github.com/atemerev/lethe.git}"
+REPO_OWNER="${LETHE_REPO_OWNER:-atemerev}"
+REPO_NAME="${LETHE_REPO_NAME:-lethe}"
+RELEASE_BASE_URL="${LETHE_RELEASE_BASE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download}"
 LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
+INSTALL_DIR="${LETHE_INSTALL_DIR:-$LETHE_HOME/install}"
 CONFIG_DIR="$LETHE_HOME/config"
-DETECTED_PROVIDERS=()
-DEFERRED_OPENAI_OAUTH_LOGIN=0
-LOCAL_CHECKOUT=0
-
-# Detect if running from an existing lethe checkout
-_detect_install_dir() {
-    if [ -n "${LETHE_INSTALL_DIR:-}" ]; then
-        INSTALL_DIR="$LETHE_INSTALL_DIR"
-        return
-    fi
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    if [ -f "$script_dir/pyproject.toml" ] && grep -q 'name = "lethe"' "$script_dir/pyproject.toml" 2>/dev/null; then
-        INSTALL_DIR="$script_dir"
-        LOCAL_CHECKOUT=1
-    else
-        INSTALL_DIR="$LETHE_HOME/install"
-    fi
-}
-_detect_install_dir
-
-# Provider defaults
-# NOTE: claude-max disabled - Anthropic blocked third-party OAuth in Jan 2026
-provider_desc() {
-    case "$1" in
-        openrouter) echo "OpenRouter (recommended - access to all models)" ;;
-        anthropic) echo "Anthropic (API key or Claude subscription token)" ;;
-        openai) echo "OpenAI (API key or ChatGPT subscription OAuth for Codex)" ;;
-        *) echo "" ;;
-    esac
-}
-
-provider_key_env() {
-    case "$1" in
-        openrouter) echo "OPENROUTER_API_KEY" ;;
-        anthropic) echo "ANTHROPIC_API_KEY" ;;
-        openai) echo "OPENAI_API_KEY" ;;
-        *) echo "" ;;
-    esac
-}
-
-provider_model_default() {
-    case "$1" in
-        openrouter) echo "openrouter/moonshotai/kimi-k2.6" ;;
-        anthropic) echo "claude-opus-4-6" ;;
-        openai) echo "gpt-5.4" ;;
-        *) echo "" ;;
-    esac
-}
-
-provider_model_aux_default() {
-    case "$1" in
-        openrouter) echo "openrouter/google/gemini-3-flash-preview" ;;
-        anthropic) echo "claude-haiku-4-5" ;;
-        openai) echo "gpt-5.4-nano" ;;
-        *) echo "" ;;
-    esac
-}
-
-provider_key_url() {
-    case "$1" in
-        openrouter) echo "https://openrouter.ai/keys" ;;
-        anthropic) echo "https://console.anthropic.com/settings/keys" ;;
-        openai) echo "https://platform.openai.com/api-keys" ;;
-        *) echo "" ;;
-    esac
-}
-
-print_header() {
-    echo -e "${BLUE}"
-    echo "╔═══════════════════════════════════════════════════════════╗"
-    echo "║                                                           ║"
-    echo "║   █░░ █▀▀ ▀█▀ █░█ █▀▀                                     ║"
-    echo "║   █▄▄ ██▄ ░█░ █▀█ ██▄                                     ║"
-    echo "║                                                           ║"
-    echo "║   Autonomous Executive Assistant                           ║"
-    echo "║                                                           ║"
-    echo "╚═══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-}
+ENV_FILE="$CONFIG_DIR/.env"
+BIN_DIR="$LETHE_HOME/bin"
 
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
@@ -113,928 +31,257 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 prompt_read() {
     local prompt="$1"
     local var_name="$2"
+    local default="${3:-}"
     local value
-    printf "\e[?2004l" > /dev/tty  # disable bracketed paste
-    printf "%s" "$prompt" > /dev/tty
+    if [ -n "$default" ]; then
+        printf "%s [%s]: " "$prompt" "$default" > /dev/tty
+    else
+        printf "%s: " "$prompt" > /dev/tty
+    fi
     IFS= read -r value < /dev/tty
-    value="$(printf '%s' "$value" | tr -d '\r' | sed 's/[^[:print:]]//g' | xargs)"
+    value="${value:-$default}"
     eval "$var_name=\$value"
 }
 
-detect_os() {
-    case "$(uname -s)" in
-        Linux*)
-            if grep -qi microsoft /proc/version 2>/dev/null; then
-                echo "wsl"
-            else
-                echo "linux"
-            fi
-            ;;
-        Darwin*) echo "mac" ;;
-        *) echo "unknown" ;;
-    esac
+print_header() {
+    echo -e "${BLUE}"
+    echo "╔═══════════════════════════════════════════════════════════╗"
+    echo "║                     LETHE RUST                            ║"
+    echo "║              Local AI assistant runtime                   ║"
+    echo "╚═══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
 }
 
-check_command() { command -v "$1" >/dev/null 2>&1; }
-
-get_env_value() {
-    local key="$1"
-    local file="$2"
-    [ -f "$file" ] || return 1
-    grep -E "^${key}=" "$file" 2>/dev/null | head -n1 | cut -d= -f2-
-}
-
-maybe_sudo() {
-    if [[ "$(id -u)" -eq 0 ]]; then
-        "$@"
-    else
-        sudo "$@"
-    fi
-}
-
-has_detected_provider() {
-    local needle="$1"
-    local p
-    for p in "${DETECTED_PROVIDERS[@]-}"; do
-        if [ "$p" = "$needle" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Detect existing API keys
-detect_api_keys() {
-    DETECTED_PROVIDERS=()
-
-    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        DETECTED_PROVIDERS+=("openrouter")
-    fi
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        DETECTED_PROVIDERS+=("anthropic")
-    fi
-    if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && ! has_detected_provider "anthropic"; then
-        DETECTED_PROVIDERS+=("anthropic")
-    fi
-    if [ -n "${OPENAI_API_KEY:-}" ]; then
-        DETECTED_PROVIDERS+=("openai")
-    fi
-    if [ -n "${OPENAI_AUTH_TOKEN:-}" ] && ! has_detected_provider "openai"; then
-        DETECTED_PROVIDERS+=("openai")
-    fi
-
-    # Also check .env file if it exists (parse only, never source)
-    if [ -f "$CONFIG_DIR/.env" ]; then
-        local cfg_or_key
-        local cfg_an_key
-        local cfg_oa_key
-        local cfg_oa_auth
-        cfg_or_key="$(get_env_value "OPENROUTER_API_KEY" "$CONFIG_DIR/.env" || true)"
-        cfg_an_key="$(get_env_value "ANTHROPIC_API_KEY" "$CONFIG_DIR/.env" || true)"
-        cfg_an_auth="$(get_env_value "ANTHROPIC_AUTH_TOKEN" "$CONFIG_DIR/.env" || true)"
-        cfg_oa_key="$(get_env_value "OPENAI_API_KEY" "$CONFIG_DIR/.env" || true)"
-        cfg_oa_auth="$(get_env_value "OPENAI_AUTH_TOKEN" "$CONFIG_DIR/.env" || true)"
-        if [ -n "${cfg_or_key:-}" ] && ! has_detected_provider "openrouter"; then
-            DETECTED_PROVIDERS+=("openrouter")
-        fi
-        if [ -n "${cfg_an_key:-}" ] && ! has_detected_provider "anthropic"; then
-            DETECTED_PROVIDERS+=("anthropic")
-        fi
-        if [ -n "${cfg_an_auth:-}" ] && ! has_detected_provider "anthropic"; then
-            DETECTED_PROVIDERS+=("anthropic")
-        fi
-        if [ -n "${cfg_oa_key:-}" ] && ! has_detected_provider "openai"; then
-            DETECTED_PROVIDERS+=("openai")
-        fi
-        if [ -n "${cfg_oa_auth:-}" ] && ! has_detected_provider "openai"; then
-            DETECTED_PROVIDERS+=("openai")
-        fi
-    fi
-}
-
-prompt_provider() {
-    echo ""
-    echo -e "${YELLOW}Select your LLM provider:${NC}"
-    echo ""
-
-    # Show detected keys
-    if [ ${#DETECTED_PROVIDERS[@]} -gt 0 ]; then
-        echo -e "${GREEN}Detected API keys for: ${DETECTED_PROVIDERS[*]}${NC}"
-        echo ""
-    fi
-
-    local i=1
-    for provider in openrouter anthropic openai; do
-        local desc
-        desc="$(provider_desc "$provider")"
-        local detected=""
-        if has_detected_provider "$provider"; then
-            detected="${GREEN}[key found]${NC}"
-        fi
-        echo -e "  $i) $desc $detected"
-        ((i++))
-    done
-    echo ""
-
-    local default_choice=1
-    if has_detected_provider "anthropic"; then
-        default_choice=2
-    elif has_detected_provider "openai"; then
-        default_choice=3
-    fi
-
-    prompt_read "Choose provider [1-3, default=$default_choice]: " choice
-    choice=${choice:-$default_choice}
-
-    case $choice in
-        1) SELECTED_PROVIDER="openrouter" ;;
-        2) SELECTED_PROVIDER="anthropic" ;;
-        3) SELECTED_PROVIDER="openai" ;;
-        *) SELECTED_PROVIDER="openrouter" ;;
-    esac
-
-    success "Selected: $SELECTED_PROVIDER"
-}
-
-prompt_model() {
-    local default_model
-    local default_aux
-    default_model="$(provider_model_default "$SELECTED_PROVIDER")"
-    default_aux="$(provider_model_aux_default "$SELECTED_PROVIDER")"
-
-    echo ""
-    echo -e "${BLUE}Main model${NC} (for conversations):"
-    echo -e "  Default: ${CYAN}$default_model${NC}"
-    prompt_read "  Press Enter for default, or enter custom: " custom_model
-
-    if [ -n "$custom_model" ]; then
-        SELECTED_MODEL="$custom_model"
-    else
-        SELECTED_MODEL="$default_model"
-    fi
-
-    echo ""
-    echo -e "${BLUE}Auxiliary model${NC} (for heartbeats, summarization - cheaper/faster):"
-    echo -e "  Default: ${CYAN}$default_aux${NC}"
-    prompt_read "  Press Enter for default, or enter custom: " custom_aux
-
-    if [ -n "$custom_aux" ]; then
-        SELECTED_MODEL_AUX="$custom_aux"
-    else
-        SELECTED_MODEL_AUX="$default_aux"
-    fi
-
-    success "Main model: $SELECTED_MODEL"
-    success "Aux model: $SELECTED_MODEL_AUX"
-
-    # Optional: Custom API base URL
-    echo ""
-    echo -e "${BLUE}Custom API URL${NC} (for local/compatible providers like Ollama, vLLM, etc.):"
-    echo -e "  Leave empty to use default provider URL"
-    prompt_read "  Custom API base URL (or Enter to skip): " custom_api_base
-
-    if [ -n "$custom_api_base" ]; then
-        SELECTED_API_BASE="$custom_api_base"
-        success "API base: $SELECTED_API_BASE"
-    else
-        SELECTED_API_BASE=""
-    fi
-}
-
-prompt_api_key() {
-    local key_name
-    local key_url
-    key_name="$(provider_key_env "$SELECTED_PROVIDER")"
-    key_url="$(provider_key_url "$SELECTED_PROVIDER")"
-
-    if [[ "$SELECTED_PROVIDER" == "anthropic" ]]; then
-        echo ""
-        echo -e "${YELLOW}Anthropic auth mode:${NC}"
-        echo "  1) API key (pay-per-token)"
-        echo "  2) Claude subscription token (Claude Code)"
-        echo ""
-        prompt_read "Choose [1-2, default=2]: " auth_choice
-        auth_choice=${auth_choice:-2}
-        if [[ "$auth_choice" == "1" ]]; then
-            key_name="ANTHROPIC_API_KEY"
-            key_url="https://console.anthropic.com/settings/keys"
-        else
-            key_name="ANTHROPIC_AUTH_TOKEN"
-            key_url="Run: claude setup-token"
-        fi
-    elif [[ "$SELECTED_PROVIDER" == "openai" ]]; then
-        echo ""
-        echo -e "${YELLOW}OpenAI auth mode:${NC}"
-        echo "  1) API key (pay-per-token)"
-        echo "  2) ChatGPT subscription OAuth (Codex)"
-        echo ""
-        prompt_read "Choose [1-2, default=2]: " auth_choice
-        auth_choice=${auth_choice:-2}
-        if [[ "$auth_choice" == "1" ]]; then
-            key_name="OPENAI_API_KEY"
-            key_url="https://platform.openai.com/api-keys"
-        else
-            key_name="OPENAI_AUTH_TOKEN"
-            key_url="Run: uv run lethe oauth-login openai"
-        fi
-    fi
-
-    # Check if already have key in environment or existing config
-    local existing_key=""
-    local key_source=""
-
-    # First check environment
-    case $key_name in
-        OPENROUTER_API_KEY) existing_key="${OPENROUTER_API_KEY:-}" ;;
-        ANTHROPIC_API_KEY) existing_key="${ANTHROPIC_API_KEY:-}" ;;
-        ANTHROPIC_AUTH_TOKEN) existing_key="${ANTHROPIC_AUTH_TOKEN:-}" ;;
-        OPENAI_API_KEY) existing_key="${OPENAI_API_KEY:-}" ;;
-        OPENAI_AUTH_TOKEN) existing_key="${OPENAI_AUTH_TOKEN:-}" ;;
-    esac
-    [ -n "$existing_key" ] && key_source="environment"
-
-    # Then check existing config
-    if [ -z "$existing_key" ] && [ -f "$CONFIG_DIR/.env" ]; then
-        existing_key="$(grep "^$key_name=" "$CONFIG_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
-        [ -n "$existing_key" ] && key_source="$CONFIG_DIR/.env"
-    fi
-
-    if [ -n "$existing_key" ]; then
-        local masked_key="${existing_key:0:12}...${existing_key: -4}"
-        echo ""
-        echo -e "${GREEN}Found existing $key_name${NC}"
-        echo "   Source: $key_source"
-        echo "   Key: $masked_key"
-        echo ""
-        echo "  1) Use existing key"
-        echo "  2) Enter a new key"
-        echo ""
-        prompt_read "Choose [1-2, default=1]: " choice
-        choice=${choice:-1}
-
-        if [[ "$choice" == "1" ]]; then
-            API_KEY="$existing_key"
-            SELECTED_AUTH_KEY_NAME="$key_name"
-            return
-        fi
-    fi
-
-    echo ""
-    echo -e "${BLUE}$key_name required${NC}"
-    if [[ "$key_name" == "ANTHROPIC_AUTH_TOKEN" ]]; then
-        if check_command claude; then
-            prompt_read "   Run 'claude setup-token' to authenticate via browser? [Y/n]: " run_setup
-            run_setup=${run_setup:-Y}
-            if [[ "$run_setup" =~ ^[Yy] ]]; then
-                local tmpfile captured_token
-                tmpfile=$(mktemp /tmp/lethe-token.XXXXXX)
-                claude setup-token < /dev/tty > "$tmpfile"
-                captured_token=$(sed -e :a -e '/-$/N; s/-\n/-/; ta' "$tmpfile" | grep -oE '^sk-ant-oat01-[A-Za-z0-9_-]+$' | tail -1)
-                rm -f "$tmpfile"
-                if [[ -n "$captured_token" ]]; then
-                    API_KEY="$captured_token"
-                    SELECTED_AUTH_KEY_NAME="$key_name"
-                    success "Token obtained"
-                    return
-                fi
-                warn "Could not capture token automatically."
-            fi
-        else
-            echo "   Claude CLI not found. Install Claude Code CLI, run 'claude setup-token', then paste token below."
-        fi
-        echo "   Paste your ANTHROPIC_AUTH_TOKEN below."
-    elif [[ "$key_name" == "OPENAI_AUTH_TOKEN" ]]; then
-        echo "   Recommended: run OpenAI OAuth after install:"
-        echo "     cd $INSTALL_DIR && uv run lethe oauth-login openai"
-        echo "   You can paste OPENAI_AUTH_TOKEN now, or leave blank to configure after install."
-        echo ""
-        prompt_read "   OPENAI_AUTH_TOKEN (optional now): " API_KEY
-        if [ -z "$API_KEY" ]; then
-            DEFERRED_OPENAI_OAUTH_LOGIN=1
-            SELECTED_AUTH_KEY_NAME="$key_name"
-            return
-        fi
-        SELECTED_AUTH_KEY_NAME="$key_name"
-        return
-    else
-        echo "   Get your key at: $key_url"
-    fi
-    echo ""
-    prompt_read "   $key_name: " API_KEY
-    if [ -z "$API_KEY" ]; then
-        error "$key_name is required"
-    fi
-    SELECTED_AUTH_KEY_NAME="$key_name"
-}
-
-prompt_telegram() {
-    echo ""
-    echo -e "${YELLOW}Telegram Configuration:${NC}"
-    echo ""
-
-    # Check for existing Telegram config
-    local existing_token=""
-    local existing_user_id=""
-    local config_source=""
-
-    if [ -f "$CONFIG_DIR/.env" ]; then
-        existing_token="$(grep "^TELEGRAM_BOT_TOKEN=" "$CONFIG_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
-        existing_user_id="$(grep "^TELEGRAM_ALLOWED_USER_IDS=" "$CONFIG_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
-        [ -n "$existing_token" ] && config_source="$CONFIG_DIR/.env"
-    fi
-
-    # If existing config found, offer to reuse
-    if [ -n "$existing_token" ] && [ -n "$existing_user_id" ]; then
-        echo -e "${GREEN}Found existing Telegram configuration in $config_source${NC}"
-        echo "   Bot Token: ${existing_token:0:10}...${existing_token: -5}"
-        echo "   User ID: $existing_user_id"
-        echo ""
-        prompt_read "   Use existing configuration? [Y/n]: " reuse_config
-        reuse_config=${reuse_config:-Y}
-
-        if [[ "$reuse_config" =~ ^[Yy] ]]; then
-            TELEGRAM_TOKEN="$existing_token"
-            TELEGRAM_USER_ID="$existing_user_id"
-            success "Using existing Telegram configuration"
-            return
-        fi
-        echo ""
-    fi
-
-    echo -e "${BLUE}1. Telegram Bot Token${NC}"
-    echo "   Create a bot: message @BotFather on Telegram -> /newbot -> copy the token"
-    echo ""
-    prompt_read "   Telegram Bot Token: " TELEGRAM_TOKEN
-    if [ -z "$TELEGRAM_TOKEN" ]; then
-        error "Telegram token is required"
-    fi
-    echo ""
-
-    echo -e "${BLUE}2. Your Telegram User ID${NC}"
-    echo "   Message @userinfobot on Telegram - it replies with your ID (a number like 123456789)"
-    echo "   This restricts the bot to only respond to you."
-    echo ""
-    prompt_read "   Telegram User ID: " TELEGRAM_USER_ID
-    if [ -z "$TELEGRAM_USER_ID" ]; then
-        error "Telegram User ID is required (security: prevents strangers from using your bot)"
-    fi
-}
-
-detect_existing_workspace() {
-    # Check if ~/.lethe has meaningful data from a previous install
-    if [[ ! -d "$LETHE_HOME" ]]; then
-        return 1
-    fi
-
-    local has_config=0
-    local has_memory=0
-    local has_workspace=0
-    local details=""
-
-    if [[ -f "$CONFIG_DIR/.env" ]]; then
-        has_config=1
-        local provider
-        provider="$(get_env_value "LLM_PROVIDER" "$CONFIG_DIR/.env" || true)"
-        local model
-        model="$(get_env_value "LLM_MODEL" "$CONFIG_DIR/.env" || true)"
-        details+="    Config:    ${provider:-unknown} / ${model:-default}\n"
-    fi
-
-    if [[ -d "$LETHE_HOME/data/memory/lancedb" ]]; then
-        has_memory=1
-        local db_size
-        db_size="$(du -sh "$LETHE_HOME/data/memory/lancedb" 2>/dev/null | cut -f1)"
-        details+="    Memory:    ${db_size} in lancedb\n"
-    fi
-
-    if [[ -d "$LETHE_HOME/workspace" ]]; then
-        local note_count
-        note_count="$(find "$LETHE_HOME/workspace" -name "*.md" 2>/dev/null | wc -l)"
-        if [[ "$note_count" -gt 0 ]]; then
-            has_workspace=1
-            details+="    Workspace: ${note_count} files\n"
-        fi
-    fi
-
-    # Need at least config to consider it a real workspace
-    if [[ "$has_config" == "0" ]]; then
-        return 1
-    fi
-
-    echo -e "${GREEN}Found existing Lethe workspace at $LETHE_HOME${NC}"
-    echo ""
-    echo -e "$details"
-    if [[ "$has_memory" == "1" ]]; then
-        echo -e "    ${YELLOW}Note: embeddings will be re-indexed on first start${NC}"
-        echo -e "    ${YELLOW}(upgraded model — this is automatic, no data loss)${NC}"
-    fi
-    echo ""
-    prompt_read "  Reuse this workspace? [Y/n]: " reuse
-    reuse=${reuse:-Y}
-
-    if [[ "$reuse" =~ ^[Yy] ]]; then
-        success "Reusing existing workspace"
-        return 0
-    else
-        prompt_read "  Start fresh? This will move the old workspace to ${LETHE_HOME}.bak [y/N]: " fresh
-        if [[ "$fresh" =~ ^[Yy] ]]; then
-            mv "$LETHE_HOME" "${LETHE_HOME}.bak.$(date +%s)"
-            info "Old workspace backed up"
-        fi
-        return 1
-    fi
-}
-
-install_base_deps() {
-    local OS=$(detect_os)
-    info "Detected OS: $OS"
-
-    if ! check_command curl; then
-        info "Installing curl..."
-        if [[ "$OS" == "mac" ]]; then
-            check_command brew || error "Homebrew not found. Install Homebrew first: https://brew.sh"
-            brew install curl
-        elif check_command apt-get; then
-            maybe_sudo apt-get update -y && maybe_sudo apt-get install -y curl
-        elif check_command dnf; then
-            maybe_sudo dnf install -y curl
-        fi
-    fi
-    success "curl found"
-
-    if ! check_command git; then
-        info "Installing git..."
-        if [[ "$OS" == "mac" ]]; then
-            check_command brew || error "Homebrew not found. Install Homebrew first: https://brew.sh"
-            brew install git
-        elif check_command apt-get; then
-            maybe_sudo apt-get install -y git
-        elif check_command dnf; then
-            maybe_sudo dnf install -y git
-        fi
-    fi
-    success "git found"
-}
-
-install_container_deps() {
-    local OS=$(detect_os)
-    install_base_deps
-
-    if [[ "$OS" == "mac" ]]; then
-        if check_command container; then
-            success "container CLI found"
-            if ! container system status &>/dev/null; then
-                info "Starting container system service..."
-                container system start
-            fi
-            success "container system service running"
-        elif check_command podman; then
-            success "podman found (fallback for older macOS)"
-        else
-            info "Installing container runtime..."
-            if brew install container 2>/dev/null; then
-                success "container CLI installed"
-                container system start
-            else
-                info "apple/container not available, installing podman..."
-                brew install podman
-                success "podman installed"
-            fi
-        fi
-    else
-        if ! check_command podman; then
-            info "Installing podman..."
-            if check_command dnf; then
-                maybe_sudo dnf install -y podman
-            elif check_command apt-get; then
-                maybe_sudo apt-get update -y && maybe_sudo apt-get install -y podman
-            elif check_command pacman; then
-                maybe_sudo pacman -S --noconfirm podman
-            elif check_command zypper; then
-                maybe_sudo zypper install -y podman
-            fi
-        fi
-        success "podman found"
-    fi
-}
-
-install_native_deps() {
-    local OS=$(detect_os)
-    install_base_deps
-
-    # Node.js/npm for agent-browser
-    if ! check_command npm; then
-        info "Installing Node.js..."
-        if [[ "$OS" == "mac" ]]; then
-            check_command brew || error "Homebrew not found. Install Homebrew first: https://brew.sh"
-            brew install node
-        elif check_command apt-get; then
-            maybe_sudo apt-get install -y nodejs npm
-        elif check_command dnf; then
-            maybe_sudo dnf install -y nodejs npm
-        fi
-    fi
-
-    if ! check_command agent-browser; then
-        info "Installing agent-browser..."
-        npm install -g agent-browser 2>/dev/null || maybe_sudo npm install -g agent-browser
-        agent-browser install --with-deps 2>/dev/null || maybe_sudo agent-browser install --with-deps
-    fi
-    success "agent-browser found"
-
-    # uv
-    if ! check_command uv; then
-        info "Installing uv (Python package manager)..."
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        export PATH="$HOME/.local/bin:$PATH"
-        export PATH="$HOME/.cargo/bin:$PATH"
-    fi
-    success "uv found"
-
-    if ! uv python list 2>/dev/null | grep -q "3.1[1-9]"; then
-        info "Installing Python 3.12 via uv..."
-        uv python install 3.12
-    fi
-    success "Python 3.11+ available"
-
-    UV_BIN="$(command -v uv || true)"
-    if [ -z "${UV_BIN:-}" ]; then
-        error "uv is not in PATH after installation"
-    fi
-    UV_BIN_DIR="$(dirname "$UV_BIN")"
-}
-
-get_latest_release() {
-    local latest
-    latest="$(curl -fsSL "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)"
-    if [ -z "$latest" ]; then
-        echo "main"
-    else
-        echo "$latest"
-    fi
-}
-
-clone_or_detect_repo() {
-    if [[ "$LOCAL_CHECKOUT" == "1" ]]; then
-        info "Using local checkout at $INSTALL_DIR"
-        cd "$INSTALL_DIR"
-        local version
-        version="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")"
-        success "Repository ready ($version, local checkout)"
+ensure_cargo() {
+    if command -v cargo >/dev/null 2>&1; then
         return
     fi
 
-    local version=$(get_latest_release)
-    info "Installing Lethe $version..."
+    warn "Rust/Cargo is not installed."
+    if command -v curl >/dev/null 2>&1; then
+        info "Installing Rust through rustup..."
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+    fi
+
+    command -v cargo >/dev/null 2>&1 || error "Install Rust from https://rustup.rs and rerun this installer."
+}
+
+ensure_protoc() {
+    if command -v protoc >/dev/null 2>&1; then
+        return
+    fi
+
+    error "protoc is required by LanceDB. Install protobuf-compiler/libprotobuf-dev (Debian/Ubuntu), protobuf-compiler/protobuf-devel (Fedora), or protobuf (Homebrew), then rerun."
+}
+
+detect_release_target() {
+    local os arch
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "$os:$arch" in
+        Linux:x86_64|Linux:amd64) echo "x86_64-unknown-linux-gnu" ;;
+        Linux:aarch64|Linux:arm64) echo "aarch64-unknown-linux-gnu" ;;
+        Darwin:x86_64|Darwin:amd64) echo "x86_64-apple-darwin" ;;
+        Darwin:aarch64|Darwin:arm64) echo "aarch64-apple-darwin" ;;
+        *) return 1 ;;
+    esac
+}
+
+install_release_binary() {
+    local target url tmp archive binary
+
+    if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+        warn "curl and tar are required for binary install."
+        return 1
+    fi
+
+    if ! target="$(detect_release_target)"; then
+        warn "No binary release target for $(uname -s)/$(uname -m)."
+        return 1
+    fi
+
+    url="$RELEASE_BASE_URL/lethe-$target.tar.gz"
+    tmp="$(mktemp -d)"
+    archive="$tmp/lethe.tar.gz"
+
+    info "Downloading binary release: $url"
+    if ! curl -fsSL "$url" -o "$archive"; then
+        warn "Binary release download failed."
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    if ! tar -xzf "$archive" -C "$tmp"; then
+        warn "Binary release archive could not be unpacked."
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    binary="$(find "$tmp" -type f -name lethe -perm -111 | head -n 1)"
+    if [ -z "$binary" ]; then
+        warn "Binary release archive did not contain an executable lethe binary."
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    mkdir -p "$BIN_DIR"
+    cp "$binary" "$BIN_DIR/lethe"
+    chmod +x "$BIN_DIR/lethe"
+    rm -rf "$tmp"
+    success "Installed $BIN_DIR/lethe from binary release"
+}
+
+checkout_repo() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+    if [ -f "$script_dir/Cargo.toml" ] && grep -q 'name = "lethe"' "$script_dir/Cargo.toml" 2>/dev/null; then
+        INSTALL_DIR="$script_dir"
+        info "Using local checkout: $INSTALL_DIR"
+        return
+    fi
 
     if [ -d "$INSTALL_DIR/.git" ]; then
-        info "Updating existing installation..."
-        cd "$INSTALL_DIR"
-        git fetch origin --tags
-        if [ "$version" != "main" ]; then
-            git checkout "$version"
-        else
-            git checkout main
-            git pull origin main
-        fi
+        info "Updating existing checkout: $INSTALL_DIR"
+        git -C "$INSTALL_DIR" pull --ff-only
     else
-        info "Cloning Lethe..."
+        info "Cloning Lethe into $INSTALL_DIR"
+        mkdir -p "$(dirname "$INSTALL_DIR")"
         git clone "$REPO_URL" "$INSTALL_DIR"
-        cd "$INSTALL_DIR"
-        if [ "$version" != "main" ]; then
-            git checkout "$version"
-        fi
     fi
-    success "Repository ready ($version)"
 }
 
-setup_config() {
-    mkdir -p "$CONFIG_DIR"
+provider_defaults() {
+    case "$1" in
+        openrouter)
+            DEFAULT_MODEL="openrouter/moonshotai/kimi-k2.6"
+            DEFAULT_AUX="openrouter/google/gemini-3-flash-preview"
+            KEY_ENV="OPENROUTER_API_KEY"
+            ;;
+        anthropic)
+            DEFAULT_MODEL="claude-opus-4-6"
+            DEFAULT_AUX="claude-haiku-4-5"
+            KEY_ENV="ANTHROPIC_API_KEY"
+            ;;
+        openai)
+            DEFAULT_MODEL="gpt-5.4"
+            DEFAULT_AUX="gpt-5.4-nano"
+            KEY_ENV="OPENAI_API_KEY"
+            ;;
+        local)
+            DEFAULT_MODEL="openai/gemma-4-31B-it-Q8_0.gguf"
+            DEFAULT_AUX="$DEFAULT_MODEL"
+            KEY_ENV="OPENAI_API_KEY"
+            ;;
+        *)
+            error "Unknown provider: $1"
+            ;;
+    esac
+}
 
-    local key_name="${SELECTED_AUTH_KEY_NAME:-$(provider_key_env "$SELECTED_PROVIDER")}"
-    local api_key_line=""
+write_env_file() {
+    mkdir -p "$CONFIG_DIR" "$LETHE_HOME/workspace" "$LETHE_HOME/data/memory" "$LETHE_HOME/cache" "$LETHE_HOME/logs" "$LETHE_HOME/credentials"
 
-    if [[ -n "$key_name" && -n "$API_KEY" ]]; then
-        api_key_line="$key_name=$API_KEY"
+    if [ -f "$ENV_FILE" ]; then
+        warn "Config already exists: $ENV_FILE"
+        return
     fi
 
-    cat > "$CONFIG_DIR/.env" << EOF
-# Lethe Configuration
-# Generated by installer on $(date)
+    echo ""
+    echo "Select LLM provider:"
+    echo "  1) OpenRouter"
+    echo "  2) Anthropic"
+    echo "  3) OpenAI"
+    echo "  4) Local OpenAI-compatible server"
+    prompt_read "Provider" PROVIDER_CHOICE "1"
 
-# Telegram
-TELEGRAM_BOT_TOKEN=$TELEGRAM_TOKEN
-TELEGRAM_ALLOWED_USER_IDS=$TELEGRAM_USER_ID
+    case "$PROVIDER_CHOICE" in
+        1|openrouter) PROVIDER="openrouter" ;;
+        2|anthropic) PROVIDER="anthropic" ;;
+        3|openai) PROVIDER="openai" ;;
+        4|local) PROVIDER="local" ;;
+        *) error "Invalid provider selection: $PROVIDER_CHOICE" ;;
+    esac
 
-# LLM Provider
-LLM_PROVIDER=$SELECTED_PROVIDER
-LLM_MODEL=$SELECTED_MODEL
-LLM_MODEL_AUX=$SELECTED_MODEL_AUX
-LLM_API_BASE=$SELECTED_API_BASE
-$api_key_line
+    provider_defaults "$PROVIDER"
 
-# Telegram voice/audio transcription
-# Auto uses OpenRouter/OpenAI API keys first, then local Whisper if installed.
-TELEGRAM_TRANSCRIPTION_ENABLED=true
-TRANSCRIPTION_PROVIDER=auto
-# TRANSCRIPTION_MODEL=
-# TRANSCRIPTION_LANGUAGE=
-# TRANSCRIPTION_LOCAL_COMMAND=whisper
+    prompt_read "Telegram bot token (blank to configure later)" TELEGRAM_BOT_TOKEN ""
+    prompt_read "Telegram allowed user IDs, comma-separated (blank allows all)" TELEGRAM_ALLOWED_USER_IDS ""
+    prompt_read "Main model" LLM_MODEL "$DEFAULT_MODEL"
+    prompt_read "Aux model" LLM_MODEL_AUX "$DEFAULT_AUX"
 
-# Paths
-LETHE_HOME=$LETHE_HOME
-
-# Optional: Heartbeat interval (seconds, default 900 = 15 min)
-# HEARTBEAT_INTERVAL=900
-# HEARTBEAT_ENABLED=true
-
-# Optional: Hippocampus (memory recall)
-# HIPPOCAMPUS_ENABLED=true
-EOF
-
-    # Symlink to install dir so lethe finds the .env
-    ln -sf "$CONFIG_DIR/.env" "$INSTALL_DIR/.env"
-
-    success "Configuration saved to $CONFIG_DIR/.env"
-}
-
-setup_lethe_dirs() {
-    mkdir -p "$LETHE_HOME/workspace"
-    mkdir -p "$LETHE_HOME/workspace/notes"
-    mkdir -p "$LETHE_HOME/workspace/skills"
-    mkdir -p "$LETHE_HOME/workspace/projects"
-    mkdir -p "$LETHE_HOME/data"
-    mkdir -p "$LETHE_HOME/data/memory"
-    mkdir -p "$LETHE_HOME/credentials"
-    mkdir -p "$LETHE_HOME/cache"
-    mkdir -p "$LETHE_HOME/logs"
-    mkdir -p "$LETHE_HOME/config"
-    success "Directory structure created at $LETHE_HOME"
-}
-
-setup_service() {
-    local OS=$(detect_os)
-
-    if [[ "$OS" == "linux" || "$OS" == "wsl" ]]; then
-        setup_systemd
-    elif [[ "$OS" == "mac" ]]; then
-        setup_launchd
+    LLM_API_BASE=""
+    if [ "$PROVIDER" = "local" ]; then
+        prompt_read "Local API base URL" LLM_API_BASE "http://localhost:8090/v1"
+        API_KEY="local"
+        LLM_PROVIDER="openai"
     else
-        warn "Unknown OS, skipping service setup"
-        echo "Run manually: cd $INSTALL_DIR && uv run lethe"
-    fi
-}
-
-setup_systemd() {
-    # Root user: use system-level service
-    if [[ "$(id -u)" -eq 0 ]]; then
-        setup_systemd_system
-        return
+        prompt_read "$KEY_ENV (blank to configure later)" API_KEY ""
+        LLM_PROVIDER="$PROVIDER"
     fi
 
-    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$ENV_FILE" <<EOF
+LETHE_HOME=$LETHE_HOME
+WORKSPACE_DIR=$LETHE_HOME/workspace
+MEMORY_DIR=$LETHE_HOME/data/memory
+CACHE_DIR=$LETHE_HOME/cache
+LOGS_DIR=$LETHE_HOME/logs
+CREDENTIALS_DIR=$LETHE_HOME/credentials
 
-    # Enable lingering so user services run without login session
-    if command -v loginctl &>/dev/null; then
-        info "Enabling user lingering (allows service to run without login)..."
-        maybe_sudo loginctl enable-linger "$(whoami)" 2>/dev/null || true
-    fi
+LETHE_MODE=telegram
+TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
+TELEGRAM_ALLOWED_USER_IDS=$TELEGRAM_ALLOWED_USER_IDS
 
-    if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
-        export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        if [ ! -d "$XDG_RUNTIME_DIR" ]; then
-            warn "XDG_RUNTIME_DIR not available. You may need to log in directly (not via su/sudo)."
-        fi
-    fi
+LLM_PROVIDER=$LLM_PROVIDER
+LLM_MODEL=$LLM_MODEL
+LLM_MODEL_AUX=$LLM_MODEL_AUX
+LLM_API_BASE=$LLM_API_BASE
+$KEY_ENV=$API_KEY
 
-    cat > "$HOME/.config/systemd/user/lethe.service" << EOF
-[Unit]
-Description=Lethe Autonomous AI Agent
-After=network.target
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL=3600
 
-[Service]
-Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$UV_BIN run lethe
-Restart=always
-RestartSec=10
-Environment="PATH=$UV_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
-Environment="LETHE_HOME=$LETHE_HOME"
-EnvironmentFile=-$CONFIG_DIR/.env
-
-[Install]
-WantedBy=default.target
+LETHE_SEMANTIC_SEARCH_ENABLED=true
+LETHE_EMBEDDING_PROVIDER=fastembed
+LETHE_EMBEDDING_MODEL=Snowflake/snowflake-arctic-embed-m-v2.0
 EOF
 
-    if ! systemctl --user daemon-reload 2>/dev/null; then
-        warn "Could not connect to systemd user bus."
-        echo ""
-        echo "  Option 1: Fix systemd session"
-        echo "    - Log out and log back in, or"
-        echo "    - Run: machinectl shell $(whoami)@"
-        echo "    - Then: systemctl --user enable --now lethe"
-        echo ""
-        echo "  Option 2: Run manually (without systemd)"
-        echo "    cd $INSTALL_DIR && uv run lethe"
-        echo ""
-        echo "  Option 3: Run in background with screen/tmux"
-        echo "    screen -dmS lethe bash -c 'cd $INSTALL_DIR && uv run lethe'"
-        echo "    # Attach: screen -r lethe"
-        echo ""
-        return
-    fi
-
-    systemctl --user enable lethe
-    systemctl --user start lethe
-
-    success "Systemd service installed and started"
-    info "View logs: journalctl --user -u lethe -f"
+    chmod 600 "$ENV_FILE"
+    success "Wrote $ENV_FILE"
 }
 
-setup_systemd_system() {
-    info "Installing system-level service (running as root)..."
-
-    cat > "/etc/systemd/system/lethe.service" << EOF
-[Unit]
-Description=Lethe Autonomous AI Agent
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$UV_BIN run lethe
-Restart=always
-RestartSec=10
-Environment="PATH=$UV_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
-Environment="HOME=/root"
-Environment="LETHE_HOME=$LETHE_HOME"
-EnvironmentFile=-$CONFIG_DIR/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable lethe
-    systemctl start lethe
-
-    success "System service installed and started"
-    info "View logs: journalctl -u lethe -f"
-}
-
-setup_launchd() {
-    mkdir -p "$HOME/Library/LaunchAgents"
-
-    cat > "$HOME/Library/LaunchAgents/com.lethe.agent.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.lethe.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$UV_BIN</string>
-        <string>run</string>
-        <string>lethe</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>$INSTALL_DIR</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>$LETHE_HOME/logs/lethe.log</string>
-    <key>StandardErrorPath</key>
-    <string>$LETHE_HOME/logs/lethe.error.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>$UV_BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>LETHE_HOME</key>
-        <string>$LETHE_HOME</string>
-    </dict>
-</dict>
-</plist>
-EOF
-
-    launchctl unload "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null || true
-    launchctl load "$HOME/Library/LaunchAgents/com.lethe.agent.plist"
-
-    success "Launchd service installed and started"
-    info "View logs: tail -f $LETHE_HOME/logs/lethe.log"
-}
-
-install_deps_and_run() {
-    cd "$INSTALL_DIR"
-    info "Installing Python dependencies..."
-    uv sync
-    success "Dependencies installed"
+build_binary() {
+    info "Building Lethe with Cargo..."
+    cargo build --release --manifest-path "$INSTALL_DIR/Cargo.toml"
+    mkdir -p "$BIN_DIR"
+    cp "$INSTALL_DIR/target/release/lethe" "$BIN_DIR/lethe"
+    chmod +x "$BIN_DIR/lethe"
+    success "Installed $BIN_DIR/lethe"
 }
 
 main() {
     print_header
+    write_env_file
 
-    local YOLO=0
-
-    # Parse args
-    for arg in "$@"; do
-        case $arg in
-            --yolo)
-                YOLO=1
-                ;;
-            --help|-h)
-                echo "Usage: $0 [OPTIONS]"
-                echo ""
-                echo "Installs Lethe autonomous AI assistant."
-                echo ""
-                echo "Options:"
-                echo "  --help, -h    Show this help message"
-                echo "  --yolo        Install directly on the host (no container isolation)"
-                echo ""
-                echo "Environment variables:"
-                echo "  LETHE_HOME         Root directory for all Lethe data (default: ~/.lethe)"
-                echo "  LETHE_INSTALL_DIR  Where to clone the source (default: \$LETHE_HOME/install)"
-                echo ""
-                echo "Supports OpenRouter, Anthropic, and OpenAI as LLM providers."
-                exit 0
-                ;;
-        esac
-    done
-
-    local OS=$(detect_os)
-
-    if [[ "$YOLO" == "1" ]]; then
-        echo -e "${YELLOW}Mode${NC}: Native install (--yolo) — no container isolation"
+    if [ "${LETHE_INSTALL_FROM_SOURCE:-0}" != "1" ] && install_release_binary; then
+        :
     else
-        echo -e "${GREEN}Mode${NC}: Container (podman on Linux, apple/container on macOS)"
-        echo -e "  Lethe runs isolated, with access only to directories you choose."
-    fi
-    echo ""
-
-    # Detect existing workspace
-    local REUSE_WORKSPACE=0
-    if detect_existing_workspace; then
-        REUSE_WORKSPACE=1
-    fi
-
-    if [[ "$REUSE_WORKSPACE" == "0" ]]; then
-        detect_api_keys
-        prompt_provider
-        prompt_model
-        prompt_api_key
-        prompt_telegram
+        warn "Falling back to source build."
+        ensure_cargo
+        ensure_protoc
+        checkout_repo
+        build_binary
     fi
 
     echo ""
-    info "Installing Lethe..."
+    success "Lethe installed."
+    echo "Run:"
+    echo "  $BIN_DIR/lethe check"
+    echo "  $BIN_DIR/lethe telegram run"
     echo ""
-
-    if [[ "$YOLO" == "1" ]]; then
-        install_native_deps
-    else
-        install_container_deps
-    fi
-
-    clone_or_detect_repo
-
-    if [[ "$REUSE_WORKSPACE" == "0" ]]; then
-        setup_lethe_dirs
-        setup_config
-    fi
-
-    if [[ "$YOLO" == "1" ]]; then
-        install_deps_and_run
-        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" != "1" ]]; then
-            setup_service
-        else
-            warn "OpenAI OAuth pending — configure before starting Lethe."
-        fi
-    else
-        info "Setting up container..."
-        "$INSTALL_DIR/scripts/container-setup.sh"
-        if [[ "$DEFERRED_OPENAI_OAUTH_LOGIN" == "1" ]]; then
-            warn "OpenAI OAuth pending — configure before starting Lethe."
-        fi
-    fi
-
-    echo ""
-    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  Lethe installed successfully!${NC}"
-    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo "  Home:      $LETHE_HOME"
-    echo "  Config:    $CONFIG_DIR/.env"
-    if [[ "$YOLO" == "1" ]]; then
-        echo "  Mode:      native (no isolation)"
-    fi
-    if [[ "$REUSE_WORKSPACE" == "1" ]]; then
-        echo "  Workspace: reused from previous installation"
-    fi
-    echo ""
-    echo "  Message your bot on Telegram to get started!"
-    echo ""
+    echo "Config:"
+    echo "  $ENV_FILE"
 }
 
 main "$@"

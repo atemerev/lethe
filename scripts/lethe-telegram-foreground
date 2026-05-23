@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#
+# Run Lethe Telegram polling in the foreground with the configured Lethe
+# environment loaded from ~/.lethe/config/.env.
+
+set -euo pipefail
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+export LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
+
+ENV_FILE="${LETHE_ENV_FILE:-$LETHE_HOME/config/.env}"
+if [ ! -f "$ENV_FILE" ]; then
+    die "Lethe env file not found: $ENV_FILE"
+fi
+
+set -a
+set +u
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+set -u
+
+export LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
+export LOGS_DIR="${LOGS_DIR:-$LETHE_HOME/logs}"
+export LLM_DEBUG="${LETHE_FOREGROUND_LLM_DEBUG:-true}"
+export LLM_DEBUG_DIR="${LLM_DEBUG_DIR:-$LOGS_DIR/llm}"
+
+cd "$REPO_ROOT"
+
+BINARY="${LETHE_BIN:-$REPO_ROOT/target/release/lethe}"
+if [ ! -x "$BINARY" ]; then
+    if [ -x "$LETHE_HOME/bin/lethe" ]; then
+        BINARY="$LETHE_HOME/bin/lethe"
+    else
+        die "Lethe binary not found. Run: cargo build --release"
+    fi
+fi
+
+printf 'Starting Lethe Telegram foreground\n'
+printf '  repo:      %s\n' "$REPO_ROOT"
+printf '  binary:    %s\n' "$BINARY"
+printf '  home:      %s\n' "$LETHE_HOME"
+printf '  env:       %s\n' "$ENV_FILE"
+printf '  workspace: %s\n' "${WORKSPACE_DIR:-$LETHE_HOME/workspace}"
+printf '  logs:      %s\n' "$LOGS_DIR"
+printf '  llm debug: %s (%s)\n' "$LLM_DEBUG" "$LLM_DEBUG_DIR"
+printf '\n'
+
+exec "$BINARY" telegram run "$@"

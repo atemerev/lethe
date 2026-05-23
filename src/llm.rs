@@ -1,0 +1,1647 @@
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
+use genai::Client;
+use genai::adapter::AdapterKind;
+use genai::chat::{
+    BinarySource, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatRole, ContentPart,
+    MessageContent, PromptTokensDetails, ToolCall, Usage,
+};
+use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
+use genai::{ModelIden, ServiceTarget};
+use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use tokio::sync::{Mutex, Semaphore};
+
+use crate::config::Settings;
+
+const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/";
+const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/";
+const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/";
+const ANTHROPIC_OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_CODE_VERSION: &str = "2.1.117";
+const CLAUDE_CODE_SALT: &str = "59cf53e54c78";
+static LLM_DEBUG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LlmMessage {
+    pub role: LlmRole,
+    pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<LlmAttachment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LlmAttachment {
+    pub content_type: String,
+    pub base64_content: String,
+    pub name: Option<String>,
+}
+
+impl LlmMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: LlmRole::System,
+            content: content.into(),
+            attachments: vec![],
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: LlmRole::User,
+            content: content.into(),
+            attachments: vec![],
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: LlmRole::Assistant,
+            content: content.into(),
+            attachments: vec![],
+        }
+    }
+
+    pub fn user_with_attachments(
+        content: impl Into<String>,
+        attachments: Vec<LlmAttachment>,
+    ) -> Self {
+        Self {
+            role: LlmRole::User,
+            content: content.into(),
+            attachments,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlmRouterConfig {
+    pub model: String,
+    pub aux_model: String,
+    pub provider: String,
+    pub api_base: String,
+    pub max_output_tokens: u32,
+    pub temperature_millidegrees: u32,
+}
+
+impl LlmRouterConfig {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            model: settings.llm_model.clone(),
+            aux_model: settings.effective_aux_model().to_string(),
+            provider: settings.llm_provider.clone(),
+            api_base: settings.llm_api_base.clone(),
+            max_output_tokens: 8000,
+            temperature_millidegrees: 700,
+        }
+    }
+
+    pub fn model_for(&self, use_aux: bool) -> &str {
+        if use_aux && !self.aux_model.trim().is_empty() {
+            &self.aux_model
+        } else {
+            &self.model
+        }
+    }
+
+    pub fn chat_options(&self) -> ChatOptions {
+        ChatOptions::default()
+            .with_max_tokens(self.max_output_tokens)
+            .with_temperature(self.temperature_millidegrees as f64 / 1000.0)
+    }
+}
+
+#[derive(Clone)]
+pub struct LlmRouter {
+    client: Client,
+    config: LlmRouterConfig,
+    anthropic_oauth: Option<AnthropicOAuthClient>,
+}
+
+impl LlmRouter {
+    pub fn new(config: LlmRouterConfig) -> Self {
+        let client = build_client(&config);
+        let anthropic_oauth = AnthropicOAuthClient::from_env();
+        Self {
+            client,
+            config,
+            anthropic_oauth,
+        }
+    }
+
+    pub fn config(&self) -> &LlmRouterConfig {
+        &self.config
+    }
+
+    pub async fn complete(&self, messages: Vec<LlmMessage>, use_aux: bool) -> Result<String> {
+        let response = self
+            .exec_chat_request(build_chat_request(messages), use_aux)
+            .await?;
+
+        Ok(response.into_first_text().unwrap_or_default())
+    }
+
+    pub async fn exec_chat_request(
+        &self,
+        request: ChatRequest,
+        use_aux: bool,
+    ) -> Result<ChatResponse> {
+        let model = self.config.model_for(use_aux).trim();
+        if model.is_empty() {
+            bail!("LLM_MODEL is required for chat");
+        }
+
+        let options = self.config.chat_options();
+        if let Some(oauth) = &self.anthropic_oauth
+            && should_use_anthropic_oauth(model, &self.config)
+        {
+            return oauth
+                .exec_chat_request(model, request, &options)
+                .await
+                .with_context(|| format!("LLM chat request failed for model {model}"));
+        }
+
+        let request_log = llm_debug_request_payload("genai", model, use_aux, &request, &options);
+        match self.client.exec_chat(model, request, Some(&options)).await {
+            Ok(response) => {
+                log_llm_interaction(
+                    "chat",
+                    model,
+                    request_log,
+                    json!({
+                        "ok": true,
+                        "response": &response,
+                    }),
+                );
+                Ok(response)
+            }
+            Err(error) => {
+                let error = anyhow::Error::new(error)
+                    .context(format!("LLM chat request failed for model {model}"));
+                log_llm_interaction(
+                    "chat_error",
+                    model,
+                    request_log,
+                    json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AnthropicOAuthClient {
+    http: reqwest::Client,
+    token_file: PathBuf,
+    tokens: Arc<Mutex<AnthropicOAuthTokens>>,
+    request_gate: Arc<Semaphore>,
+    rate_limit_until: Arc<Mutex<Option<Instant>>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct AnthropicOAuthTokens {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    expires_at: Option<f64>,
+    #[serde(skip)]
+    env_access_token: bool,
+}
+
+#[derive(Debug, Error)]
+enum AnthropicOAuthError {
+    #[error("{message}")]
+    RateLimited {
+        message: String,
+        retry_after: Duration,
+    },
+    #[error("{message}")]
+    Transient {
+        message: String,
+        retry_after: Duration,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl AnthropicOAuthClient {
+    fn from_env() -> Option<Self> {
+        let token_file = anthropic_oauth_token_file();
+        let tokens = if let Ok(access_token) = env::var("ANTHROPIC_AUTH_TOKEN") {
+            let access_token = access_token.trim().to_string();
+            if access_token.is_empty() {
+                None
+            } else {
+                Some(AnthropicOAuthTokens {
+                    access_token: Some(access_token),
+                    env_access_token: true,
+                    ..Default::default()
+                })
+            }
+        } else {
+            read_anthropic_oauth_tokens(&token_file)
+        }?;
+
+        Some(Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(600))
+                .build()
+                .ok()?,
+            token_file,
+            tokens: Arc::new(Mutex::new(tokens)),
+            request_gate: Arc::new(Semaphore::new(oauth_max_concurrency())),
+            rate_limit_until: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    async fn exec_chat_request(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+    ) -> Result<ChatResponse> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match self
+                .call_messages_once(model, request.clone(), options)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error @ AnthropicOAuthError::RateLimited { retry_after, .. }) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(retry_after).await;
+                }
+                Err(error @ AnthropicOAuthError::Transient { retry_after, .. }) => {
+                    last_error = Some(error);
+                    let wait = retry_after.max(Duration::from_secs(5 * (attempt + 1) as u64));
+                    tokio::time::sleep(wait).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(last_error
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow!("Anthropic OAuth call failed")))
+    }
+
+    async fn call_messages_once(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+    ) -> Result<ChatResponse, AnthropicOAuthError> {
+        self.ensure_access().await?;
+
+        let access_token = {
+            let tokens = self.tokens.lock().await;
+            tokens
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow!("Anthropic OAuth access token is missing"))?
+        };
+        let body = anthropic_request_body(model, request, options);
+        let request_log = json!({
+            "auth": "anthropic_oauth",
+            "endpoint": format!("{ANTHROPIC_MESSAGES_URL}?beta=true"),
+            "model": model,
+            "body": body.clone(),
+        });
+        let headers = anthropic_oauth_headers(&access_token);
+
+        let _permit = self
+            .request_gate
+            .acquire()
+            .await
+            .map_err(|error| anyhow!("Anthropic OAuth request gate closed: {error}"))?;
+        self.wait_for_rate_limit().await;
+
+        let response = self
+            .http
+            .post(format!("{ANTHROPIC_MESSAGES_URL}?beta=true"))
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                log_llm_interaction(
+                    "chat_anthropic_oauth_error",
+                    model,
+                    request_log.clone(),
+                    json!({
+                        "ok": false,
+                        "error": format!("Anthropic OAuth request failed: {error}"),
+                    }),
+                );
+                AnthropicOAuthError::Transient {
+                    message: format!("Anthropic OAuth request failed: {error}"),
+                    retry_after: Duration::from_secs(5),
+                }
+            })?;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| anyhow!("Anthropic OAuth response read failed: {error}"))?;
+        log_llm_interaction(
+            if status.is_success() {
+                "chat_anthropic_oauth"
+            } else {
+                "chat_anthropic_oauth_error"
+            },
+            model,
+            request_log,
+            json!({
+                "ok": status.is_success(),
+                "status": status.as_u16(),
+                "body": serde_json::from_str::<Value>(&text)
+                    .unwrap_or_else(|_| json!({"raw_text": text.clone()})),
+            }),
+        );
+
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = retry_after_from_headers(&headers);
+            self.set_rate_limit(retry_after).await;
+            return Err(AnthropicOAuthError::RateLimited {
+                message: format!(
+                    "Anthropic OAuth rate limited (429) - {}",
+                    truncate_error(&text)
+                ),
+                retry_after,
+            });
+        }
+
+        if status == StatusCode::FORBIDDEN
+            && (text.contains("permission_error") || text.contains("OAuth authentication"))
+        {
+            let retry_after = retry_after_from_headers(&headers);
+            self.set_rate_limit(retry_after).await;
+            return Err(AnthropicOAuthError::RateLimited {
+                message: format!(
+                    "Anthropic OAuth throttled (403 permission_error) - {}",
+                    truncate_error(&text)
+                ),
+                retry_after,
+            });
+        }
+
+        if status.as_u16() == 529 {
+            return Err(AnthropicOAuthError::Transient {
+                message: format!(
+                    "Anthropic OAuth overloaded (529) - {}",
+                    truncate_error(&text)
+                ),
+                retry_after: Duration::from_secs(5),
+            });
+        }
+
+        if !status.is_success() {
+            return Err(anyhow!(
+                "Anthropic OAuth API error: {} - {}",
+                status.as_u16(),
+                truncate_error(&text)
+            )
+            .into());
+        }
+
+        let data: Value = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "invalid Anthropic OAuth response JSON: {}",
+                truncate_error(&text)
+            )
+        })?;
+        anthropic_response_to_chat_response(data, model).map_err(Into::into)
+    }
+
+    async fn ensure_access(&self) -> Result<(), AnthropicOAuthError> {
+        let refresh_token = {
+            let tokens = self.tokens.lock().await;
+            if tokens.env_access_token || !tokens.needs_refresh() {
+                return Ok(());
+            }
+            tokens.refresh_token.clone()
+        };
+        let Some(refresh_token) = refresh_token else {
+            return Ok(());
+        };
+
+        let response = self
+            .http
+            .post(ANTHROPIC_OAUTH_TOKEN_URL)
+            .json(&json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
+            }))
+            .send()
+            .await
+            .map_err(|error| AnthropicOAuthError::Transient {
+                message: format!("Anthropic OAuth token refresh failed: {error}"),
+                retry_after: Duration::from_secs(5),
+            })?;
+
+        let status = response.status();
+        let text = response.text().await.map_err(|error| {
+            anyhow!("Anthropic OAuth token refresh response read failed: {error}")
+        })?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "Anthropic OAuth token refresh failed: {} {}",
+                status.as_u16(),
+                truncate_error(&text)
+            )
+            .into());
+        }
+
+        let data: Value = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "invalid Anthropic OAuth refresh JSON: {}",
+                truncate_error(&text)
+            )
+        })?;
+        let access_token = data
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Anthropic OAuth refresh response is missing access_token"))?
+            .to_string();
+        let refresh_token = data
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let expires_in = data
+            .get("expires_in")
+            .and_then(Value::as_f64)
+            .unwrap_or(3600.0);
+
+        let snapshot = {
+            let mut tokens = self.tokens.lock().await;
+            tokens.access_token = Some(access_token);
+            if let Some(refresh_token) = refresh_token {
+                tokens.refresh_token = Some(refresh_token);
+            }
+            tokens.expires_at = Some(unix_now_seconds() + expires_in);
+            tokens.clone()
+        };
+        write_anthropic_oauth_tokens(&self.token_file, &snapshot)?;
+        Ok(())
+    }
+
+    async fn wait_for_rate_limit(&self) {
+        let wait = {
+            let until = self.rate_limit_until.lock().await;
+            until.and_then(|instant| instant.checked_duration_since(Instant::now()))
+        };
+        if let Some(wait) = wait {
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    async fn set_rate_limit(&self, wait: Duration) {
+        let mut until = self.rate_limit_until.lock().await;
+        *until = Some(Instant::now() + wait);
+    }
+}
+
+impl AnthropicOAuthTokens {
+    fn needs_refresh(&self) -> bool {
+        let Some(refresh_token) = &self.refresh_token else {
+            return false;
+        };
+        if refresh_token.trim().is_empty() {
+            return false;
+        }
+        self.expires_at.unwrap_or(0.0) <= unix_now_seconds() + 60.0
+    }
+}
+
+fn build_client(config: &LlmRouterConfig) -> Client {
+    let resolver_config = config.clone();
+    let target_resolver = ServiceTargetResolver::from_resolver_fn(
+        move |service_target: ServiceTarget| -> genai::resolver::Result<ServiceTarget> {
+            let raw_model = service_target.model.model_name.to_string();
+            let Some(target) = router_target_for_model(&raw_model, &resolver_config) else {
+                return Ok(service_target);
+            };
+            Ok(target.into_service_target())
+        },
+    );
+    Client::builder()
+        .with_service_target_resolver(target_resolver)
+        .build()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouterTarget {
+    endpoint: String,
+    auth_env: String,
+    adapter: AdapterKind,
+    model_name: String,
+}
+
+impl RouterTarget {
+    fn into_service_target(self) -> ServiceTarget {
+        ServiceTarget {
+            endpoint: Endpoint::from_owned(self.endpoint),
+            auth: AuthData::from_env(self.auth_env),
+            model: ModelIden::new(self.adapter, self.model_name),
+        }
+    }
+}
+
+fn router_target_for_model(raw_model: &str, config: &LlmRouterConfig) -> Option<RouterTarget> {
+    let model = raw_model.trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    let api_base = normalize_api_base(&config.api_base);
+    let slash_provider = slash_provider(model);
+    let configured_provider = normalized_provider(&config.provider);
+    let provider = slash_provider
+        .or(configured_provider.as_deref())
+        .unwrap_or(if api_base.is_some() { "openai" } else { "" });
+    if provider.is_empty() {
+        return None;
+    }
+
+    if let Some(endpoint) = api_base {
+        return Some(RouterTarget {
+            endpoint,
+            auth_env: auth_env_for_provider(provider).to_string(),
+            adapter: adapter_for_provider(provider).unwrap_or(AdapterKind::OpenAI),
+            model_name: strip_slash_provider(model, provider).to_string(),
+        });
+    }
+
+    if provider == "openrouter" || slash_provider == Some("openrouter") {
+        return Some(RouterTarget {
+            endpoint: OPENROUTER_ENDPOINT.to_string(),
+            auth_env: "OPENROUTER_API_KEY".to_string(),
+            adapter: AdapterKind::OpenAI,
+            model_name: strip_slash_provider(model, "openrouter").to_string(),
+        });
+    }
+
+    if let Some(slash_provider) = slash_provider
+        && let Some(endpoint) = default_endpoint_for_provider(slash_provider)
+    {
+        return Some(RouterTarget {
+            endpoint: endpoint.to_string(),
+            auth_env: auth_env_for_provider(slash_provider).to_string(),
+            adapter: adapter_for_provider(slash_provider)?,
+            model_name: strip_slash_provider(model, slash_provider).to_string(),
+        });
+    }
+
+    None
+}
+
+fn normalized_provider(provider: &str) -> Option<String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    (!provider.is_empty()).then_some(provider)
+}
+
+fn normalize_api_base(api_base: &str) -> Option<String> {
+    let api_base = api_base.trim();
+    if api_base.is_empty() {
+        return None;
+    }
+    if api_base.ends_with('/') {
+        Some(api_base.to_string())
+    } else {
+        Some(format!("{api_base}/"))
+    }
+}
+
+fn slash_provider(model: &str) -> Option<&str> {
+    let (provider, rest) = model.split_once('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    match provider.to_ascii_lowercase().as_str() {
+        "openrouter" => Some("openrouter"),
+        "openai" => Some("openai"),
+        "anthropic" => Some("anthropic"),
+        "ollama" => Some("ollama"),
+        _ => None,
+    }
+}
+
+fn strip_slash_provider<'a>(model: &'a str, provider: &str) -> &'a str {
+    let Some((prefix, rest)) = model.split_once('/') else {
+        return model;
+    };
+    if prefix.eq_ignore_ascii_case(provider) && !rest.is_empty() {
+        rest
+    } else {
+        model
+    }
+}
+
+fn adapter_for_provider(provider: &str) -> Option<AdapterKind> {
+    match provider {
+        "openrouter" | "openai" => Some(AdapterKind::OpenAI),
+        "anthropic" => Some(AdapterKind::Anthropic),
+        "ollama" => Some(AdapterKind::Ollama),
+        _ => None,
+    }
+}
+
+fn default_endpoint_for_provider(provider: &str) -> Option<&'static str> {
+    match provider {
+        "openai" => Some(OPENAI_ENDPOINT),
+        "anthropic" => Some(ANTHROPIC_ENDPOINT),
+        "openrouter" => Some(OPENROUTER_ENDPOINT),
+        _ => None,
+    }
+}
+
+fn auth_env_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "openrouter" => "OPENROUTER_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        _ => "OPENAI_API_KEY",
+    }
+}
+
+fn llm_debug_request_payload(
+    auth: &str,
+    model: &str,
+    use_aux: bool,
+    request: &ChatRequest,
+    options: &ChatOptions,
+) -> Value {
+    json!({
+        "auth": auth,
+        "model": model,
+        "use_aux": use_aux,
+        "request": request,
+        "options": options,
+    })
+}
+
+fn log_llm_interaction(label: &str, model: &str, request: Value, response: Value) {
+    if !llm_debug_enabled() {
+        return;
+    }
+
+    let dir = llm_debug_dir();
+    let result = (|| -> Result<PathBuf> {
+        fs::create_dir_all(&dir)?;
+        let sequence = LLM_DEBUG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let timestamp = Utc::now();
+        let file_name = format!(
+            "{}_{:06}_{label}.json",
+            timestamp.format("%Y%m%d_%H%M%S_%6f"),
+            sequence
+        );
+        let path = dir.join(file_name);
+        let payload = json!({
+            "timestamp": timestamp.to_rfc3339(),
+            "label": label,
+            "model": model,
+            "request": request,
+            "response": response,
+        });
+        fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
+        Ok(path)
+    })();
+
+    match result {
+        Ok(path) => tracing::debug!(path = %path.display(), label, model, "logged llm interaction"),
+        Err(error) => tracing::warn!(error = %error, "failed to log llm interaction"),
+    }
+}
+
+fn llm_debug_enabled() -> bool {
+    env::var("LLM_DEBUG")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn llm_debug_dir() -> PathBuf {
+    if let Some(path) = env::var_os("LLM_DEBUG_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = env::var_os("LOGS_DIR") {
+        return PathBuf::from(path).join("llm");
+    }
+    if let Some(path) = env::var_os("LETHE_HOME") {
+        return PathBuf::from(path).join("logs").join("llm");
+    }
+    PathBuf::from("logs").join("llm")
+}
+
+fn should_use_anthropic_oauth(model: &str, config: &LlmRouterConfig) -> bool {
+    if normalize_api_base(&config.api_base).is_some() {
+        return false;
+    }
+    if slash_provider(model) == Some("openrouter") {
+        return false;
+    }
+    if normalized_provider(&config.provider).as_deref() == Some("openrouter") {
+        return false;
+    }
+    let model = strip_slash_provider(model, "anthropic").to_ascii_lowercase();
+    slash_provider(model.as_str()) == Some("anthropic")
+        || normalized_provider(&config.provider).as_deref() == Some("anthropic")
+        || model.contains("claude")
+}
+
+pub fn llm_auth_mode_for_settings(settings: &Settings) -> String {
+    let config = LlmRouterConfig::from_settings(settings);
+    let main = auth_mode_for_model(config.model_for(false), &config);
+    let aux = auth_mode_for_model(config.model_for(true), &config);
+    if main == aux {
+        main
+    } else {
+        format!("main={main}, aux={aux}")
+    }
+}
+
+fn auth_mode_for_model(model: &str, config: &LlmRouterConfig) -> String {
+    if should_use_anthropic_oauth(model, config) && anthropic_oauth_available() {
+        return "anthropic_oauth".to_string();
+    }
+    let configured_provider = normalized_provider(&config.provider);
+    let provider = slash_provider(model)
+        .or(configured_provider.as_deref())
+        .unwrap_or(if normalize_api_base(&config.api_base).is_some() {
+            "openai"
+        } else if model.to_ascii_lowercase().contains("claude") {
+            "anthropic"
+        } else {
+            ""
+        });
+    match provider {
+        "anthropic" => "anthropic_api_key".to_string(),
+        "openrouter" => "openrouter_api_key".to_string(),
+        "openai" => "openai_api_key".to_string(),
+        other if !other.is_empty() => format!("{other}_auth"),
+        _ => "auto".to_string(),
+    }
+}
+
+fn anthropic_oauth_available() -> bool {
+    env::var("ANTHROPIC_AUTH_TOKEN")
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
+        || read_anthropic_oauth_tokens(&anthropic_oauth_token_file()).is_some()
+}
+
+fn anthropic_oauth_token_file() -> PathBuf {
+    if let Some(path) = env::var_os("LETHE_ANTHROPIC_OAUTH_TOKENS") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = env::var_os("CREDENTIALS_DIR") {
+        return PathBuf::from(path).join("anthropic_oauth_tokens.json");
+    }
+    let home = env::var_os("LETHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".lethe")))
+        .unwrap_or_else(|| PathBuf::from(".lethe"));
+    home.join("credentials").join("anthropic_oauth_tokens.json")
+}
+
+fn read_anthropic_oauth_tokens(path: &Path) -> Option<AnthropicOAuthTokens> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut tokens: AnthropicOAuthTokens = serde_json::from_str(&text).ok()?;
+    tokens.env_access_token = false;
+    tokens
+        .access_token
+        .as_ref()
+        .is_some_and(|token| !token.trim().is_empty())
+        .then_some(tokens)
+}
+
+fn write_anthropic_oauth_tokens(path: &Path, tokens: &AnthropicOAuthTokens) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        bail!(
+            "Anthropic OAuth token path has no parent: {}",
+            path.display()
+        );
+    };
+    fs::create_dir_all(parent)?;
+    let text = serde_json::to_string_pretty(tokens)?;
+    fs::write(path, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn oauth_max_concurrency() -> usize {
+    env::var("LETHE_OAUTH_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn unix_now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Duration {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(Duration::from_secs_f64)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
+
+fn truncate_error(text: &str) -> String {
+    const MAX: usize = 500;
+    let text = text.trim();
+    if text.len() <= MAX {
+        return text.to_string();
+    }
+    format!("{}...", &text[..MAX])
+}
+
+fn anthropic_request_body(model: &str, request: ChatRequest, options: &ChatOptions) -> Value {
+    let max_tokens = options.max_tokens.unwrap_or(8000);
+    let mut system_blocks = Vec::new();
+    if let Some(system) = request.system.filter(|system| !system.trim().is_empty()) {
+        system_blocks.push(json!({"type": "text", "text": system}));
+    }
+
+    let mut messages = Vec::new();
+    for message in request.messages {
+        match message.role {
+            ChatRole::System => {
+                for text in message.content.texts() {
+                    if !text.trim().is_empty() {
+                        system_blocks.push(json!({"type": "text", "text": text}));
+                    }
+                }
+            }
+            ChatRole::User => messages.push(json!({
+                "role": "user",
+                "content": anthropic_user_content(message.content),
+            })),
+            ChatRole::Assistant => {
+                let content = anthropic_assistant_content(message.content);
+                if !content.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": content}));
+                }
+            }
+            ChatRole::Tool => {
+                let content = anthropic_tool_result_content(message.content);
+                if !content.is_empty() {
+                    messages.push(json!({"role": "user", "content": content}));
+                }
+            }
+        }
+    }
+
+    let first_user_text = first_user_text(&messages);
+    system_blocks.insert(
+        0,
+        json!({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}),
+    );
+    system_blocks.insert(
+        0,
+        json!({"type": "text", "text": billing_header(&first_user_text)}),
+    );
+
+    let mut messages = merge_anthropic_messages(messages);
+    drop_leading_non_user_messages(&mut messages);
+    while messages
+        .last()
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+        == Some("assistant")
+    {
+        messages.pop();
+    }
+    if messages.is_empty() {
+        messages.push(json!({"role": "user", "content": "[No user message provided.]"}));
+    }
+    let mut messages = clean_orphaned_tool_pairs(messages);
+    drop_leading_non_user_messages(&mut messages);
+    if messages.is_empty() {
+        messages.push(json!({"role": "user", "content": "[No user message provided.]"}));
+    }
+
+    let tools = request
+        .tools
+        .unwrap_or_default()
+        .into_iter()
+        .map(anthropic_tool_schema)
+        .collect::<Vec<_>>();
+
+    json!({
+        "model": normalize_anthropic_model(model),
+        "max_tokens": max_tokens,
+        "system": system_blocks,
+        "messages": messages,
+        "tools": tools,
+    })
+}
+
+fn anthropic_user_content(content: MessageContent) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for part in content.into_parts() {
+        match part {
+            ContentPart::Text(text) => {
+                if !text.trim().is_empty() {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+            }
+            ContentPart::Binary(binary) => {
+                let is_image = binary.is_image();
+                let content_type = binary.content_type;
+                match binary.source {
+                    BinarySource::Base64(data) => {
+                        if is_image {
+                            blocks.push(json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": content_type,
+                                    "data": data.as_ref(),
+                                }
+                            }));
+                        } else {
+                            blocks.push(json!({
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": content_type,
+                                    "data": data.as_ref(),
+                                }
+                            }));
+                        }
+                    }
+                    BinarySource::Url(url) => {
+                        if is_image {
+                            blocks.push(json!({
+                                "type": "image",
+                                "source": {"type": "url", "url": url}
+                            }));
+                        } else {
+                            blocks.push(json!({
+                                "type": "text",
+                                "text": format!("[{} attachment: {url}]", content_type),
+                            }));
+                        }
+                    }
+                }
+            }
+            ContentPart::ToolResponse(response) => blocks.push(json!({
+                "type": "tool_result",
+                "tool_use_id": response.call_id,
+                "content": response.content,
+            })),
+            ContentPart::ToolCall(call) => blocks.push(json!({
+                "type": "text",
+                "text": format!("[tool call {} omitted in user content]", call.fn_name),
+            })),
+            ContentPart::ThoughtSignature(_) => {}
+        }
+    }
+    if blocks.is_empty() {
+        blocks.push(json!({"type": "text", "text": ""}));
+    }
+    blocks
+}
+
+fn anthropic_assistant_content(content: MessageContent) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for part in content.into_parts() {
+        match part {
+            ContentPart::Text(text) => {
+                if !text.trim().is_empty() {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+            }
+            ContentPart::ToolCall(call) => blocks.push(json!({
+                "type": "tool_use",
+                "id": call.call_id,
+                "name": map_tool_name_to_claude(&call.fn_name),
+                "input": call.fn_arguments,
+            })),
+            ContentPart::ThoughtSignature(_) => {}
+            ContentPart::Binary(_) | ContentPart::ToolResponse(_) => {}
+        }
+    }
+    blocks
+}
+
+fn anthropic_tool_result_content(content: MessageContent) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for part in content.into_parts() {
+        match part {
+            ContentPart::ToolResponse(response) => blocks.push(json!({
+                "type": "tool_result",
+                "tool_use_id": response.call_id,
+                "content": response.content,
+            })),
+            ContentPart::Text(text) => {
+                if !text.trim().is_empty() {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+            }
+            ContentPart::ToolCall(_)
+            | ContentPart::Binary(_)
+            | ContentPart::ThoughtSignature(_) => {}
+        }
+    }
+    blocks
+}
+
+fn anthropic_tool_schema(tool: genai::chat::Tool) -> Value {
+    json!({
+        "name": map_tool_name_to_claude(&tool.name),
+        "description": tool.description.unwrap_or_default(),
+        "input_schema": tool.schema.unwrap_or_else(|| json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        })),
+    })
+}
+
+fn merge_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut merged: Vec<Value> = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if let Some(previous) = merged.last_mut()
+            && previous.get("role").and_then(Value::as_str) == Some(role)
+        {
+            merge_message_content(previous, &message);
+            continue;
+        }
+        merged.push(message);
+    }
+    merged
+}
+
+fn drop_leading_non_user_messages(messages: &mut Vec<Value>) {
+    let first_user = messages
+        .iter()
+        .position(|message| message.get("role").and_then(Value::as_str) == Some("user"));
+    match first_user {
+        Some(0) => {}
+        Some(index) => {
+            messages.drain(0..index);
+        }
+        None => messages.clear(),
+    }
+}
+
+fn merge_message_content(previous: &mut Value, next: &Value) {
+    let previous_content = previous.get_mut("content");
+    let next_content = next
+        .get("content")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
+    let Some(previous_content) = previous_content else {
+        previous["content"] = next_content;
+        return;
+    };
+
+    let merged = match (std::mem::take(previous_content), next_content) {
+        (Value::String(mut previous), Value::String(next)) => {
+            previous.push('\n');
+            previous.push_str(&next);
+            Value::String(previous)
+        }
+        (Value::Array(mut previous), Value::Array(next)) => {
+            previous.extend(next);
+            Value::Array(previous)
+        }
+        (Value::String(previous), Value::Array(mut next)) => {
+            let mut merged = vec![json!({"type": "text", "text": previous})];
+            merged.append(&mut next);
+            Value::Array(merged)
+        }
+        (Value::Array(mut previous), Value::String(next)) => {
+            previous.push(json!({"type": "text", "text": next}));
+            Value::Array(previous)
+        }
+        (_, next) => next,
+    };
+    *previous_content = merged;
+}
+
+fn clean_orphaned_tool_pairs(messages: Vec<Value>) -> Vec<Value> {
+    let mut cleaned = Vec::new();
+    let mut previous_tool_use_ids: Vec<String> = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            previous_tool_use_ids.clear();
+            cleaned.push(message);
+            continue;
+        };
+
+        if role == "assistant" {
+            previous_tool_use_ids = content
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| block.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            cleaned.push(message);
+            continue;
+        }
+
+        if role == "user"
+            && content
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        {
+            let filtered = content
+                .iter()
+                .filter(|block| {
+                    block.get("type").and_then(Value::as_str) != Some("tool_result")
+                        || block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| {
+                                previous_tool_use_ids.iter().any(|use_id| use_id == id)
+                            })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !filtered.is_empty() {
+                let mut message = message;
+                message["content"] = Value::Array(filtered);
+                cleaned.push(message);
+            }
+        } else {
+            previous_tool_use_ids.clear();
+            cleaned.push(message);
+        }
+    }
+    cleaned
+}
+
+fn first_user_text(messages: &[Value]) -> String {
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(content) = message.get("content") else {
+            return String::new();
+        };
+        if let Some(text) = content.as_str() {
+            return text.to_string();
+        }
+        if let Some(blocks) = content.as_array() {
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) == Some("text")
+                    && let Some(text) = block.get("text").and_then(Value::as_str)
+                {
+                    return text.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn anthropic_response_to_chat_response(data: Value, requested_model: &str) -> Result<ChatResponse> {
+    let mut parts = Vec::new();
+    if let Some(blocks) = data.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str)
+                        && !text.is_empty()
+                    {
+                        parts.push(ContentPart::Text(text.to_string()));
+                    }
+                }
+                "tool_use" => {
+                    let call_id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let fn_name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(map_tool_name_from_claude)
+                        .unwrap_or_default();
+                    let fn_arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    parts.push(ContentPart::ToolCall(ToolCall {
+                        call_id,
+                        fn_name,
+                        fn_arguments,
+                        thought_signatures: None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let provider_model = data
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| normalize_anthropic_model(requested_model));
+    let mut usage = Usage::default();
+    if let Some(raw_usage) = data.get("usage") {
+        let input_tokens = raw_usage
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        let output_tokens = raw_usage
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        usage.prompt_tokens = input_tokens;
+        usage.completion_tokens = output_tokens;
+        usage.total_tokens = input_tokens
+            .zip(output_tokens)
+            .map(|(input, output)| input + output);
+        let cache_creation = raw_usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        let cache_read = raw_usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        if cache_creation.is_some() || cache_read.is_some() {
+            usage.prompt_tokens_details = Some(PromptTokensDetails {
+                cache_creation_tokens: cache_creation,
+                cached_tokens: cache_read,
+                audio_tokens: None,
+            });
+        }
+        usage.compact_details();
+    }
+
+    let requested_model = normalize_anthropic_model(requested_model);
+    Ok(ChatResponse {
+        content: MessageContent::from_parts(parts),
+        reasoning_content: None,
+        model_iden: ModelIden::new(AdapterKind::Anthropic, requested_model),
+        provider_model_iden: ModelIden::new(AdapterKind::Anthropic, provider_model),
+        usage,
+        captured_raw_body: None,
+    })
+}
+
+fn anthropic_oauth_headers(access_token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    headers.insert("accept", "application/json".parse().unwrap());
+    headers.insert(
+        "authorization",
+        format!("Bearer {access_token}").parse().unwrap(),
+    );
+    headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+    headers.insert(
+        "user-agent",
+        format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)")
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("x-app", "cli".parse().unwrap());
+    headers.insert(
+        "anthropic-dangerous-direct-browser-access",
+        "true".parse().unwrap(),
+    );
+    headers.insert("x-stainless-arch", "x64".parse().unwrap());
+    headers.insert("x-stainless-lang", "js".parse().unwrap());
+    headers.insert("x-stainless-os", "Linux".parse().unwrap());
+    headers.insert("x-stainless-package-version", "0.70.0".parse().unwrap());
+    headers.insert("x-stainless-runtime", "node".parse().unwrap());
+    headers.insert("x-stainless-runtime-version", "v24.3.0".parse().unwrap());
+    headers.insert("x-stainless-retry-count", "0".parse().unwrap());
+    headers.insert("x-stainless-timeout", "600".parse().unwrap());
+    headers.insert(
+        "anthropic-beta",
+        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
+            .parse()
+            .unwrap(),
+    );
+    headers
+}
+
+fn normalize_anthropic_model(model: &str) -> String {
+    let model = strip_slash_provider(model.trim(), "anthropic");
+    match model {
+        "claude-opus-4-6" => "claude-opus-4-6",
+        "claude-opus-4-5" => "claude-opus-4-5-20251101",
+        "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5" => "claude-haiku-4-5-20251001",
+        other => other,
+    }
+    .to_string()
+}
+
+fn billing_header(first_user_text: &str) -> String {
+    let chars = [4usize, 7, 20]
+        .into_iter()
+        .map(|index| first_user_text.chars().nth(index).unwrap_or('0'))
+        .collect::<String>();
+    let raw = format!("{CLAUDE_CODE_SALT}{chars}[object Object]");
+    let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let entrypoint = env::var("CLAUDE_CODE_ENTRYPOINT").unwrap_or_else(|_| "unknown".to_string());
+    format!(
+        "x-anthropic-billing-header: cc_version={}.{}; cc_entrypoint={}; cch=00000;",
+        CLAUDE_CODE_VERSION,
+        &hash[..3],
+        entrypoint
+    )
+}
+
+fn map_tool_name_to_claude(name: &str) -> String {
+    match name {
+        "bash" => "Bash".to_string(),
+        "read_file" => "Read".to_string(),
+        "write_file" => "Write".to_string(),
+        "edit_file" => "Edit".to_string(),
+        "list_directory" => "Glob".to_string(),
+        "grep_search" => "Grep".to_string(),
+        "web_search" => "WebSearch".to_string(),
+        "fetch_webpage" => "WebFetch".to_string(),
+        "memory_read" => "mcp__lethe__MemoryRead".to_string(),
+        "memory_update" => "mcp__lethe__MemoryUpdate".to_string(),
+        "memory_append" => "mcp__lethe__MemoryAppend".to_string(),
+        "archival_search" => "mcp__lethe__ArchivalSearch".to_string(),
+        "archival_insert" => "mcp__lethe__ArchivalInsert".to_string(),
+        "conversation_search" => "mcp__lethe__ConversationSearch".to_string(),
+        other => format!("mcp__lethe__{}", to_pascal_case(other)),
+    }
+}
+
+fn map_tool_name_from_claude(name: &str) -> String {
+    match name {
+        "Bash" => "bash".to_string(),
+        "Read" => "read_file".to_string(),
+        "Write" => "write_file".to_string(),
+        "Edit" => "edit_file".to_string(),
+        "Glob" => "list_directory".to_string(),
+        "Grep" => "grep_search".to_string(),
+        "WebSearch" => "web_search".to_string(),
+        "WebFetch" => "fetch_webpage".to_string(),
+        "mcp__lethe__MemoryRead" => "memory_read".to_string(),
+        "mcp__lethe__MemoryUpdate" => "memory_update".to_string(),
+        "mcp__lethe__MemoryAppend" => "memory_append".to_string(),
+        "mcp__lethe__ArchivalSearch" => "archival_search".to_string(),
+        "mcp__lethe__ArchivalInsert" => "archival_insert".to_string(),
+        "mcp__lethe__ConversationSearch" => "conversation_search".to_string(),
+        other if other.starts_with("mcp__") => other
+            .split("__")
+            .nth(2)
+            .map(to_snake_case)
+            .unwrap_or_else(|| to_snake_case(other)),
+        other if other.starts_with("mcp_") => to_snake_case(&other[4..]),
+        other => to_snake_case(other),
+    }
+}
+
+fn to_pascal_case(name: &str) -> String {
+    name.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn to_snake_case(name: &str) -> String {
+    let mut output = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in name.chars() {
+        if ch == '-' || ch == ' ' {
+            if !output.ends_with('_') {
+                output.push('_');
+            }
+            previous_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() {
+            if previous_lower_or_digit && !output.ends_with('_') {
+                output.push('_');
+            }
+            output.push(ch.to_ascii_lowercase());
+            previous_lower_or_digit = false;
+        } else {
+            output.push(ch.to_ascii_lowercase());
+            previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        }
+    }
+    output.trim_matches('_').to_string()
+}
+
+pub fn build_chat_request(messages: Vec<LlmMessage>) -> ChatRequest {
+    ChatRequest::new(messages.into_iter().map(into_chat_message).collect())
+}
+
+fn into_chat_message(message: LlmMessage) -> ChatMessage {
+    let content = into_message_content(message.content, message.attachments);
+    match message.role {
+        LlmRole::System => ChatMessage::system(content),
+        LlmRole::User => ChatMessage::user(content),
+        LlmRole::Assistant => ChatMessage::assistant(content),
+    }
+}
+
+fn into_message_content(content: String, attachments: Vec<LlmAttachment>) -> MessageContent {
+    if attachments.is_empty() {
+        return MessageContent::from(content);
+    }
+    let mut parts = Vec::new();
+    if !content.trim().is_empty() {
+        parts.push(ContentPart::from_text(content));
+    }
+    parts.extend(attachments.into_iter().map(|attachment| {
+        ContentPart::from_binary_base64(
+            attachment.content_type,
+            attachment.base64_content,
+            attachment.name,
+        )
+    }));
+    MessageContent::from_parts(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aux_model_falls_back_to_main_model() {
+        let config = LlmRouterConfig {
+            model: "gpt-5".to_string(),
+            aux_model: String::new(),
+            provider: String::new(),
+            api_base: String::new(),
+            max_output_tokens: 100,
+            temperature_millidegrees: 500,
+        };
+
+        assert_eq!(config.model_for(false), "gpt-5");
+        assert_eq!(config.model_for(true), "gpt-5");
+    }
+
+    #[test]
+    fn request_builder_accepts_core_roles() {
+        let request = build_chat_request(vec![
+            LlmMessage::system("system"),
+            LlmMessage::user("hello"),
+            LlmMessage::assistant("hi"),
+        ]);
+
+        assert_eq!(request.messages.len(), 3);
+    }
+
+    #[test]
+    fn request_builder_preserves_user_binary_attachments() {
+        let request = build_chat_request(vec![LlmMessage::user_with_attachments(
+            "caption",
+            vec![LlmAttachment {
+                content_type: "image/png".to_string(),
+                base64_content: "aGVsbG8=".to_string(),
+                name: Some("photo.png".to_string()),
+            }],
+        )]);
+
+        assert_eq!(request.messages.len(), 1);
+        let parts = request.messages[0].content.parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].as_text(), Some("caption"));
+        assert!(parts[1].is_image());
+    }
+
+    #[test]
+    fn anthropic_body_drops_leading_assistant_instead_of_inserting_continue() {
+        let request = build_chat_request(vec![
+            LlmMessage::assistant("orphaned prior assistant"),
+            LlmMessage::user("real user message"),
+        ]);
+
+        let body = anthropic_request_body("claude-opus-4-6", request, &ChatOptions::default());
+        let messages = body["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "real user message");
+        assert!(
+            !serde_json::to_string(messages)
+                .unwrap()
+                .contains("[Continue]")
+        );
+    }
+
+    #[test]
+    fn router_target_maps_openrouter_prefix_to_openai_compatible_endpoint() {
+        let config = LlmRouterConfig {
+            model: "openrouter/moonshotai/kimi-k2.6".to_string(),
+            aux_model: String::new(),
+            provider: String::new(),
+            api_base: String::new(),
+            max_output_tokens: 100,
+            temperature_millidegrees: 500,
+        };
+
+        let target = router_target_for_model(&config.model, &config).unwrap();
+
+        assert_eq!(target.endpoint, OPENROUTER_ENDPOINT);
+        assert_eq!(target.auth_env, "OPENROUTER_API_KEY");
+        assert_eq!(target.adapter, AdapterKind::OpenAI);
+        assert_eq!(target.model_name, "moonshotai/kimi-k2.6");
+    }
+
+    #[test]
+    fn router_target_uses_configured_openrouter_provider_without_prefix() {
+        let config = LlmRouterConfig {
+            model: "moonshotai/kimi-k2.6".to_string(),
+            aux_model: String::new(),
+            provider: "openrouter".to_string(),
+            api_base: String::new(),
+            max_output_tokens: 100,
+            temperature_millidegrees: 500,
+        };
+
+        let target = router_target_for_model(&config.model, &config).unwrap();
+
+        assert_eq!(target.endpoint, OPENROUTER_ENDPOINT);
+        assert_eq!(target.auth_env, "OPENROUTER_API_KEY");
+        assert_eq!(target.model_name, "moonshotai/kimi-k2.6");
+    }
+
+    #[test]
+    fn router_target_normalizes_custom_openai_base_and_strips_prefix() {
+        let config = LlmRouterConfig {
+            model: "openai/gemma-4-31B-it-Q8_0.gguf".to_string(),
+            aux_model: String::new(),
+            provider: "openai".to_string(),
+            api_base: "http://localhost:8090/v1".to_string(),
+            max_output_tokens: 100,
+            temperature_millidegrees: 500,
+        };
+
+        let target = router_target_for_model(&config.model, &config).unwrap();
+
+        assert_eq!(target.endpoint, "http://localhost:8090/v1/");
+        assert_eq!(target.auth_env, "OPENAI_API_KEY");
+        assert_eq!(target.adapter, AdapterKind::OpenAI);
+        assert_eq!(target.model_name, "gemma-4-31B-it-Q8_0.gguf");
+    }
+
+    #[test]
+    fn router_target_strips_anthropic_slash_prefix() {
+        let config = LlmRouterConfig {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            aux_model: String::new(),
+            provider: String::new(),
+            api_base: String::new(),
+            max_output_tokens: 100,
+            temperature_millidegrees: 500,
+        };
+
+        let target = router_target_for_model(&config.model, &config).unwrap();
+
+        assert_eq!(target.endpoint, ANTHROPIC_ENDPOINT);
+        assert_eq!(target.auth_env, "ANTHROPIC_API_KEY");
+        assert_eq!(target.adapter, AdapterKind::Anthropic);
+        assert_eq!(target.model_name, "claude-sonnet-4-6");
+    }
+}

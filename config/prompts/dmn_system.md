@@ -13,7 +13,7 @@ Key paths:
 - {workspace}/questions.md - reflections and open questions
 - {workspace}/ideas.md - creative ideas, observations, proactive suggestions
 - {workspace}/projects/ - project notes and plans
-- {workspace}/memory/ - memory block files (core memory blocks: persona.md, human.md, project.md, tools.md, tasks.md, capabilities.md)
+- {workspace}/memory/ - memory block files (core memory blocks: identity.md, human.md, project.md)
 - {workspace}/tasks/ - task-related files
 - {workspace}/data/ - databases and persistent data
 Home directory: {home}

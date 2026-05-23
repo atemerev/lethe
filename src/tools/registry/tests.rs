@@ -1,0 +1,418 @@
+use std::collections::HashSet;
+
+use serde_json::json;
+use tempfile::tempdir;
+
+use super::*;
+use crate::store::MemoryStore;
+use crate::tools::shell::ShellTools;
+use crate::tools::web::WebTools;
+
+fn registry() -> (tempfile::TempDir, MemoryStore, ShellTools) {
+    let tmp = tempdir().unwrap();
+    assert!(tmp.path().starts_with(std::env::temp_dir()));
+    let workspace = tmp.path().join("workspace");
+    let db = tmp.path().join("data/lethe.db");
+    let notes = workspace.join("notes");
+    let memory = MemoryStore::open(&workspace, db, notes).unwrap();
+    let shell = ShellTools::new(&workspace);
+    (tmp, memory, shell)
+}
+
+#[test]
+fn exposes_core_tool_specs() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
+    let names = registry
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"read_file".to_string()));
+    assert!(names.contains(&"bash".to_string()));
+    assert!(names.contains(&"get_terminal_screen".to_string()));
+    assert!(names.contains(&"send_terminal_input".to_string()));
+    assert!(names.contains(&"get_environment_info".to_string()));
+    assert!(names.contains(&"check_command_exists".to_string()));
+    assert!(names.contains(&"memory_read".to_string()));
+    assert!(names.contains(&"note_search".to_string()));
+    assert!(names.contains(&"web_search".to_string()));
+    assert!(names.contains(&"fetch_webpage".to_string()));
+    assert!(names.contains(&"browser_open".to_string()));
+    assert!(names.contains(&"browser_snapshot".to_string()));
+    assert!(names.contains(&"browser_click".to_string()));
+    assert!(names.contains(&"browser_fill".to_string()));
+    assert!(names.contains(&"view_image".to_string()));
+    assert!(names.contains(&"todo_update".to_string()));
+    assert!(names.contains(&"todo_remind_check".to_string()));
+    assert!(names.contains(&"todo_reminded".to_string()));
+}
+
+#[test]
+fn active_tool_specs_start_small_and_expand_on_request() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
+    let active = HashSet::new();
+    let initial = registry
+        .tools_for_active(&active)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(initial.contains(&"request_tool".to_string()));
+    assert!(initial.contains(&"bash".to_string()));
+    assert!(initial.contains(&"web_search".to_string()));
+    assert!(!initial.contains(&"browser_open".to_string()));
+    assert!(!initial.contains(&"fetch_webpage".to_string()));
+
+    let active = ["browser_open".to_string(), "fetch_webpage".to_string()]
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let expanded = registry
+        .tools_for_active(&active)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(expanded.contains(&"browser_open".to_string()));
+    assert!(expanded.contains(&"fetch_webpage".to_string()));
+}
+
+#[test]
+fn executes_files_memory_notes_and_shell_tools() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
+    let file_path = "test-output/a.txt";
+    let resolved_file = memory.workspace_dir().join(file_path);
+
+    assert!(
+        registry
+            .execute(
+                "write_file",
+                &json!({"file_path": file_path, "content": "hello"})
+            )
+            .contains("Successfully wrote")
+    );
+    assert!(resolved_file.starts_with(std::env::temp_dir()));
+    assert!(resolved_file.exists());
+    assert!(
+        registry
+            .execute("read_file", &json!({"file_path": file_path}))
+            .contains("hello")
+    );
+    std::fs::write(memory.workspace_dir().join("image.png"), b"not a real png").unwrap();
+    let image_payload = registry.execute("view_image", &json!({"file_path": "image.png"}));
+    let image: serde_json::Value = serde_json::from_str(&image_payload).unwrap();
+    assert_eq!(image["status"], "ok");
+    assert_eq!(image["_image_view"]["mime_type"], "image/png");
+    assert!(
+        registry
+            .execute(
+                "memory_append",
+                &json!({"label": "project", "text": "\nRust port"})
+            )
+            .contains("Appended")
+    );
+    assert!(
+        registry
+            .execute("memory_read", &json!({"label": "project"}))
+            .contains("Rust port")
+    );
+    assert!(
+        registry
+            .execute(
+                "note_create",
+                &json!({"title": "Test Note", "content": "graph api", "tags": ["skill"]})
+            )
+            .contains("Note saved")
+    );
+    assert!(
+        registry
+            .execute("note_search", &json!({"query": "graph"}))
+            .contains("Test Note")
+    );
+    assert_eq!(
+        registry.execute("bash", &json!({"command": "echo ok"})),
+        "ok"
+    );
+    assert!(
+        registry
+            .execute("get_environment_info", &json!({}))
+            .contains("Environment Information")
+    );
+    assert!(
+        registry
+            .execute("check_command_exists", &json!({"command_name": "ls"}))
+            .contains("available")
+    );
+    if !WebTools::is_available() {
+        assert!(
+            registry
+                .execute("web_search", &json!({"query": "rust"}))
+                .contains("EXA_API_KEY")
+        );
+    }
+}
+
+#[test]
+fn executes_todo_update_and_reminder_tools() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
+
+    let created = registry.execute(
+        "todo_create",
+        &json!({"title": "Submit permit letter", "priority": "urgent"}),
+    );
+    assert!(created.contains("Created todo #1"));
+
+    let updated = registry.execute(
+        "todo_update",
+        &json!({
+            "todo_id": 1,
+            "status": "in_progress",
+            "description": "Need lab support context",
+            "due_date": "2026-05-23"
+        }),
+    );
+    assert!(updated.contains("Updated todo #1"));
+
+    let listed = registry.execute("todo_list", &json!({"include_completed": true}));
+    assert!(listed.contains("[~] #1"));
+    assert!(listed.contains("Need lab support context"));
+
+    let due = registry.execute("todo_remind_check", &json!({}));
+    assert!(due.contains("Submit permit letter"));
+
+    let reminded = registry.execute("todo_reminded", &json!({"todo_id": 1}));
+    assert!(reminded.contains("Marked todo #1 as reminded"));
+
+    let after = registry.execute("todo_remind_check", &json!({}));
+    assert!(after.contains("No todos due for reminder"));
+
+    let invalid = registry.execute("todo_update", &json!({"todo_id": 1, "status": "weird"}));
+    assert!(invalid.contains("invalid todo status"));
+}
+
+#[test]
+fn exposes_and_executes_actor_tools_when_context_is_present() {
+    use crate::actor::{ActorConfig, ActorRegistry, ActorRuntime, TaskState};
+
+    let (_tmp, memory, shell) = registry();
+    let mut actor_registry = ActorRegistry::new();
+    let principal = actor_registry.spawn(
+        ActorConfig::new("cortex", "Delegate focused work").in_group("main"),
+        None,
+        true,
+    );
+    let shared = ActorRuntime::new(actor_registry);
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        memory.workspace_dir(),
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            actor: Some(ActorToolContext {
+                runtime: shared.clone(),
+                actor_id: principal.clone(),
+                is_subagent: false,
+            }),
+            ..ToolRuntime::default()
+        },
+    );
+
+    let names = registry
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"spawn_actor".to_string()));
+    assert!(names.contains(&"spawn_chain".to_string()));
+    assert!(names.contains(&"send_message".to_string()));
+    assert!(names.contains(&"discover_actors".to_string()));
+    assert!(names.contains(&"update_task_state".to_string()));
+    assert!(names.contains(&"terminate".to_string()));
+    assert!(!names.contains(&"restart_self".to_string()));
+
+    let spawned = registry.execute(
+        "spawn_actor",
+        &json!({
+            "name": "Worker",
+            "goals": "Read the report and summarize risks",
+            "tools": "read_file",
+            "model": "aux",
+            "max_turns": 3
+        }),
+    );
+    assert!(spawned.contains("Spawned actor 'worker'"));
+    let worker = shared
+        .find_by_name_blocking("worker", Some("main"))
+        .unwrap()
+        .id
+        .clone();
+
+    let discovered = registry.execute("discover_actors", &json!({}));
+    assert!(discovered.contains("worker"));
+    assert!(discovered.contains("[child]"));
+
+    let sent = registry.execute(
+        "send_message",
+        &json!({"actor_id": worker.clone(), "content": "Please start now"}),
+    );
+    assert!(sent.contains("Message sent"));
+    assert_eq!(
+        shared.pop_inbox_blocking(&worker).unwrap().content,
+        "Please start now"
+    );
+
+    let updated = registry.execute(
+        "update_task_state",
+        &json!({"state": "blocked", "note": "waiting on worker"}),
+    );
+    assert!(updated.contains("running -> blocked"));
+    assert_eq!(
+        shared.task_state_blocking(&principal).unwrap(),
+        TaskState::Blocked
+    );
+    assert_eq!(
+        registry.execute("get_task_state", &json!({})),
+        "Task state: blocked"
+    );
+
+    let killed = registry.execute("kill_actor", &json!({"actor_id": worker}));
+    assert!(killed.contains("Killed"));
+}
+
+#[test]
+fn exposes_and_executes_telegram_tools_when_context_is_present() {
+    use std::sync::{Arc, Mutex};
+
+    use crate::telegram::{TelegramToolContext, TelegramTurnGuard};
+
+    let (_tmp, memory, shell) = registry();
+    let guard = Arc::new(Mutex::new(TelegramTurnGuard::new()));
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        memory.workspace_dir(),
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            telegram: Some(TelegramToolContext {
+                token: "token".to_string(),
+                chat_id: 99,
+                last_message_id: Some(42),
+                guard: Some(guard.clone()),
+                dry_run: true,
+            }),
+            ..ToolRuntime::default()
+        },
+    );
+
+    let names = registry
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"telegram_send_message".to_string()));
+    assert!(names.contains(&"telegram_send_file".to_string()));
+    assert!(names.contains(&"telegram_react".to_string()));
+
+    let message_payload = registry.execute(
+        "telegram_send_message",
+        &json!({"text": "hello", "parse_mode": "html"}),
+    );
+    let message: serde_json::Value = serde_json::from_str(&message_payload).unwrap();
+    assert_eq!(message["success"], true);
+    assert_eq!(message["parse_mode"], "HTML");
+
+    let file_payload = registry.execute(
+        "telegram_send_file",
+        &json!({"file_path_or_url": "https://example.com/chart.png"}),
+    );
+    let file: serde_json::Value = serde_json::from_str(&file_payload).unwrap();
+    assert_eq!(file["success"], true);
+    assert_eq!(file["type"], "photo");
+    assert_eq!(file["filename"], "chart.png");
+
+    let payload = registry.execute("telegram_react", &json!({"emoji": "🔥"}));
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(value["success"], true);
+    assert_eq!(value["queued"], true);
+    assert_eq!(value["message_id"], 42);
+
+    let pending = guard.lock().unwrap().drain_pending_reactions();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].chat_id, 99);
+    assert_eq!(pending[0].message_id, 42);
+    assert_eq!(pending[0].emoji, "🔥");
+}
+
+#[test]
+fn client_tool_context_exposes_telegram_tools_as_events() {
+    use std::sync::{Arc, Mutex};
+
+    let (_tmp, memory, shell) = registry();
+    let events = Arc::new(Mutex::new(Vec::<ClientToolEvent>::new()));
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        memory.workspace_dir(),
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            client: Some(ClientToolContext::new(7, Some(55), {
+                let events = events.clone();
+                move |event| {
+                    events.lock().unwrap().push(event);
+                    true
+                }
+            })),
+            ..ToolRuntime::default()
+        },
+    );
+
+    let names = registry
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"telegram_send_message".to_string()));
+    assert!(names.contains(&"telegram_send_file".to_string()));
+    assert!(names.contains(&"telegram_react".to_string()));
+
+    let message_payload = registry.execute(
+        "telegram_send_message",
+        &json!({"text": "progress", "parse_mode": "markdown"}),
+    );
+    let message: serde_json::Value = serde_json::from_str(&message_payload).unwrap();
+    assert_eq!(message["success"], true);
+    assert_eq!(message["message_id"], 1);
+    assert_eq!(message["chat_id"], 7);
+
+    let file_payload = registry.execute(
+        "telegram_send_file",
+        &json!({
+            "file_path_or_url": "https://example.com/report.pdf",
+            "caption": "report"
+        }),
+    );
+    let file: serde_json::Value = serde_json::from_str(&file_payload).unwrap();
+    assert_eq!(file["success"], true);
+    assert_eq!(file["message_id"], 2);
+    assert_eq!(file["type"], "document");
+
+    let reaction_payload = registry.execute("telegram_react", &json!({"emoji": "✅"}));
+    let reaction: serde_json::Value = serde_json::from_str(&reaction_payload).unwrap();
+    assert_eq!(reaction["success"], true);
+    assert_eq!(reaction["message_id"], 55);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].event, "text");
+    assert_eq!(events[0].data["content"], "progress");
+    assert_eq!(events[0].data["parse_mode"], "MarkdownV2");
+    assert_eq!(events[0].data["message_id"], 1);
+    assert_eq!(events[1].event, "file");
+    assert_eq!(events[1].data["type"], "document");
+    assert_eq!(events[1].data["path"], "https://example.com/report.pdf");
+    assert_eq!(events[1].data["caption"], "report");
+    assert_eq!(events[2].event, "reaction");
+    assert_eq!(events[2].data["emoji"], "✅");
+    assert_eq!(events[2].data["message_id"], 55);
+}

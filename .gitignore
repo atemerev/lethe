@@ -1,13 +1,3 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
-venv/
-ENV/
-
 # Environment
 .env
 .env.local
@@ -37,12 +27,10 @@ Thumbs.db
 config/blocks/*.pre-actors.*.bak
 
 # Build
+target/
 dist/
-build/
-*.egg-info/
 
-# Legacy
-.letta/
+# Local runtime roots
 workspace/
 
 # Debug logs
@@ -52,9 +40,6 @@ logs/
 dmn_state.md
 ideas.md
 questions.md
-amygdala_state.md
-emotional_tags.md
-.dmn_state_reset_v1
 epost/
 browser/
 thoughts/

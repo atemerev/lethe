@@ -1,465 +1,111 @@
 #!/usr/bin/env bash
 #
-# Lethe Update Script
-# Checks for updates and applies them
-#
+# Lethe Rust updater.
 # Usage: curl -fsSL https://lethe.gg/update | bash
-#
 
 set -euo pipefail
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Config
-REPO_URL="https://github.com/atemerev/lethe.git"
-REPO_OWNER="atemerev"
-REPO_NAME="lethe"
 LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
-CONFIG_DIR="$LETHE_HOME/config"
+INSTALL_DIR="${LETHE_INSTALL_DIR:-$LETHE_HOME/install}"
+BIN_DIR="$LETHE_HOME/bin"
+REPO_OWNER="${LETHE_REPO_OWNER:-atemerev}"
+REPO_NAME="${LETHE_REPO_NAME:-lethe}"
+RELEASE_BASE_URL="${LETHE_RELEASE_BASE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download}"
 
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-print_header() {
-    echo -e "${BLUE}"
-    echo "╔═══════════════════════════════════════════════════════════╗"
-    echo "║                   LETHE UPDATE                            ║"
-    echo "╚═══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+detect_release_target() {
+    local os arch
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "$os:$arch" in
+        Linux:x86_64|Linux:amd64) echo "x86_64-unknown-linux-gnu" ;;
+        Linux:aarch64|Linux:arm64) echo "aarch64-unknown-linux-gnu" ;;
+        Darwin:x86_64|Darwin:amd64) echo "x86_64-apple-darwin" ;;
+        Darwin:aarch64|Darwin:arm64) echo "aarch64-apple-darwin" ;;
+        *) return 1 ;;
+    esac
 }
 
-get_latest_release() {
-    local latest
-    latest="$(curl -fsSL "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)"
-    if [ -z "$latest" ]; then
-        echo "main"
-    else
-        echo "$latest"
-    fi
-}
+install_release_binary() {
+    local target url tmp archive binary
 
-detect_install_mode() {
-    # Container modes take priority — if you installed as container, update as container
-    if [ -f "$HOME/.config/systemd/user/lethe-container.service" ]; then
-        echo "container-podman"
-        return
-    fi
-    # Old nspawn container (pre-v0.15) — migrate to podman
-    if [ -f "/etc/systemd/system/lethe-container.service" ]; then
-        echo "container-nspawn-migrate"
-        return
-    fi
-    if [ -f "$HOME/Library/LaunchAgents/com.lethe.container.plist" ]; then
-        echo "container-apple"
-        return
-    fi
-
-    # Root user: always use system-level service
-    if [[ "$(id -u)" -eq 0 ]]; then
-        if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
-            rm -f "$HOME/.config/systemd/user/lethe.service"
-        fi
-        if [ -f "/etc/systemd/system/lethe.service" ]; then
-            echo "native-systemd-system"
-            return
-        fi
-        echo "native-systemd-system-new"
-        return
-    fi
-
-    # Non-root: check for systemd user service
-    if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
-        echo "native-systemd-user"
-        return
-    fi
-
-    # Check for launchd service (Mac)
-    if [ -f "$HOME/Library/LaunchAgents/com.lethe.agent.plist" ]; then
-        echo "native-launchd"
-        return
-    fi
-
-    echo "unknown"
-}
-
-detect_install_dir() {
-    # 1. Check environment variable
-    if [ -n "${LETHE_INSTALL_DIR:-}" ] && [ -d "$LETHE_INSTALL_DIR/.git" ]; then
-        echo "$LETHE_INSTALL_DIR"
-        return
-    fi
-
-    # 2. Check if running from within install dir
-    local script_dir="$(cd "$(dirname "$0")" && pwd)"
-    if [ -f "$script_dir/pyproject.toml" ] && grep -q "lethe" "$script_dir/pyproject.toml" 2>/dev/null; then
-        echo "$script_dir"
-        return
-    fi
-
-    # 3. Check systemd system service for WorkingDirectory (root installs)
-    if [ -f "/etc/systemd/system/lethe.service" ]; then
-        local wd
-        wd="$(grep "WorkingDirectory=" "/etc/systemd/system/lethe.service" 2>/dev/null | cut -d= -f2 || true)"
-        if [ -n "$wd" ] && [ -d "$wd/.git" ]; then
-            echo "$wd"
-            return
-        fi
-    fi
-
-    # 4. Check systemd user service for WorkingDirectory
-    if [ -f "$HOME/.config/systemd/user/lethe.service" ]; then
-        local wd
-        wd="$(grep "WorkingDirectory=" "$HOME/.config/systemd/user/lethe.service" 2>/dev/null | cut -d= -f2 || true)"
-        if [ -n "$wd" ] && [ -d "$wd/.git" ]; then
-            echo "$wd"
-            return
-        fi
-    fi
-
-    # 5. Check launchd plist for WorkingDirectory
-    if [ -f "$HOME/Library/LaunchAgents/com.lethe.agent.plist" ]; then
-        local wd
-        wd="$(grep -A1 "WorkingDirectory" "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/' || true)"
-        if [ -n "$wd" ] && [ -d "$wd/.git" ]; then
-            echo "$wd"
-            return
-        fi
-    fi
-
-    # 6. Default install location
-    if [ -d "$LETHE_HOME/install/.git" ] && [ -f "$LETHE_HOME/install/pyproject.toml" ]; then
-        echo "$LETHE_HOME/install"
-        return
-    fi
-
-    # Legacy location
-    if [ -d "$HOME/.lethe/.git" ] && [ -f "$HOME/.lethe/pyproject.toml" ]; then
-        echo "$HOME/.lethe"
-        return
-    fi
-
-    echo ""
-}
-
-get_native_version() {
-    local install_dir="$1"
-    if [ -d "$install_dir/.git" ]; then
-        cd "$install_dir"
-        local tag=$(git describe --tags --exact-match 2>/dev/null || echo "")
-        if [ -n "$tag" ]; then
-            echo "$tag"
-        else
-            git rev-parse --short HEAD 2>/dev/null || echo "unknown"
-        fi
-    else
-        echo "unknown"
-    fi
-}
-
-update_native() {
-    local install_dir="$1"
-    local target_version="$2"
-    local skip_sync="${3:-}"
-
-    cd "$install_dir"
-
-    local stash_ref=""
-    local stash_label=""
-    local dirty=""
-    dirty="$(git status --porcelain 2>/dev/null || true)"
-    if [ -n "$dirty" ]; then
-        stash_label="lethe-update-backup-$(date +%Y%m%d-%H%M%S)"
-        warn "Local changes detected. Creating safety stash before update..."
-        git stash push --include-untracked -m "$stash_label" >/dev/null
-        stash_ref="$(git stash list --format='%gd %s' | awk -v label="$stash_label" '$0 ~ label {print $1; exit}')"
-        if [ -n "$stash_ref" ]; then
-            success "Backup created: $stash_ref"
-        else
-            warn "Backup stash created, but reference lookup failed (label: $stash_label)"
-        fi
-    fi
-
-    restore_stash_on_failure() {
-        if [ -z "$stash_ref" ]; then
-            return
-        fi
-        warn "Update failed. Attempting to restore local changes from $stash_ref..."
-        if git stash pop --index "$stash_ref" >/dev/null 2>&1; then
-            success "Local changes restored from $stash_ref"
-        else
-            warn "Could not auto-restore stash cleanly. Backup remains in stash list ($stash_ref)."
-            warn "Restore manually with: git -C $install_dir stash pop --index $stash_ref"
-        fi
-    }
-
-    info "Fetching updates..."
-    if ! git fetch origin --tags; then
-        restore_stash_on_failure
+    if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+        warn "curl and tar are required for binary update."
         return 1
     fi
 
-    if [ "$target_version" != "main" ]; then
-        if ! git checkout "$target_version"; then
-            restore_stash_on_failure
-            return 1
-        fi
-    else
-        if ! git checkout main; then
-            restore_stash_on_failure
-            return 1
-        fi
-        if ! git pull origin main; then
-            restore_stash_on_failure
-            return 1
-        fi
+    if ! target="$(detect_release_target)"; then
+        warn "No binary release target for $(uname -s)/$(uname -m)."
+        return 1
     fi
 
-    # Update dependencies (skip for container mode — deps sync inside the container)
-    if [ "$skip_sync" != "skip-sync" ]; then
-        info "Updating dependencies..."
-        if command -v uv &>/dev/null; then
-            if ! uv sync; then
-                restore_stash_on_failure
-                return 1
-            fi
-        fi
-    fi
-    if [ -n "$stash_ref" ]; then
-        warn "Local pre-update changes were backed up to $stash_ref"
-        warn "Reapply manually if needed: git -C $install_dir stash pop --index $stash_ref"
+    url="$RELEASE_BASE_URL/lethe-$target.tar.gz"
+    tmp="$(mktemp -d)"
+    archive="$tmp/lethe.tar.gz"
+
+    info "Downloading binary release: $url"
+    if ! curl -fsSL "$url" -o "$archive"; then
+        warn "Binary release download failed."
+        rm -rf "$tmp"
+        return 1
     fi
 
-    success "Code updated to $target_version"
+    if ! tar -xzf "$archive" -C "$tmp"; then
+        warn "Binary release archive could not be unpacked."
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    binary="$(find "$tmp" -type f -name lethe -perm -111 | head -n 1)"
+    if [ -z "$binary" ]; then
+        warn "Binary release archive did not contain an executable lethe binary."
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    mkdir -p "$BIN_DIR"
+    cp "$binary" "$BIN_DIR/lethe"
+    chmod +x "$BIN_DIR/lethe"
+    rm -rf "$tmp"
+    success "Updated $BIN_DIR/lethe from binary release"
 }
 
-update_container_podman() {
-    local install_dir="$1"
+if [ "${LETHE_UPDATE_FROM_SOURCE:-0}" != "1" ] && install_release_binary; then
+    exit 0
+fi
 
-    command -v podman &>/dev/null || error "podman not found"
+warn "Falling back to source update."
 
-    info "Stopping container..."
-    systemctl --user stop lethe-container 2>/dev/null || true
+if ! command -v cargo >/dev/null 2>&1; then
+    error "Cargo is required for source update. Install Rust from https://rustup.rs."
+fi
 
-    info "Rebuilding container image..."
-    podman build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
+if ! command -v protoc >/dev/null 2>&1; then
+    error "protoc is required by LanceDB source builds. Install protobuf-compiler/libprotobuf-dev (Debian/Ubuntu), protobuf-compiler/protobuf-devel (Fedora), or protobuf (Homebrew)."
+fi
 
-    info "Starting container..."
-    systemctl --user start lethe-container
-    success "Container updated and restarted"
-    echo ""
-    echo "  View logs: journalctl --user -u lethe-container -f"
-}
+if [ ! -d "$INSTALL_DIR/.git" ]; then
+    error "No Lethe checkout found at $INSTALL_DIR. Set LETHE_INSTALL_DIR or rerun install.sh."
+fi
 
-migrate_nspawn_to_podman() {
-    local install_dir="$1"
+info "Updating checkout: $INSTALL_DIR"
+git -C "$INSTALL_DIR" pull --ff-only
 
-    info "Migrating from nspawn to podman..."
+info "Building release binary..."
+cargo build --release --manifest-path "$INSTALL_DIR/Cargo.toml"
 
-    # Check podman is available
-    if ! command -v podman &>/dev/null; then
-        info "Installing podman..."
-        if command -v dnf &>/dev/null; then
-            sudo dnf install -y podman
-        elif command -v apt-get &>/dev/null; then
-            sudo apt-get update -y && sudo apt-get install -y podman
-        elif command -v pacman &>/dev/null; then
-            sudo pacman -S --noconfirm podman
-        elif command -v zypper &>/dev/null; then
-            sudo zypper install -y podman
-        else
-            error "Could not install podman. Install it manually and re-run."
-        fi
-    fi
+mkdir -p "$BIN_DIR"
+cp "$INSTALL_DIR/target/release/lethe" "$BIN_DIR/lethe"
+chmod +x "$BIN_DIR/lethe"
 
-    # Stop and remove old nspawn service
-    info "Removing old nspawn container..."
-    sudo systemctl stop lethe-container 2>/dev/null || true
-    sudo systemctl disable lethe-container 2>/dev/null || true
-    sudo rm -f "/etc/systemd/system/lethe-container.service"
-    sudo rm -f "/etc/systemd/nspawn/lethe.nspawn"
-    sudo systemctl daemon-reload 2>/dev/null || true
-
-    # Remove nspawn rootfs
-    if [ -d "/var/lib/machines/lethe" ]; then
-        info "Removing old nspawn rootfs..."
-        sudo rm -rf "/var/lib/machines/lethe"
-    fi
-
-    success "Old nspawn container removed"
-
-    # Set up podman via container-setup.sh
-    info "Setting up podman container..."
-    "$install_dir/scripts/container-setup.sh"
-
-    success "Migration complete: nspawn → podman"
-    echo ""
-    echo "  View logs: journalctl --user -u lethe-container -f"
-}
-
-update_container_apple() {
-    local install_dir="$1"
-
-    info "Stopping container..."
-    launchctl unload "$HOME/Library/LaunchAgents/com.lethe.container.plist" 2>/dev/null || true
-
-    # Detect which backend the launch script uses
-    local launch_script="$LETHE_HOME/run-container.sh"
-    if [ -f "$launch_script" ] && grep -q "podman" "$launch_script"; then
-        # Podman backend
-        local podman_bin
-        podman_bin="$(command -v podman || true)"
-        if [ -z "$podman_bin" ]; then
-            error "podman not found"
-        fi
-        podman stop lethe 2>/dev/null || true
-        info "Rebuilding container image..."
-        "$podman_bin" build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
-    else
-        # apple/container backend
-        local container_bin
-        container_bin="$(command -v container || true)"
-        if [ -z "$container_bin" ]; then
-            error "'container' CLI not found. Install: brew install container"
-        fi
-        info "Rebuilding container image..."
-        "$container_bin" build -t lethe:latest -f "$install_dir/Containerfile" "$install_dir"
-    fi
-
-    info "Starting container..."
-    launchctl load "$HOME/Library/LaunchAgents/com.lethe.container.plist"
-    success "Container updated and restarted"
-    echo ""
-    echo "  View logs: tail -f $LETHE_HOME/logs/container.log"
-}
-
-main() {
-    print_header
-
-    local install_mode=$(detect_install_mode)
-    local latest_version=$(get_latest_release)
-    local current_version="unknown"
-
-    echo "  Install mode:   $install_mode"
-
-    local install_dir
-    install_dir=$(detect_install_dir)
-
-    if [ -z "$install_dir" ] || [ ! -d "$install_dir" ]; then
-        error "Could not find Lethe installation directory. Set LETHE_INSTALL_DIR or LETHE_HOME."
-    fi
-
-    current_version=$(get_native_version "$install_dir")
-
-    echo "  Install dir:    $install_dir"
-    echo "  Current:        $current_version"
-    echo "  Latest:         $latest_version"
-    echo ""
-
-    if [ "$current_version" == "$latest_version" ]; then
-        success "Already up to date!"
-        exit 0
-    fi
-
-    info "Update available: $current_version -> $latest_version"
-    echo ""
-
-    case "$install_mode" in
-        container-podman|container-apple|container-nspawn-migrate)
-            update_native "$install_dir" "$latest_version" skip-sync
-            ;;
-        *)
-            update_native "$install_dir" "$latest_version"
-            ;;
-    esac
-
-    case "$install_mode" in
-        container-podman)
-            update_container_podman "$install_dir"
-            ;;
-        container-nspawn-migrate)
-            migrate_nspawn_to_podman "$install_dir"
-            ;;
-        container-apple)
-            update_container_apple "$install_dir"
-            ;;
-        native-systemd-system|native-systemd-system-new|native-systemd-user|native-launchd)
-            # Migrate aux model: gemini-flash -> qwen3-coder-next (v0.4.1+)
-            local env_file="$CONFIG_DIR/.env"
-            if [ -f "$env_file" ] && grep -q "gemini.*flash" "$env_file"; then
-                info "Migrating aux model: gemini-flash -> qwen3-coder-next"
-                sed -i.bak 's|LLM_MODEL_AUX=.*gemini.*flash.*|LLM_MODEL_AUX=openrouter/qwen/qwen3-coder-next|' "$env_file"
-                success "Aux model updated"
-            fi
-
-            if [[ "$install_mode" == "native-systemd-system" ]]; then
-                info "Restarting systemd system service..."
-                systemctl restart lethe
-                success "Service restarted!"
-                echo ""
-                echo "  View logs: journalctl -u lethe -f"
-            elif [[ "$install_mode" == "native-systemd-system-new" ]]; then
-                info "Creating systemd system service..."
-                local uv_bin
-                local uv_bin_dir
-                uv_bin="$(command -v uv || true)"
-                if [ -z "${uv_bin:-}" ]; then
-                    error "uv not found in PATH; cannot create systemd service"
-                fi
-                uv_bin_dir="$(dirname "$uv_bin")"
-                cat > "/etc/systemd/system/lethe.service" << EOF
-[Unit]
-Description=Lethe Autonomous AI Agent
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=$install_dir
-ExecStart=$uv_bin run lethe
-Restart=always
-RestartSec=10
-Environment="PATH=$uv_bin_dir:/usr/local/bin:/usr/bin:/bin"
-Environment="HOME=/root"
-Environment="LETHE_HOME=$LETHE_HOME"
-
-[Install]
-WantedBy=multi-user.target
-EOF
-                systemctl daemon-reload
-                systemctl enable lethe
-                systemctl start lethe
-                success "System service created and started!"
-                echo ""
-                echo "  View logs: journalctl -u lethe -f"
-            elif [[ "$install_mode" == "native-systemd-user" ]]; then
-                info "Restarting systemd user service..."
-                systemctl --user restart lethe
-                success "Service restarted!"
-                echo ""
-                echo "  View logs: journalctl --user -u lethe -f"
-            else
-                info "Restarting launchd service..."
-                launchctl unload "$HOME/Library/LaunchAgents/com.lethe.agent.plist" 2>/dev/null || true
-                launchctl load "$HOME/Library/LaunchAgents/com.lethe.agent.plist"
-                success "Service restarted!"
-                echo ""
-                echo "  View logs: tail -f $LETHE_HOME/logs/lethe.log"
-            fi
-            ;;
-        *)
-            error "Could not detect Lethe installation. Is Lethe installed?"
-            ;;
-    esac
-
-    echo ""
-    success "Update complete! ($current_version -> $latest_version)"
-}
-
-main "$@"
+success "Updated $BIN_DIR/lethe"

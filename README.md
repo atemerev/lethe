@@ -1,29 +1,11 @@
 # Lethe
 
-[![Release](https://img.shields.io/github/v/release/atemerev/lethe?style=flat-square&color=blue)](https://github.com/atemerev/lethe/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 
-Brain-centric cognitive architecture for a long-running AI assistant.
+Lethe is a long-running personal AI assistant with local memory, Telegram and HTTP/SSE transports, background reflection, and focused subagents.
 
-Lethe is built around a simple premise: a useful personal assistant should not be a single chat loop with tools bolted on. It should have memory, attention, background thought, supervision, and delegation as separate runtime systems with clear responsibilities.
-
-Lethe runs 24/7, communicates through Telegram or an HTTP/SSE API, remembers your preferences and projects across sessions, thinks in the background, and delegates focused work to subagents. The system is brain-inspired, but pragmatic: each cognitive module is just software with an explicit interface, tests, and logs.
-
-## Why This Architecture
-
-Most assistants are reactive. They wait for a message, stuff recent chat into a prompt, call tools, and forget the shape of the work once the turn ends.
-
-Lethe is designed as a persistent cognitive system:
-
-- **Executive control:** the cortex handles user-facing decisions and delegates long work.
-- **Associative memory:** the hippocampus recalls notes, prior conversations, and archival memories when they are relevant.
-- **Background cognition:** the DMN runs between user turns, reflecting on goals and surfacing useful signals.
-- **Autonomic supervision:** the brainstem monitors health, resources, releases, and runtime state.
-- **Attention gating:** background notifications pass through scoring, gating, and review before reaching the user.
-- **Focused delegation:** subagents work on bounded tasks with their own tools, state, progress updates, and terminal results.
-
-The result is an assistant that can keep continuity over days, do long-running work without blocking the main conversation, and avoid turning every internal thought into a user notification.
+This v1 branch is the Rust runtime. It builds as a single binary, uses `genai` as the universal LLM router, and intentionally does not include a web console.
 
 ## Architecture
 
@@ -31,328 +13,252 @@ The result is an assistant that can keep continuity over days, do long-running w
                  Telegram / HTTP API
                         |
                         v
-              Cortex: conscious executive
-        user turns, tool use, delegation, replies
+              Cortex: user-facing agent
+        memory, tools, delegation, final replies
                         |
        +----------------+----------------+
        |                |                |
        v                v                v
  Hippocampus       Actor System     Notification Pipeline
- associative       subagents,       scoring, gating,
- recall +          registry,        LLM review,
- salience bias     event bus        transport send
+ recall over       subagents,       scoring, gating,
+ notes/archive/    registry,        and proactive
+ conversations     event bus        transport output
        |                |
        v                +----------------+
  Memory Stack                            |
- blocks, notes,                         v
- archival memory,             Brainstem + DMN
- message history              supervision + background thought
+ markdown blocks,                       v
+ notes, LanceDB archive,       DMN + heartbeat
+ message history              background thought
                         |
                         v
-                 Tool Policy + Tools
-            CLI, files, browser, web, Telegram
+                    Tool Registry
+       files, shell/PTY, browser, web, Telegram/API transport
 ```
 
-This is not a metaphor pasted on top of a monolith. The modules map to code boundaries:
+Core runtime pieces:
 
-| Cognitive System | Code | Responsibility |
-|------------------|------|----------------|
-| **Cortex** | `agent/`, principal actor | User-facing executive control, local tools, delegation, final replies. |
-| **Hippocampus** | `memory/hippocampus.py` | Associative recall over notes, archive, and conversation history. |
-| **Salience tracker** | `memory/salience.py` | Emotional salience tagging and recall bias from active patterns. |
-| **Brainstem** | `actor/brainstem.py` | Startup/runtime supervision, resource checks, update checks, health signals. |
-| **DMN** | `actor/dmn.py` | Background cognition, goal scanning, reflection, and useful signal generation. |
-| **Notification gate** | `notification_*.py` | Turns background signals into reviewed, user-safe notifications. |
-| **Actor registry** | `actor/__init__.py` | Actor lifecycle, event bus, spawn hooks, message routing. |
-| **Tool policy** | `tools/policy.py` | Centralized tool surfaces for cortex, subagents, memory, and Telegram. |
+| Area | Rust modules | Responsibility |
+|------|--------------|----------------|
+| Agent/cortex | `src/agent.rs` | Prompt assembly, LLM calls, tool loop, and actor turn execution. |
+| LLM routing | `src/llm.rs`, `src/models.rs` | `genai` client, OpenRouter/local API base normalization, model metadata. |
+| Memory | `src/store.rs`, `src/memory.rs`, `src/notes.rs`, `src/archival.rs`, `src/messages.rs`, `src/semantic.rs` | Markdown memory blocks, compatible LanceDB recall tables, and SQLite todos. |
+| Recall | `src/hippocampus.rs` | Hybrid lexical/vector recall over notes, archival memories, and conversation history. |
+| Actors | `src/actor.rs`, `src/background.rs` | Resident Kameo actors, supervisor-owned state, mailbox/event routing, autonomous subagent wakeups, persistent DMN. |
+| Notifications | `src/notification.rs`, `src/heartbeat.rs`, `src/runtime.rs` | Background candidate gating and proactive output limits. |
+| Transports | `src/telegram.rs`, `src/api.rs`, `src/conversation.rs` | Telegram polling, HTTP/SSE API, debounce/cancel handling. |
+| Tools | `src/tools/` | Filesystem, shell, PTY terminal, browser, image, web, memory, notes, todos, actors, transport tools. |
 
-### Cognitive Loop
-
-1. A user message enters through Telegram or the API.
-2. Hippocampus decides whether recall is useful and injects relevant memory.
-3. Cortex acts directly for quick work or delegates bounded tasks to subagents.
-4. Subagents work independently, report progress, and return terminal results to cortex.
-5. DMN and brainstem run in the background and emit notification candidates.
-6. Notification scoring/gating/review decides what, if anything, should reach the user.
-7. Curator and salience systems update long-term memory and recall bias over time.
-
-### Transport Runtime
-
-Lethe has two transports with the same core runtime:
-
-- **Telegram mode** polls Telegram and sends direct bot messages.
-- **API mode** exposes `/chat`, `/events`, `/model`, `/cancel`, and `/file`; chat and proactive output are streamed over SSE.
-
-Shared runtime helpers in `src/lethe/runtime.py` own heartbeat routing, active reminder formatting, and proactive message rate limiting. API route handlers receive their dependencies through an `ApiRuntime` container instead of module-level service globals.
-
-### Actors
-
-| Component | Role |
-|-----------|------|
-| **Cortex** | Principal actor. The only actor that speaks to the user directly. |
-| **Subagents** | Spawned on demand for focused work. They report progress every two minutes and return a structured terminal result. |
-| **Actor registry** | Owns actors, lifecycle events, and spawn hooks. Ordinary child actors are auto-started through explicit registry hooks. |
-| **Tool policy** | Centralized tool-name sets define cortex tools, subagent defaults, private/free tools, recall skip lists, and Telegram exclusions. |
-
-Actors use public lifecycle and mailbox APIs (`messages`, `drain_inbox()`, `set_task_handle()`, `recent_messages()`) rather than reaching into each other's private state.
-
-### Memory and recall
-
-| Component | Role |
-|-----------|------|
-| **Memory blocks** | Always-in-context markdown state: identity, human, project. |
-| **Notes** | Tagged durable procedures, conventions, and facts. |
-| **Archival memory** | Long-term semantic storage with hybrid vector/full-text search. |
-| **Message history** | Full local conversation history in LanceDB. |
-| **Hippocampus** | LLM-guided associative recall over notes, archive, and conversation history. |
-| **Salience tracker** | Emotional salience tagging, rolling tag compaction, active-pattern tracking, and emotional recall bias. |
-
-Hippocampus no longer owns salience tagging directly; it calls into `SalienceTracker` and uses active salience patterns only as a recall-bias signal.
-
-### Notification pipeline
-
-Background actors cannot talk to the user directly. They emit typed notification candidates that pass through a deterministic and LLM-reviewed path:
-
-```
-actor user_notify event
-    -> NotificationRouter
-    -> NotificationScoring
-    -> NotificationGate
-    -> NotificationReviewer
-    -> transport send callback
-```
-
-The notification modules are named for their runtime job (`notification_router.py`, `notification_gate.py`, `notification_scoring.py`, `notification_reviewer.py`) and own the implementation directly.
-
-## Install
-
-```bash
-curl -fsSL https://lethe.gg/install | bash
-```
-
-The installer sets up `~/.lethe` as the runtime root, builds an isolated container (podman on Linux, apple/container on macOS), and walks you through provider selection and Telegram bot setup. If an existing workspace is detected, you can reuse it without reconfiguring.
-
-**Prerequisites:** A Telegram bot token and an LLM provider (Anthropic subscription, OpenRouter API key, OpenAI, or a local server). The installer handles all other dependencies.
-
-For native (non-containerized) install: `curl -fsSL https://lethe.gg/install | bash -s -- --yolo`
-
-### Manual install
+## Build
 
 ```bash
 git clone https://github.com/atemerev/lethe.git
 cd lethe
-uv sync
-cp .env.example .env   # edit with your credentials
-uv run lethe
+cp .env.example .env
+cargo build --release
+target/release/lethe check
 ```
 
-### Update / Uninstall
+The LanceDB dependency builds protobuf bindings, so the host needs `protoc` and protobuf headers available.
+
+Native installer:
 
 ```bash
-curl -fsSL https://lethe.gg/update | bash
-curl -fsSL https://lethe.gg/uninstall | bash
+curl -fsSL https://lethe.gg/install | bash
+~/.lethe/bin/lethe check
 ```
 
-### Prompt architecture
+The installer downloads the latest GitHub binary release for the current platform when available. If no release asset matches, it falls back to a local Cargo build. Force source builds with `LETHE_INSTALL_FROM_SOURCE=1`.
 
-System prompt content is split by update lifecycle:
+Run tests:
 
-| Content | Location | Updates |
-|---------|----------|---------|
-| Persona (identity, character) | `workspace/memory/identity.md` | User-editable. Never overwritten. |
-| System instructions | `config/prompts/agent_instructions.md` | Current after `git pull`. |
-| Tools documentation | `config/prompts/agent_tools.md` | Current after `git pull`. |
-| Actor rules | `config/prompts/actor_*.md` | Current after `git pull`. |
-| Notification review | `config/prompts/notification_review.md` | Current after `git pull`. |
+```bash
+cargo test
+cargo build --release
+```
 
-## Security
+Browser automation uses the external `agent-browser` CLI when browser tools are called.
 
-Lethe runs in an isolated container by default:
+## Running
 
-- **Linux**: [Podman](https://podman.io/) rootless container with volume-mounted access only to `~/.lethe` and directories you choose during install.
-- **macOS**: [apple/container](https://github.com/apple/container) (macOS 26+), or [Podman](https://podman.io/) as fallback for Intel Macs / older macOS.
+CLI check is the default when `LETHE_MODE` is unset:
 
-Native mode (`--yolo`) runs without isolation — use at your own risk.
+```bash
+target/release/lethe check
+```
 
-The API server binds to `127.0.0.1` by default. Use a reverse proxy for remote access.
+Telegram long polling:
+
+```bash
+scripts/lethe-telegram-foreground
+# or, without loading the foreground environment wrapper:
+LETHE_MODE=telegram target/release/lethe
+# or
+target/release/lethe telegram run
+```
+
+HTTP API mode:
+
+```bash
+LETHE_MODE=api LETHE_API_TOKEN=change-me target/release/lethe
+# or
+target/release/lethe api --port 8080
+```
+
+API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default). Use a reverse proxy for remote access.
 
 ## LLM Providers
 
-| Provider | Auth | Example model |
-|----------|------|---------------|
-| **Anthropic (subscription)** | `ANTHROPIC_AUTH_TOKEN` | `claude-opus-4-6` |
-| **Anthropic (API key)** | `ANTHROPIC_API_KEY` | `claude-opus-4-6` |
-| **OpenRouter** | `OPENROUTER_API_KEY` | `openrouter/moonshotai/kimi-k2.6` |
-| **OpenAI (API key)** | `OPENAI_API_KEY` | `gpt-5.4` |
-| **OpenAI (subscription)** | `OPENAI_AUTH_TOKEN` | `gpt-5.4` |
-| **Local (llama.cpp)** | `LLM_API_BASE` + `OPENAI_API_KEY=local` | `openai/gemma-4-31B-it-Q8_0.gguf` |
+Lethe routes chat through `genai`. The Rust runtime supports API-key based providers and OpenAI-compatible local servers:
 
-Set `LLM_MODEL` explicitly. The installer writes a default for the chosen provider; manual installs must set it in `.env`.
+| Provider | Auth | Example `LLM_MODEL` |
+|----------|------|---------------------|
+| Anthropic | `ANTHROPIC_API_KEY` or Claude subscription OAuth token file | `claude-opus-4-6` |
+| OpenAI | `OPENAI_API_KEY` | `gpt-5.4` |
+| OpenRouter | `OPENROUTER_API_KEY` | `openrouter/moonshotai/kimi-k2.6` |
+| Local OpenAI-compatible | `LLM_API_BASE` + `OPENAI_API_KEY=local` | `openai/gemma-4-31B-it-Q8_0.gguf` |
 
-**Multi-model support:**
-- `LLM_MODEL_AUX` -- summarization, hippocampus, lightweight background work
-- `LLM_MODEL_DMN` -- DMN model override (defaults to main model)
+`LLM_PROVIDER` is optional. It is useful when a model id does not carry a provider prefix, for example `LLM_PROVIDER=openrouter` with `LLM_MODEL=moonshotai/kimi-k2.6`.
+
+`LLM_MODEL_AUX` defaults to the main model and is used for lightweight/background calls.
+
+For Anthropic subscription/OAuth mode, Lethe reads `ANTHROPIC_AUTH_TOKEN` directly or a Claude token file from `LETHE_ANTHROPIC_OAUTH_TOKENS`. When that variable is unset, it falls back to `$CREDENTIALS_DIR/anthropic_oauth_tokens.json`.
+
+## Configuration
+
+Configuration is read from process environment, a local `.env`, and `$LETHE_HOME/config/.env`.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LETHE_MODE` | `cli`, `telegram`, or `api` | `cli` |
+| `LETHE_HOME` | Runtime root | `~/.lethe` |
+| `WORKSPACE_DIR` | Workspace directory | `$LETHE_HOME/workspace` |
+| `MEMORY_DIR` | Memory data directory | `$LETHE_HOME/data/memory` |
+| `DB_PATH` | SQLite todo database path | `$LETHE_HOME/data/lethe.db` |
+| `LOGS_DIR` | Runtime log directory | `$LETHE_HOME/logs` |
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather | required for Telegram |
+| `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated allowlist | all users |
+| `TELEGRAM_TRANSCRIPTION_ENABLED` | Transcribe Telegram audio/voice | `true` |
+| `LETHE_API_TOKEN` | Bearer or `x-lethe-token` auth for API mode | required for API |
+| `LETHE_API_HOST` | API bind address | `127.0.0.1` |
+| `LETHE_API_PORT` | API port | `8080` |
+| `LLM_PROVIDER` | Optional provider hint | auto |
+| `LLM_MODEL` | Main model | required for chat |
+| `LLM_MODEL_AUX` | Auxiliary model | main model |
+| `LLM_API_BASE` | Custom OpenAI-compatible base URL | unset |
+| `LLM_CONTEXT_LIMIT` | Context size hint | `100000` |
+| `OPENROUTER_API_KEY` | OpenRouter key | unset |
+| `ANTHROPIC_API_KEY` | Anthropic key | unset |
+| `ANTHROPIC_AUTH_TOKEN` | Optional Anthropic OAuth access token | unset |
+| `LETHE_ANTHROPIC_OAUTH_TOKENS` | Optional Anthropic OAuth token file or directory | `$CREDENTIALS_DIR/anthropic_oauth_tokens.json` |
+| `OPENAI_API_KEY` | OpenAI/local-compatible key | unset |
+| `EXA_API_KEY` | Exa search/fetch tools | unset |
+| `LETHE_SEMANTIC_SEARCH_ENABLED` | Enable LanceDB vector search | `true` |
+| `LETHE_EMBEDDING_PROVIDER` | `fastembed` or `hash` | `fastembed` |
+| `LETHE_EMBEDDING_MODEL` | FastEmbed model id | `Snowflake/snowflake-arctic-embed-m-v2.0` |
+| `ACTORS_ENABLED` | Enable actor/subagent system | `true` |
+| `HIPPOCAMPUS_ENABLED` | Enable associative recall | `true` |
+| `CURATOR_ENABLED` | Enable memory curator | `true` |
+| `HEARTBEAT_ENABLED` | Enable proactive heartbeat loop | `true` |
+| `HEARTBEAT_INTERVAL` | Heartbeat interval seconds | `3600` |
+| `PROACTIVE_MAX_PER_DAY` | Proactive message daily limit | `4` |
+| `PROACTIVE_COOLDOWN_MINUTES` | Minimum spacing for proactive messages | `60` |
+| `TRANSCRIPTION_PROVIDER` | `auto`, `openrouter`, `openai`, or `local` | `auto` |
+| `TRANSCRIPTION_MODEL` | STT model override | provider default |
+| `TRANSCRIPTION_LANGUAGE` | Optional language hint | auto |
+| `TRANSCRIPTION_LOCAL_COMMAND` | Local Whisper command | `whisper` |
 
 ## Memory
 
-### Notes (persistent knowledge)
+Lethe stores runtime state under the workspace and data directories:
 
-Tagged markdown files in `~/.lethe/workspace/notes/`:
+- `workspace/memory/identity.md` -- persona and identity, user-editable.
+- `workspace/memory/human.md` -- facts about the user.
+- `workspace/memory/project.md` -- current project/context.
+- `workspace/notes/` -- tagged markdown notes.
+- `$MEMORY_DIR/lancedb/` -- LanceDB tables `archival_memory`, `message_history`, and `notes` using the existing compatible schema.
+- SQLite database at `$DB_PATH` -- todos.
 
-```
-notes/
-  unige_email_via_graph_api.md   # tags: [skill, email, graph-api]
-  use_uv_not_pip.md              # tags: [convention, python]
-  phd_defense_requirements.md    # tags: [education, PhD]
-```
+Core memory block defaults and prompt templates are embedded into the binary, so `lethe check` and first startup work without copying prompt files into the workspace.
 
-Skills, conventions, and durable procedures. Searched by hippocampus on each message. Auto-extracted from archival memory by the curator.
+## Logging
 
-### Memory blocks (core memory)
-
-Always in context. Stored in `workspace/memory/`:
-
-- `identity.md` -- agent persona (user-customizable, never overwritten)
-- `human.md` -- what the agent knows about you
-- `project.md` -- current project context (agent-maintained)
-
-### Archival memory
-
-Long-term semantic storage with hybrid search (vector + full-text). The curator runs on startup to extract valuable entries into notes.
-
-### Salience tags
-
-Emotional salience tags are maintained separately from recall in `workspace/emotional_tags.md`. They are compacted to a rolling window and used to bias future memory search when recent high-arousal patterns are active.
-
-### Message history
-
-Full conversation history, stored locally in LanceDB. Searchable via `conversation_search` tool.
-
-## Running locally with Gemma 4
-
-Lethe runs well with **Gemma 4 31B** on consumer GPUs via [llama.cpp](https://github.com/ggml-org/llama.cpp).
+Lethe writes structured runtime logs to `$LOGS_DIR/lethe.log` and mirrors them to stderr. The default level is `info`; override it with `RUST_LOG`, for example:
 
 ```bash
-# Build llama.cpp with CUDA
-git clone https://github.com/ggml-org/llama.cpp.git && cd llama.cpp
-cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON
-cmake --build build --target llama-server -j$(nproc)
+RUST_LOG=debug scripts/lethe-telegram-foreground
+tail -f ~/.lethe/logs/lethe.log
+```
 
-# Start the server (4x RTX 4090 example)
+Telegram turns, LLM responses, tool calls, tool results, heartbeat failures, and background actor update relay failures are logged for post-mortem debugging.
+
+Full LLM request/response dumps are opt-in because they contain prompts, memory, tool schemas, tool results, and attachments:
+
+```bash
+LLM_DEBUG=true scripts/lethe-telegram-foreground
+ls ~/.lethe/logs/llm/
+```
+
+Override the dump directory with `LLM_DEBUG_DIR`.
+
+## API
+
+All API routes require `Authorization: Bearer <LETHE_API_TOKEN>` or `x-lethe-token`.
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/health` | `GET` | Readiness check. |
+| `/chat` | `POST` | Send a user message and receive SSE response events. |
+| `/events` | `GET` | Subscribe to proactive SSE events. |
+| `/cancel` | `POST` | Cancel active work for a chat. |
+| `/configure` | `POST` | Store user metadata in memory. |
+| `/model` | `GET`/`POST` | Inspect or update main/aux model ids. |
+| `/file?path=...` | `GET` | Serve a workspace file. |
+
+## Local llama.cpp Example
+
+Start an OpenAI-compatible server:
+
+```bash
 ./build/bin/llama-server \
-    --model /path/to/gemma-4-31B-it-Q8_0.gguf \
-    --host 0.0.0.0 --port 8090 \
-    --n-gpu-layers 999 --split-mode tensor \
-    --ctx-size 98304 --flash-attn on \
-    --parallel 2 --cache-ram 32768 \
-    --jinja --reasoning-budget 4096 \
-    --spec-type ngram-mod --spec-ngram-size-n 24 --draft-min 48 --draft-max 64 \
-    -fit off
+  --model /path/to/gemma-4-31B-it-Q8_0.gguf \
+  --host 0.0.0.0 --port 8090 \
+  --ctx-size 98304 \
+  --jinja
 ```
 
 Configure Lethe:
 
 ```bash
-# .env
 LLM_PROVIDER=openai
 LLM_MODEL=openai/gemma-4-31B-it-Q8_0.gguf
 LLM_API_BASE=http://localhost:8090/v1
-LLM_CONTEXT_LIMIT=96000
 OPENAI_API_KEY=local
+LLM_CONTEXT_LIMIT=96000
 ```
-
-Key flags: `--split-mode tensor` for true tensor parallelism across GPUs, `--jinja` for native tool calling, `--reasoning-budget 4096` for thinking mode.
-
-## Configuration
-
-### Environment variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather | required |
-| `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated user IDs | all |
-| `TELEGRAM_TRANSCRIPTION_ENABLED` | Transcribe Telegram voice/audio messages | `true` |
-| `TRANSCRIPTION_PROVIDER` | `auto`, `openrouter`, `openai`, or `local` | `auto` |
-| `TRANSCRIPTION_MODEL` | Whisper/STT model override | provider default |
-| `TRANSCRIPTION_LANGUAGE` | Optional language hint, e.g. `en` | auto-detect |
-| `TRANSCRIPTION_LOCAL_COMMAND` | Local Whisper CLI command | `whisper` |
-| `LLM_PROVIDER` | Force provider | auto-detect |
-| `LLM_MODEL` | Main model | required |
-| `LLM_MODEL_AUX` | Aux model | same as main |
-| `LLM_MODEL_DMN` | DMN model override | same as main |
-| `LLM_API_BASE` | Custom API URL | -- |
-| `LLM_CONTEXT_LIMIT` | Context window size | `100000` |
-| `EXA_API_KEY` | Exa web search | optional |
-| `ACTORS_ENABLED` | Enable actor model | `true` |
-| `HIPPOCAMPUS_ENABLED` | Enable associative recall | `true` |
-| `CURATOR_ENABLED` | Enable startup memory curator | `true` |
-| `HEARTBEAT_INTERVAL` | Heartbeat interval (seconds) | `3600` |
-| `HEARTBEAT_ENABLED` | Enable heartbeat loop | `true` |
-| `PROACTIVE_MAX_PER_DAY` | Proactive message limit | `4` |
-| `PROACTIVE_COOLDOWN_MINUTES` | Min spacing between proactive msgs | `60` |
-| `LETHE_HOME` | Runtime root directory | `~/.lethe` |
-| `LETHE_MODE` | Runtime mode: `api` or Telegram polling | Telegram polling |
-| `LETHE_API_TOKEN` | Bearer token required in API mode | required for API |
-| `LETHE_API_HOST` | API server bind address | `127.0.0.1` |
-| `LETHE_CONSOLE` | Enable local runtime console | `false` |
-| `LETHE_CONSOLE_HOST` | Console bind address | `127.0.0.1` |
-| `LETHE_CONSOLE_PORT` | Console port | `8777` |
-
-### Persona
-
-Edit `workspace/memory/identity.md` to customize personality, purpose, and background. This file is never overwritten by updates.
-
-System instructions (communication style, output format) are in `config/prompts/agent_instructions.md`.
-
-### Container management
-
-The installer creates the container and service automatically. Useful commands:
-
-```bash
-# Linux (podman)
-systemctl --user start lethe-container
-systemctl --user stop lethe-container
-journalctl --user -u lethe-container -f
-podman exec -it lethe /bin/bash                        # shell into container
-podman exec -u 0 -it lethe /bin/bash                   # root shell (install packages)
-
-# macOS (apple/container)
-launchctl load ~/Library/LaunchAgents/com.lethe.container.plist
-launchctl unload ~/Library/LaunchAgents/com.lethe.container.plist
-tail -f ~/.lethe/logs/container.log
-```
-
-Mount additional directories by editing `~/.lethe/config/mounts.conf` and re-running `scripts/container-setup.sh`.
 
 ## Development
 
 ```bash
-uv run pytest
-uv run pytest tests/test_notes.py -v
+cargo fmt --check
+cargo test
+cargo build --release
 ```
 
-### Project structure
+Build a local release archive:
 
+```bash
+cargo build --release
+scripts/package-release
+ls dist/
 ```
-src/lethe/
-  actor/       -- actor model (cortex, dmn, brainstem, subagents)
-  agent/       -- runtime orchestration
-  memory/      -- blocks, LanceDB, notes, hippocampus, salience, curator, LLM client
-  context/     -- provider-specific prompt/context assembly
-  tools/       -- CLI, files, web, browser, Telegram
-  tools/policy.py -- centralized tool policy sets
-  telegram/    -- Telegram bot interface
-  conversation/ -- conversation management
-  notification_*.py -- background user-notification routing, gating, review
-  runtime.py   -- shared runtime helpers
-  api.py       -- HTTP API routes and API runtime container
-  main.py      -- service entry point and transport wiring
-  paths.py     -- centralized path derivation from LETHE_HOME
 
-config/
-  blocks/      -- seed memory blocks
-  prompts/     -- system, actor, heartbeat, and notification prompts
-  workspace/   -- workspace seed files (copied once on first run)
+Tagged pushes (`v*`) build GitHub release assets named `lethe-<target>.tar.gz`; `install.sh` and `update.sh` consume those assets from the latest release.
+
+Useful smoke checks:
+
+```bash
+target/release/lethe check
+target/release/lethe telegram split "hello from lethe"
 ```
 
 ## License

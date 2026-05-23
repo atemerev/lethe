@@ -1,26 +1,45 @@
-FROM registry.fedoraproject.org/fedora-minimal:43
+FROM rust:1.88-slim AS builder
 
-RUN microdnf install -y --setopt=install_weak_deps=0 \
-        python3.12 git sudo curl findutils \
-        which file tar gzip unzip diffutils procps-ng \
-        ffmpeg-free \
-    && microdnf clean all \
-    && useradd -m -d /home/lethe -s /bin/bash lethe \
-    && echo 'lethe ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/lethe
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        build-essential \
+        pkg-config \
+        protobuf-compiler \
+        libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/lethe
-ENV UV_CACHE_DIR=/tmp/uv-cache
-ENV HOME=/home/lethe
 
-COPY pyproject.toml uv.lock ./
+COPY Cargo.toml Cargo.lock ./
+COPY config/ config/
 COPY src/ src/
-RUN uv sync --frozen \
-    && find .venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null \
-    && rm -rf /tmp/uv-cache \
-    && chown -R lethe:lethe /opt/lethe
 
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        diffutils \
+        ffmpeg \
+        file \
+        findutils \
+        git \
+        procps \
+        unzip \
+        which \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -d /home/lethe -s /bin/bash lethe
+
+WORKDIR /opt/lethe
+
+COPY --from=builder /opt/lethe/target/release/lethe /usr/local/bin/lethe
+COPY config/ config/
+
+ENV HOME=/home/lethe
 USER lethe
 
-ENTRYPOINT ["uv", "run", "lethe"]
+ENTRYPOINT ["lethe"]
