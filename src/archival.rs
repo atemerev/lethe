@@ -23,6 +23,7 @@ use crate::semantic::{
 
 const TABLE_NAME: &str = "archival_memory";
 const INIT_ID: &str = "_init_";
+const SEARCH_RESULT_MAX_LINES: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum ArchivalError {
@@ -266,10 +267,10 @@ impl ArchivalMemory {
                 String::new()
             };
             lines.push(format!(
-                "\n- [{}] {} ({tags}{score})\n  {}",
+                "\n- [{}] {} ({tags}{score})\n{}",
                 entry.created_at,
                 entry.id,
-                preview(&entry.text, 300).replace('\n', " ")
+                indent_block(&search_result_text(&entry.text), "  ")
             ));
         }
         lines.join("\n")
@@ -506,8 +507,26 @@ fn clean_tags(tags: &[String]) -> Vec<String> {
     clean
 }
 
-fn preview(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
+fn search_result_text(text: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= SEARCH_RESULT_MAX_LINES {
+        return text.to_string();
+    }
+    format!(
+        "{}\n[... {} more lines]",
+        lines[..SEARCH_RESULT_MAX_LINES].join("\n"),
+        lines.len() - SEARCH_RESULT_MAX_LINES
+    )
+}
+
+fn indent_block(text: &str, prefix: &str) -> String {
+    if text.is_empty() {
+        return prefix.to_string();
+    }
+    text.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn db_uri(path: &Path) -> String {
@@ -586,6 +605,27 @@ mod tests {
             .unwrap();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].text.contains("cargo fmt"));
+    }
+
+    #[test]
+    fn format_entries_preserves_search_result_lines() {
+        let text = (0..60)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let formatted = ArchivalMemory::format_entries(&[ArchivalEntry {
+            id: "mem-test".to_string(),
+            text,
+            metadata: json!({}),
+            tags: vec![],
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            score: 0.0,
+        }]);
+
+        assert!(formatted.contains("  line 0\n  line 1"));
+        assert!(formatted.contains("  line 49"));
+        assert!(!formatted.contains("line 50"));
+        assert!(formatted.contains("[... 10 more lines]"));
     }
 
     #[test]
