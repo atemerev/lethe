@@ -17,27 +17,24 @@ path = "src/main.rs"
 anyhow = "1.0"
 async-stream = "0.3"
 axum = "0.8"
-arrow-array = "58"
-arrow-schema = "58"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 dotenvy = "0.15"
 fastembed = "5.13"
-futures = "0.3"
 genai = "0.5.3"
 glob = "0.3"
 hf-hub = "0.5"
 kameo = "0.20"
-lancedb = "0.29"
 portable-pty = "0.8"
 rand = "0.9"
 regex = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "load_extension"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+sqlite-vec = "0.1"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
