@@ -13,22 +13,22 @@ use crate::actor::{
     ActorConfig, ActorError, ActorRegistry, ActorRunSpec, ActorRuntime, ActorTurnExecutor,
     ModelTier,
 };
-use crate::background::{
-    BackgroundResult, collect_user_notifications_from_events, queue_dmn_heartbeat,
-};
 use crate::config::Settings;
-use crate::curator::{CuratorError, CuratorRunStats, MemoryCurator};
-use crate::hippocampus::{Hippocampus, HippocampusConfig, HippocampusError};
+use crate::conversation::notification::NotificationGate;
+use crate::interfaces::telegram::TelegramClient;
+use crate::llm::prompts::PromptStore;
+use crate::llm::response_format::normalize_message_envelope;
 use crate::llm::{
     LlmAttachment, LlmMessage, LlmRole, LlmRouter, LlmRouterConfig, build_chat_request,
 };
-use crate::message_metadata::MessageMetadata;
-use crate::messages::{MessageHistoryError, StoredMessage};
-use crate::notification::NotificationGate;
-use crate::prompts::PromptStore;
-use crate::response_format::normalize_message_envelope;
+use crate::memory::message_metadata::MessageMetadata;
+use crate::memory::messages::{MessageHistoryError, StoredMessage};
+use crate::memory::recall::{Hippocampus, HippocampusConfig, HippocampusError};
+use crate::scheduler::background::{
+    BackgroundResult, collect_user_notifications_from_events, queue_dmn_heartbeat,
+};
+use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::store::{MemoryStore, MemoryStoreError};
-use crate::telegram::TelegramClient;
 use crate::tools::registry::{ActorToolContext, SharedActorRegistry, ToolRegistry, ToolRuntime};
 use crate::tools::shell::ShellTools;
 
@@ -1396,7 +1396,7 @@ mod tests {
 
     use super::*;
     use crate::config::{RuntimeMode, Settings};
-    use crate::message_metadata::{MessageKind, MessageVisibility, metadata_value};
+    use crate::memory::message_metadata::{MessageKind, MessageVisibility, metadata_value};
 
     fn settings(root: &std::path::Path) -> Settings {
         Settings {

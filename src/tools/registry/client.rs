@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::{Value, json};
 
-use crate::telegram::{TelegramFilePlan, telegram_parse_mode};
+use crate::interfaces::telegram::{TelegramFilePlan, telegram_parse_mode};
 
 use super::payload::tool_error_payload;
 

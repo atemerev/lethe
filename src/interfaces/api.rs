@@ -20,13 +20,13 @@ use uuid::Uuid;
 use crate::agent::{Agent, AgentOptions};
 use crate::config::Settings;
 use crate::conversation::{ConversationManager, ProcessCallback, ProcessContext};
-use crate::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig};
-use crate::message_metadata::{
+use crate::llm::models::{available_providers, provider_for_model};
+use crate::llm::prompts::PromptStore;
+use crate::memory::message_metadata::{
     MessageKind, MessageVisibility, metadata_value as message_metadata_value,
 };
-use crate::models::{available_providers, provider_for_model};
-use crate::prompts::PromptStore;
-use crate::runtime::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
+use crate::scheduler::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig};
+use crate::scheduler::proactive::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
 use crate::todos::{TodoFilter, TodoManager};
 use crate::tools::registry::{ClientToolContext, ToolRuntime};
 

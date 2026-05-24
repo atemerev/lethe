@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
 
-use crate::truncate::{
+use crate::llm::truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, format_truncation_notice, truncate_tail,
 };
 

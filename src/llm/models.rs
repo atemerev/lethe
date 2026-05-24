@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-const EMBEDDED_MODEL_CATALOG: &str = include_str!("../config/model_catalog.json");
+const EMBEDDED_MODEL_CATALOG: &str = include_str!("../../config/model_catalog.json");
 
 pub type ModelCatalog = BTreeMap<String, BTreeMap<String, Vec<ModelEntry>>>;
 

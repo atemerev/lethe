@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::archival::{ArchivalEntry, ArchivalError};
-use crate::message_metadata::MessageMetadata;
-use crate::messages::{MessageHistoryError, StoredMessage};
-use crate::notes::{NoteError, NoteSearchResult, parse_frontmatter};
+use crate::memory::archival::{ArchivalEntry, ArchivalError};
+use crate::memory::message_metadata::MessageMetadata;
+use crate::memory::messages::{MessageHistoryError, StoredMessage};
+use crate::memory::notes::{NoteError, NoteSearchResult, parse_frontmatter};
 use crate::store::{MemoryStore, MemoryStoreError};
 
 const MAX_RECALL_LINES: usize = 500;
@@ -15,11 +15,11 @@ const MAX_CONVERSATION_ENTRY_CHARS: usize = 12_000;
 const MIN_SCORE_THRESHOLD: f64 = 0.3;
 const SEARCH_RESULT_SKIP_TOOLS: &[&str] = &["conversation_search", "archival_search"];
 
-const ACAUSAL_WARNING: &str = include_str!("../config/prompts/hippocampus_acausal_warning.md");
-const NOTES_HEADER: &str = include_str!("../config/prompts/hippocampus_notes_header.md");
-const ARCHIVAL_HEADER: &str = include_str!("../config/prompts/hippocampus_archival_header.md");
+const ACAUSAL_WARNING: &str = include_str!("../../config/prompts/hippocampus_acausal_warning.md");
+const NOTES_HEADER: &str = include_str!("../../config/prompts/hippocampus_notes_header.md");
+const ARCHIVAL_HEADER: &str = include_str!("../../config/prompts/hippocampus_archival_header.md");
 const CONVERSATION_HEADER: &str =
-    include_str!("../config/prompts/hippocampus_conversation_header.md");
+    include_str!("../../config/prompts/hippocampus_conversation_header.md");
 
 #[derive(Debug, Error)]
 pub enum HippocampusError {

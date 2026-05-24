@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::message_metadata::{MessageKind, MessageVisibility, annotate_value};
-use crate::response_format::message_envelope_segments;
+use crate::llm::response_format::message_envelope_segments;
+use crate::memory::message_metadata::{MessageKind, MessageVisibility, annotate_value};
 
 #[derive(Debug, Error)]
 pub enum TelegramError {

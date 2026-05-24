@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Settings;
-use crate::prompts::PromptStore;
+use crate::llm::prompts::PromptStore;
 
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 60 * 60;
 pub const FULL_CONTEXT_INTERVAL_SECONDS: u64 = 2 * 60 * 60;

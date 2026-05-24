@@ -3,37 +3,39 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use clap::{Parser, Subcommand};
 use lethe::actor::ActorNamedEvent;
 use lethe::agent::{Agent, AgentOptions};
-use lethe::archival::ArchivalMemory;
 use lethe::config::{RuntimeMode, Settings};
+use lethe::conversation::transcription::{
+    choose_transcription_provider, default_model_for_provider, infer_audio_format, transcribe_audio,
+};
 use lethe::conversation::{ConversationManager, ProcessCallback, ProcessContext};
-use lethe::curator::MemoryCurator;
-use lethe::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig, render_summary_prompt};
-use lethe::hippocampus::{Hippocampus, HippocampusConfig};
-use lethe::llm::{
-    LlmAttachment, LlmMessage, LlmRouter, LlmRouterConfig, llm_auth_mode_for_settings,
-};
-use lethe::memory::BlockManager;
-use lethe::message_metadata::{
-    MessageKind, MessageVisibility, annotate_map, metadata_value as message_metadata_value,
-};
-use lethe::messages::MessageHistory;
-use lethe::notes::NoteStore;
-use lethe::prompts::{PromptSource, PromptStore};
-use lethe::runtime::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
-use lethe::store::MemoryStore;
-use lethe::telegram::{
+use lethe::interfaces::telegram::{
     IncomingTelegramText, SharedTelegramTurnGuard, TelegramClient, TelegramToolContext,
     TelegramTurnGuard, VisibleTelegramChannel, image_mime_type_from_path, is_emoji_only_reply,
     split_telegram_messages,
 };
+use lethe::llm::prompts::{PromptSource, PromptStore};
+use lethe::llm::{
+    LlmAttachment, LlmMessage, LlmRouter, LlmRouterConfig, llm_auth_mode_for_settings,
+};
+use lethe::memory::BlockManager;
+use lethe::memory::archival::ArchivalMemory;
+use lethe::memory::message_metadata::{
+    MessageKind, MessageVisibility, annotate_map, metadata_value as message_metadata_value,
+};
+use lethe::memory::messages::MessageHistory;
+use lethe::memory::notes::NoteStore;
+use lethe::memory::recall::{Hippocampus, HippocampusConfig};
+use lethe::scheduler::curator::MemoryCurator;
+use lethe::scheduler::heartbeat::{
+    Heartbeat, HeartbeatAction, HeartbeatConfig, render_summary_prompt,
+};
+use lethe::scheduler::proactive::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
+use lethe::store::MemoryStore;
 use lethe::todos::{NewTodo, TodoFilter, TodoManager, TodoPriority, TodoStatus, TodoUpdate};
 use lethe::tools::filesystem::FileTools;
 use lethe::tools::registry::ToolRuntime;
 use lethe::tools::shell::{DEFAULT_TIMEOUT_SECONDS, ShellTools};
 use lethe::tools::web::WebTools;
-use lethe::transcription::{
-    choose_transcription_provider, default_model_for_provider, infer_audio_format, transcribe_audio,
-};
 use rand::Rng as _;
 use serde_json::json;
 use std::collections::HashSet;
@@ -855,7 +857,7 @@ fn metadata_map_from_value(
 async fn api_command(port: Option<u16>) -> Result<()> {
     let settings = Settings::from_env();
     let port = port.unwrap_or(settings.lethe_api_port);
-    lethe::api::serve(settings, port).await
+    lethe::interfaces::api::serve(settings, port).await
 }
 
 fn prompt_store(settings: &Settings) -> PromptStore {

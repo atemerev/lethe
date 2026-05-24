@@ -103,21 +103,29 @@ fn prompt_file_name(name: &str) -> String {
 
 fn embedded_prompt(name: &str) -> Option<&'static str> {
     match name.trim_end_matches(".md") {
-        "agent_instructions" => Some(include_str!("../config/prompts/agent_instructions.md")),
-        "agent_tools" => Some(include_str!("../config/prompts/agent_tools.md")),
-        "llm_summarize" => Some(include_str!("../config/prompts/llm_summarize.md")),
-        "llm_summarize_update" => Some(include_str!("../config/prompts/llm_summarize_update.md")),
-        "llm_summarize_system" => Some(include_str!("../config/prompts/llm_summarize_system.md")),
-        "notification_review" => Some(include_str!("../config/prompts/notification_review.md")),
-        "heartbeat_message" => Some(include_str!("../config/prompts/heartbeat_message.md")),
-        "heartbeat_message_full" => {
-            Some(include_str!("../config/prompts/heartbeat_message_full.md"))
+        "agent_instructions" => Some(include_str!("../../config/prompts/agent_instructions.md")),
+        "agent_tools" => Some(include_str!("../../config/prompts/agent_tools.md")),
+        "llm_summarize" => Some(include_str!("../../config/prompts/llm_summarize.md")),
+        "llm_summarize_update" => {
+            Some(include_str!("../../config/prompts/llm_summarize_update.md"))
         }
-        "heartbeat_summarize" => Some(include_str!("../config/prompts/heartbeat_summarize.md")),
-        "llm_heartbeat_system" => Some(include_str!("../config/prompts/llm_heartbeat_system.md")),
-        "hippocampus_relevance" => Some(include_str!("../config/prompts/hippocampus_relevance.md")),
-        "hippocampus_analyze" => Some(include_str!("../config/prompts/hippocampus_analyze.md")),
-        "notes_extract" => Some(include_str!("../config/prompts/notes_extract.md")),
+        "llm_summarize_system" => {
+            Some(include_str!("../../config/prompts/llm_summarize_system.md"))
+        }
+        "notification_review" => Some(include_str!("../../config/prompts/notification_review.md")),
+        "heartbeat_message" => Some(include_str!("../../config/prompts/heartbeat_message.md")),
+        "heartbeat_message_full" => Some(include_str!(
+            "../../config/prompts/heartbeat_message_full.md"
+        )),
+        "heartbeat_summarize" => Some(include_str!("../../config/prompts/heartbeat_summarize.md")),
+        "llm_heartbeat_system" => {
+            Some(include_str!("../../config/prompts/llm_heartbeat_system.md"))
+        }
+        "hippocampus_relevance" => Some(include_str!(
+            "../../config/prompts/hippocampus_relevance.md"
+        )),
+        "hippocampus_analyze" => Some(include_str!("../../config/prompts/hippocampus_analyze.md")),
+        "notes_extract" => Some(include_str!("../../config/prompts/notes_extract.md")),
         _ => None,
     }
 }

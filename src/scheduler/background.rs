@@ -8,11 +8,11 @@ use crate::actor::{
     ActorConfig, ActorError, ActorNamedEvent, ActorRegistry, ActorRuntime, ActorSupervisor,
     MessageIntent, ModelTier,
 };
-use crate::curator::CuratorRunStats;
-use crate::notification::{
+use crate::conversation::notification::{
     GateAction, GateDecision, NotificationAssessment, NotificationGate, NotificationScoring,
     UserNotificationSignal,
 };
+use crate::scheduler::curator::CuratorRunStats;
 
 pub const DMN_ACTOR_NAME: &str = "dmn";
 
@@ -237,7 +237,7 @@ mod tests {
 
     use super::*;
     use crate::actor::ActorConfig;
-    use crate::notification::{NotificationCategory, NotificationSource};
+    use crate::conversation::notification::{NotificationCategory, NotificationSource};
 
     fn registry() -> (ActorRegistry, String) {
         let mut registry = ActorRegistry::new();

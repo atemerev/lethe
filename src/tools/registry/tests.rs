@@ -284,7 +284,7 @@ fn exposes_and_executes_actor_tools_when_context_is_present() {
 fn exposes_and_executes_telegram_tools_when_context_is_present() {
     use std::sync::{Arc, Mutex};
 
-    use crate::telegram::{TelegramToolContext, TelegramTurnGuard};
+    use crate::interfaces::telegram::{TelegramToolContext, TelegramTurnGuard};
 
     let (_tmp, memory, shell) = registry();
     let guard = Arc::new(Mutex::new(TelegramTurnGuard::new()));

@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::archival::ArchivalError;
-use crate::message_metadata::MessageMetadata;
-use crate::messages::{MessageHistoryError, StoredMessage};
+use crate::memory::archival::ArchivalError;
+use crate::memory::message_metadata::MessageMetadata;
+use crate::memory::messages::{MessageHistoryError, StoredMessage};
 use crate::store::{MemoryStore, MemoryStoreError};
 
 pub const CURATOR_CADENCE_SECONDS: i64 = 6 * 60 * 60;

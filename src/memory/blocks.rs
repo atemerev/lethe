@@ -323,16 +323,16 @@ fn enforce_limit(value: &str, limit: usize) -> MemoryResult<()> {
 
 fn embedded_block(name: &str) -> Option<&'static str> {
     match name {
-        "identity" => Some(include_str!("../config/blocks/identity.md")),
-        "human" => Some(include_str!("../config/blocks/human.md")),
-        "project" => Some(include_str!("../config/blocks/project.md")),
+        "identity" => Some(include_str!("../../config/blocks/identity.md")),
+        "human" => Some(include_str!("../../config/blocks/human.md")),
+        "project" => Some(include_str!("../../config/blocks/project.md")),
         _ => None,
     }
 }
 
 fn embedded_meta(name: &str) -> Option<&'static str> {
     match name {
-        "identity" => Some(include_str!("../config/blocks/identity.meta.json")),
+        "identity" => Some(include_str!("../../config/blocks/identity.meta.json")),
         _ => None,
     }
 }

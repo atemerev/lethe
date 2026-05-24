@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use genai::chat::Tool;
 
 use crate::actor::ActorRuntime;
+use crate::interfaces::telegram::TelegramToolContext;
 use crate::store::MemoryStore;
-use crate::telegram::TelegramToolContext;
 use crate::tools::browser::BrowserTools;
 use crate::tools::filesystem::FileTools;
 use crate::tools::image::ImageTools;

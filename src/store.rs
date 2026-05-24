@@ -5,11 +5,11 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::archival::{ArchivalEntry, ArchivalError, ArchivalMemory};
 use crate::config::Settings;
-use crate::memory::{BlockManager, MemoryBlock, MemoryError};
-use crate::messages::{MessageHistory, MessageHistoryError, StoredMessage};
-use crate::notes::{NoteError, NoteSearchResult, NoteStore};
+use crate::memory::archival::{ArchivalEntry, ArchivalError, ArchivalMemory};
+use crate::memory::messages::{MessageHistory, MessageHistoryError, StoredMessage};
+use crate::memory::notes::{NoteError, NoteSearchResult, NoteStore};
+use crate::memory::{BlockManager, MemoryBlock, MemoryDb, MemoryError};
 
 #[derive(Debug, Error)]
 pub enum MemoryStoreError {
@@ -23,6 +23,8 @@ pub enum MemoryStoreError {
     Notes(#[from] NoteError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 pub type MemoryStoreResult<T> = Result<T, MemoryStoreError>;
@@ -43,17 +45,17 @@ pub struct MemoryStore {
     pub messages: MessageHistory,
     pub notes: NoteStore,
     db_path: PathBuf,
-    lancedb_dir: PathBuf,
+    memory_data_path: PathBuf,
     workspace_dir: PathBuf,
 }
 
 impl MemoryStore {
     pub fn from_settings(settings: &Settings) -> MemoryStoreResult<Self> {
-        Self::open_with_lancedb(
+        Self::open_with_data_path(
             &settings.workspace_dir,
             &settings.db_path,
             &settings.notes_dir,
-            settings.memory_dir.join("lancedb"),
+            settings.memory_dir.join("lethe-memory.db"),
         )
     }
 
@@ -65,20 +67,20 @@ impl MemoryStore {
         let workspace_dir = workspace_dir.into();
         let db_path = db_path.into();
         let notes_dir = notes_dir.into();
-        let lancedb_dir = lancedb_dir_for(&db_path);
-        Self::open_with_lancedb(workspace_dir, db_path, notes_dir, lancedb_dir)
+        let memory_data_path = memory_data_path_for(&db_path);
+        Self::open_with_data_path(workspace_dir, db_path, notes_dir, memory_data_path)
     }
 
-    pub fn open_with_lancedb(
+    pub fn open_with_data_path(
         workspace_dir: impl Into<PathBuf>,
         db_path: impl Into<PathBuf>,
         notes_dir: impl Into<PathBuf>,
-        lancedb_dir: impl Into<PathBuf>,
+        memory_data_path: impl Into<PathBuf>,
     ) -> MemoryStoreResult<Self> {
         let workspace_dir = workspace_dir.into();
         let db_path = db_path.into();
         let notes_dir = notes_dir.into();
-        let lancedb_dir = lancedb_dir.into();
+        let memory_data_path = memory_data_path.into();
 
         fs::create_dir_all(&workspace_dir)?;
         fs::create_dir_all(workspace_dir.join("projects"))?;
@@ -86,9 +88,10 @@ impl MemoryStore {
 
         let blocks = BlockManager::new(workspace_dir.join("memory"))?;
         blocks.init_embedded_defaults()?;
-        let archival = ArchivalMemory::open(&lancedb_dir)?;
-        let messages = MessageHistory::open(&lancedb_dir)?;
-        let notes = NoteStore::new_with_lancedb(notes_dir, &lancedb_dir)?;
+        let memory_db = MemoryDb::open(&memory_data_path)?;
+        let archival = ArchivalMemory::from_db(memory_db.clone());
+        let messages = MessageHistory::open(&memory_data_path)?;
+        let notes = NoteStore::new_with_db(notes_dir, memory_db)?;
 
         Ok(Self {
             blocks,
@@ -96,7 +99,7 @@ impl MemoryStore {
             messages,
             notes,
             db_path,
-            lancedb_dir,
+            memory_data_path,
             workspace_dir,
         })
     }
@@ -105,8 +108,8 @@ impl MemoryStore {
         &self.db_path
     }
 
-    pub fn lancedb_dir(&self) -> &Path {
-        &self.lancedb_dir
+    pub fn memory_data_path(&self) -> &Path {
+        &self.memory_data_path
     }
 
     pub fn workspace_dir(&self) -> &Path {
@@ -292,11 +295,11 @@ fn format_timestamp(time: DateTime<Utc>) -> String {
         .to_string()
 }
 
-fn lancedb_dir_for(db_path: &Path) -> PathBuf {
+fn memory_data_path_for(db_path: &Path) -> PathBuf {
     db_path
         .parent()
-        .map(|parent| parent.join("memory").join("lancedb"))
-        .unwrap_or_else(|| PathBuf::from("memory").join("lancedb"))
+        .map(|parent| parent.join("memory").join("lethe-memory.db"))
+        .unwrap_or_else(|| PathBuf::from("memory").join("lethe-memory.db"))
 }
 
 fn normalized_limit(limit: usize, default: usize) -> usize {

@@ -2,28 +2,16 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
-use anyhow::{Context, Result as AnyhowResult, anyhow};
-use arrow_array::RecordBatch;
-use arrow_schema::{DataType, Field, Schema};
 use chrono::Utc;
-use futures::TryStreamExt;
-use lancedb::index::Index;
-use lancedb::index::scalar::FtsIndexBuilder;
-use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::semantic::{
-    EmbeddingEngine, LEGACY_EMBEDDING_DIMENSIONS, VECTOR_COLUMN, distance_column, run_lancedb,
-    string_column, utf8_array, vector_array,
-};
-
-const TABLE_NAME: &str = "notes";
-const INIT_ID: &str = "_init_";
+use super::search::{clean_tags, query_terms};
+use super::store::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
 
 #[derive(Debug, Error)]
 pub enum NoteError {
@@ -38,7 +26,9 @@ pub enum NoteError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Lance(#[from] anyhow::Error),
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Embedding(#[from] anyhow::Error),
 }
 
 pub type NoteResult<T> = Result<T, NoteError>;
@@ -72,20 +62,7 @@ pub struct NoteSearchResult {
 #[derive(Clone, Debug)]
 pub struct NoteStore {
     notes_dir: PathBuf,
-    lancedb_dir: Option<PathBuf>,
-    embedder: Option<EmbeddingEngine>,
-}
-
-#[derive(Debug)]
-struct NoteRow {
-    id: String,
-    title: String,
-    text: String,
-    tags: String,
-    file_path: String,
-    vector: Vec<f32>,
-    created_at: String,
-    updated_at: String,
+    db: Option<MemoryDb>,
 }
 
 impl NoteStore {
@@ -94,25 +71,29 @@ impl NoteStore {
         fs::create_dir_all(&notes_dir)?;
         Ok(Self {
             notes_dir,
-            lancedb_dir: None,
-            embedder: None,
+            db: None,
         })
     }
 
-    pub fn new_with_lancedb(
+    pub fn new_with_data_path(
         notes_dir: impl Into<PathBuf>,
-        lancedb_dir: impl Into<PathBuf>,
+        data_path: impl Into<PathBuf>,
     ) -> NoteResult<Self> {
         let notes_dir = notes_dir.into();
-        let lancedb_dir = lancedb_dir.into();
         fs::create_dir_all(&notes_dir)?;
-        let store = Self {
+        Ok(Self {
             notes_dir,
-            embedder: Some(EmbeddingEngine::from_env(&lancedb_dir)),
-            lancedb_dir: Some(lancedb_dir),
-        };
-        store.ensure_lancedb_schema()?;
-        Ok(store)
+            db: Some(MemoryDb::open(data_path)?),
+        })
+    }
+
+    pub fn new_with_db(notes_dir: impl Into<PathBuf>, db: MemoryDb) -> NoteResult<Self> {
+        let notes_dir = notes_dir.into();
+        fs::create_dir_all(&notes_dir)?;
+        Ok(Self {
+            notes_dir,
+            db: Some(db),
+        })
     }
 
     pub fn create(
@@ -186,7 +167,7 @@ impl NoteStore {
         limit: usize,
     ) -> NoteResult<Vec<NoteSearchResult>> {
         let query = query.trim();
-        let query_terms = query_terms(query);
+        let query_terms_list = query_terms(query);
         let tag_filter = clean_tags(tags.unwrap_or_default());
         let mut results = Vec::new();
 
@@ -205,8 +186,8 @@ impl NoteStore {
             } else {
                 meta.title
             };
-            let score = score_note(query, &query_terms, &title, &note_tags, &body);
-            if score <= 0.0 && !query_terms.is_empty() {
+            let score = score_note(query, &query_terms_list, &title, &note_tags, &body);
+            if score <= 0.0 && !query_terms_list.is_empty() {
                 continue;
             }
             results.push(NoteSearchResult {
@@ -219,7 +200,7 @@ impl NoteStore {
             });
         }
 
-        if let Some(mut indexed) = self.search_lancedb(query, limit * 3)? {
+        if let Some(mut indexed) = self.search_vector(query, limit * 3)? {
             for result in indexed.drain(..) {
                 if !tag_filter.is_empty() && !tag_filter.iter().all(|tag| result.tags.contains(tag))
                 {
@@ -251,7 +232,7 @@ impl NoteStore {
 
     pub fn reindex(&self) -> NoteResult<usize> {
         let files = self.markdown_files()?;
-        self.rebuild_lancedb(&files)?;
+        self.rebuild_data(&files)?;
         Ok(files.len())
     }
 
@@ -326,270 +307,148 @@ impl NoteStore {
         Ok(self.notes_dir.join(path))
     }
 
-    fn ensure_lancedb_schema(&self) -> NoteResult<()> {
-        let Some(lancedb_dir) = &self.lancedb_dir else {
-            return Ok(());
-        };
-        fs::create_dir_all(lancedb_dir)?;
-        let db_path = db_uri(lancedb_dir);
-        run_lancedb(async move {
-            let db = lancedb::connect(&db_path).execute().await?;
-            let tables = db.table_names().execute().await?;
-            if !tables.iter().any(|name| name == TABLE_NAME) {
-                let now = Utc::now().to_rfc3339();
-                let init = NoteRow {
-                    id: INIT_ID.to_string(),
-                    title: String::new(),
-                    text: String::new(),
-                    tags: "[]".to_string(),
-                    file_path: String::new(),
-                    vector: vec![0.0; LEGACY_EMBEDDING_DIMENSIONS],
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                db.create_table(TABLE_NAME, note_batch(&[init])?)
-                    .execute()
-                    .await?;
-                let table = db.open_table(TABLE_NAME).execute().await?;
-                if let Err(error) = table
-                    .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
-                    .execute()
-                    .await
-                {
-                    tracing::debug!("notes FTS index creation skipped: {error}");
-                }
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
     fn index_note_file(&self, path: &Path) -> NoteResult<()> {
-        let Some(lancedb_dir) = &self.lancedb_dir else {
+        let Some(db) = &self.db else {
             return Ok(());
         };
-        let Some(embedder) = &self.embedder else {
-            return Ok(());
-        };
-        let row = self.note_row(path, embedder)?;
-        let batch = note_batch(&[row])?;
-        let db_path = db_uri(lancedb_dir);
-        let file_path = path.display().to_string();
-        run_lancedb(async move {
-            let db = lancedb::connect(&db_path).execute().await?;
-            let table = db.open_table(TABLE_NAME).execute().await?;
-            table
-                .delete(&format!("file_path = {}", sql_string_literal(&file_path)))
-                .await?;
-            table.add(batch).execute().await?;
-            Ok(())
-        })?;
+        let row = build_note_row(path, db)?;
+        db.delete_by_file_path(&row.file_path.as_deref().unwrap_or_default())?;
+        db.insert(row)?;
         Ok(())
     }
 
-    fn rebuild_lancedb(&self, files: &[PathBuf]) -> NoteResult<()> {
-        let Some(lancedb_dir) = &self.lancedb_dir else {
+    fn rebuild_data(&self, files: &[PathBuf]) -> NoteResult<()> {
+        let Some(db) = &self.db else {
             return Ok(());
         };
-        let Some(embedder) = &self.embedder else {
-            return Ok(());
-        };
-        self.ensure_lancedb_schema()?;
-        let mut rows = Vec::new();
+        db.delete_kind(MemoryKind::Note)?;
         for file in files {
-            rows.push(self.note_row(file, embedder)?);
+            let row = build_note_row(file, db)?;
+            db.insert(row)?;
         }
-        let batch = if rows.is_empty() {
-            None
-        } else {
-            Some(note_batch(&rows)?)
-        };
-        let db_path = db_uri(lancedb_dir);
-        run_lancedb(async move {
-            let db = lancedb::connect(&db_path).execute().await?;
-            let table = db.open_table(TABLE_NAME).execute().await?;
-            table
-                .delete(&format!("id != {}", sql_string_literal(INIT_ID)))
-                .await?;
-            if let Some(batch) = batch {
-                table.add(batch).execute().await?;
-            }
-            if let Err(error) = table
-                .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
-                .execute()
-                .await
-            {
-                tracing::debug!("notes FTS index rebuild skipped: {error}");
-            }
-            Ok(())
-        })?;
         Ok(())
     }
 
-    fn note_row(&self, path: &Path, embedder: &EmbeddingEngine) -> NoteResult<NoteRow> {
-        let raw = fs::read_to_string(path)?;
-        let (meta, body) = parse_frontmatter(&raw);
-        let tags = clean_tags(&meta.tags);
-        let title = if meta.title.is_empty() {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("untitled")
-                .to_string()
-        } else {
-            meta.title
-        };
-        let text = format!("{}\n{}\n{}", title, tags.join(" "), body.trim());
-        let vector = embedder.embed_document(&text)?;
-        let now = Utc::now().to_rfc3339();
-        Ok(NoteRow {
-            id: format!("note-{}", Uuid::new_v4()),
-            title,
-            text,
-            tags: serde_json::to_string(&tags)?,
-            file_path: path.display().to_string(),
-            vector,
-            created_at: if meta.created.is_empty() {
-                now.clone()
-            } else {
-                meta.created
-            },
-            updated_at: if meta.updated.is_empty() {
-                now
-            } else {
-                meta.updated
-            },
-        })
-    }
-
-    fn search_lancedb(
+    fn search_vector(
         &self,
         query: &str,
         limit: usize,
     ) -> NoteResult<Option<Vec<NoteSearchResult>>> {
-        let Some(lancedb_dir) = &self.lancedb_dir else {
-            return Ok(None);
-        };
-        let Some(embedder) = &self.embedder else {
+        let Some(db) = &self.db else {
             return Ok(None);
         };
         if query.trim().is_empty() {
             return Ok(None);
         }
-        let query_vector = embedder.embed_query(query.trim())?;
-        let db_path = db_uri(lancedb_dir);
-        let limit = limit.max(1);
-        let batches = run_lancedb(async move {
-            let db = lancedb::connect(&db_path).execute().await?;
-            let table = db.open_table(TABLE_NAME).execute().await?;
-            let stream = table
-                .query()
-                .nearest_to(query_vector)?
-                .limit(limit)
-                .execute()
-                .await?;
-            stream.try_collect::<Vec<_>>().await.map_err(Into::into)
-        })?;
-        Ok(Some(note_results_from_batches(&batches)?))
-    }
-}
-
-fn note_batch(rows: &[NoteRow]) -> AnyhowResult<RecordBatch> {
-    let dimension = rows
-        .first()
-        .map(|row| row.vector.len())
-        .filter(|dimension| *dimension > 0)
-        .ok_or_else(|| anyhow!("notes batch requires at least one vector"))?;
-    if rows.iter().any(|row| row.vector.len() != dimension) {
-        return Err(anyhow!("note vectors have inconsistent dimensions"));
-    }
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("title", DataType::Utf8, false),
-        Field::new("text", DataType::Utf8, false),
-        Field::new("tags", DataType::Utf8, false),
-        Field::new("file_path", DataType::Utf8, false),
-        Field::new(
-            VECTOR_COLUMN,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dimension as i32,
-            ),
-            false,
-        ),
-        Field::new("created_at", DataType::Utf8, false),
-        Field::new("updated_at", DataType::Utf8, false),
-    ]));
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            utf8_array(rows.iter().map(|row| row.id.as_str())),
-            utf8_array(rows.iter().map(|row| row.title.as_str())),
-            utf8_array(rows.iter().map(|row| row.text.as_str())),
-            utf8_array(rows.iter().map(|row| row.tags.as_str())),
-            utf8_array(rows.iter().map(|row| row.file_path.as_str())),
-            vector_array(
-                rows.iter().map(|row| row.vector.clone()).collect(),
-                dimension,
-            ),
-            utf8_array(rows.iter().map(|row| row.created_at.as_str())),
-            utf8_array(rows.iter().map(|row| row.updated_at.as_str())),
-        ],
-    )
-    .context("failed to build notes LanceDB batch")
-}
-
-fn note_results_from_batches(batches: &[RecordBatch]) -> NoteResult<Vec<NoteSearchResult>> {
-    let mut notes = Vec::new();
-    for batch in batches {
-        let ids = string_column(batch, "id")?;
-        let titles = string_column(batch, "title")?;
-        let texts = string_column(batch, "text")?;
-        let tags = string_column(batch, "tags")?;
-        let paths = string_column(batch, "file_path")?;
-        let created = string_column(batch, "created_at")?;
-        let distances = distance_column(batch);
-
-        for row in 0..batch.num_rows() {
-            if ids.value(row) == INIT_ID {
+        let scored = db.vector_search(MemoryKind::Note, query.trim(), limit)?;
+        let mut notes = Vec::new();
+        for entry in scored {
+            let row = entry.row;
+            let file_path = row.file_path.as_deref().map(PathBuf::from);
+            let Some(file_path) = file_path else {
                 continue;
-            }
-            let file_path = PathBuf::from(paths.value(row));
-            let preview = fs::read_to_string(&file_path)
+            };
+            let title = row.title.unwrap_or_else(|| "untitled".to_string());
+            let preview_text = fs::read_to_string(&file_path)
                 .ok()
                 .map(|raw| parse_frontmatter(&raw).1)
                 .map(|body| preview(&body))
-                .unwrap_or_else(|| preview(texts.value(row)));
-            let note_tags = serde_json::from_str(tags.value(row)).unwrap_or_default();
-            let score = distances
-                .as_ref()
-                .and_then(|values| values.get(row).copied())
-                .map(semantic_score)
-                .unwrap_or(0.0);
+                .unwrap_or_else(|| preview(&row.text));
             notes.push(NoteSearchResult {
-                title: titles.value(row).to_string(),
-                tags: note_tags,
+                title,
+                tags: row.tags,
                 file_path,
-                preview,
-                score,
-                created: created.value(row).to_string(),
+                preview: preview_text,
+                score: entry.score,
+                created: row.created_at,
             });
         }
+        Ok(Some(notes))
     }
-    Ok(notes)
 }
 
-fn semantic_score(distance: f64) -> f64 {
-    1.0 / (1.0 + distance.max(0.0))
+fn build_note_row(path: &Path, db: &MemoryDb) -> NoteResult<NewMemoryRow> {
+    let raw = fs::read_to_string(path)?;
+    let (meta, body) = parse_frontmatter(&raw);
+    let tags = clean_tags(&meta.tags);
+    let title = if meta.title.is_empty() {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("untitled")
+            .to_string()
+    } else {
+        meta.title
+    };
+    let text = format!("{}\n{}\n{}", title, tags.join(" "), body.trim());
+    let vector = db.embedder().embed_document(&text)?;
+    let now = Utc::now().to_rfc3339();
+    let created_at = if meta.created.is_empty() {
+        now.clone()
+    } else {
+        meta.created
+    };
+    let updated_at = if meta.updated.is_empty() {
+        Some(now)
+    } else {
+        Some(meta.updated)
+    };
+
+    Ok(NewMemoryRow {
+        id: format!("note-{}", Uuid::new_v4()),
+        kind: MemoryKind::Note,
+        title: Some(title),
+        text,
+        metadata: json!({}),
+        tags,
+        file_path: Some(path.display().to_string()),
+        created_at,
+        updated_at,
+        embedding: vector,
+    })
 }
 
-fn db_uri(path: &Path) -> String {
-    path.display().to_string()
+fn compare_search_results(left: &NoteSearchResult, right: &NoteSearchResult) -> Ordering {
+    right
+        .score
+        .partial_cmp(&left.score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| right.created.cmp(&left.created))
+        .then_with(|| left.title.cmp(&right.title))
 }
 
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn score_note(query: &str, terms: &[String], title: &str, tags: &[String], body: &str) -> f64 {
+    if terms.is_empty() {
+        return 1.0;
+    }
+
+    let title_lower = title.to_ascii_lowercase();
+    let tags_lower = tags.join(" ").to_ascii_lowercase();
+    let body_lower = body.to_ascii_lowercase();
+    let query_lower = query.to_ascii_lowercase();
+    let mut score = 0.0;
+
+    if !query_lower.is_empty() {
+        if title_lower.contains(&query_lower) {
+            score += 8.0;
+        }
+        if body_lower.contains(&query_lower) {
+            score += 3.0;
+        }
+    }
+
+    for term in terms {
+        if title_lower.contains(term) {
+            score += 4.0;
+        }
+        if tags_lower.split_whitespace().any(|tag| tag == term) {
+            score += 3.0;
+        } else if tags_lower.contains(term) {
+            score += 1.5;
+        }
+        score += body_lower.matches(term).count() as f64;
+    }
+
+    score
 }
 
 pub fn slugify(title: &str) -> String {
@@ -687,78 +546,6 @@ pub fn normalize_tags(tags: &[String], existing_tags: &[String]) -> Vec<String> 
     normalized
 }
 
-fn compare_search_results(left: &NoteSearchResult, right: &NoteSearchResult) -> Ordering {
-    right
-        .score
-        .partial_cmp(&left.score)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| right.created.cmp(&left.created))
-        .then_with(|| left.title.cmp(&right.title))
-}
-
-fn score_note(query: &str, terms: &[String], title: &str, tags: &[String], body: &str) -> f64 {
-    if terms.is_empty() {
-        return 1.0;
-    }
-
-    let title_lower = title.to_ascii_lowercase();
-    let tags_lower = tags.join(" ").to_ascii_lowercase();
-    let body_lower = body.to_ascii_lowercase();
-    let query_lower = query.to_ascii_lowercase();
-    let mut score = 0.0;
-
-    if !query_lower.is_empty() {
-        if title_lower.contains(&query_lower) {
-            score += 8.0;
-        }
-        if body_lower.contains(&query_lower) {
-            score += 3.0;
-        }
-    }
-
-    for term in terms {
-        if title_lower.contains(term) {
-            score += 4.0;
-        }
-        if tags_lower.split_whitespace().any(|tag| tag == term) {
-            score += 3.0;
-        } else if tags_lower.contains(term) {
-            score += 1.5;
-        }
-        score += body_lower.matches(term).count() as f64;
-    }
-
-    score
-}
-
-fn query_terms(query: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut current = String::new();
-    for ch in query.to_ascii_lowercase().chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
-            current.push(ch);
-        } else if !current.is_empty() {
-            terms.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        terms.push(current);
-    }
-    terms
-}
-
-fn clean_tags(tags: &[String]) -> Vec<String> {
-    let mut clean = Vec::new();
-    let mut seen = BTreeSet::new();
-    for tag in tags {
-        let normalized = tag.trim().to_ascii_lowercase();
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            clean.push(normalized);
-        }
-    }
-    clean
-}
-
 fn parse_tag_value(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     if trimmed.starts_with('[') && trimmed.ends_with(']') {
@@ -792,6 +579,10 @@ fn format_tags(tags: &[String]) -> String {
 fn scalar(value: &str) -> String {
     value.replace(['\n', '\r'], " ").trim().to_string()
 }
+
+// Silence unused MemoryRow import when notes-only callers are absent.
+#[allow(dead_code)]
+fn _suppress_unused(_row: MemoryRow) {}
 
 #[cfg(test)]
 mod tests {

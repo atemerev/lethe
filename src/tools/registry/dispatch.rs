@@ -129,7 +129,7 @@ impl<'a> ToolRegistry<'a> {
                 usize_arg(args, "limit", 10),
                 None,
             ) {
-                Ok(entries) => crate::archival::ArchivalMemory::format_entries(&entries),
+                Ok(entries) => crate::memory::archival::ArchivalMemory::format_entries(&entries),
                 Err(error) => format!("Error: {error}"),
             },
             "archival_insert" => {
@@ -158,7 +158,7 @@ impl<'a> ToolRegistry<'a> {
                     )
                 };
                 match result {
-                    Ok(messages) => crate::messages::MessageHistory::format_messages(&messages),
+                    Ok(messages) => crate::memory::messages::MessageHistory::format_messages(&messages),
                     Err(error) => format!("Error: {error}"),
                 }
             }
@@ -169,7 +169,7 @@ impl<'a> ToolRegistry<'a> {
                     optional_tags(&tags),
                     usize_arg(args, "limit", 5),
                 ) {
-                    Ok(results) => crate::notes::NoteStore::format_search(
+                    Ok(results) => crate::memory::notes::NoteStore::format_search(
                         &string_arg(args, "query"),
                         &tags,
                         &results,
@@ -194,7 +194,7 @@ impl<'a> ToolRegistry<'a> {
             "note_list" => {
                 let tags = string_vec_arg(args, "tags");
                 match self.memory.notes.list_notes(optional_tags(&tags)) {
-                    Ok(notes) => crate::notes::NoteStore::format_list(&notes),
+                    Ok(notes) => crate::memory::notes::NoteStore::format_list(&notes),
                     Err(error) => format!("Error: {error}"),
                 }
             }
