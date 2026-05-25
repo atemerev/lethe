@@ -855,15 +855,17 @@ mod tests {
         let shell_id = start.split(':').next_back().unwrap().trim();
 
         let mut output = String::new();
-        for _ in 0..20 {
+        // 100 × 50ms = 5s cap. Generous for slow CI runners (notably
+        // ubuntu-24.04-arm) where pipe flushes can lag well past 500ms.
+        for _ in 0..100 {
             output = shell.bash_output(shell_id, "", 0);
             if output.contains("hello") && output.contains("world") {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(output.contains("hello"));
-        assert!(output.contains("world"));
+        assert!(output.contains("hello"), "output was: {output:?}");
+        assert!(output.contains("world"), "output was: {output:?}");
 
         let listing = shell.bash("/bg", 5, false, false);
         assert!(listing.contains(shell_id));
@@ -876,15 +878,15 @@ mod tests {
         let start = shell.bash("printf 'a\\nkeep 1\\nb\\nkeep 2\\n'", 5, true, false);
         let shell_id = start.split(':').next_back().unwrap().trim();
         let mut filtered = String::new();
-        for _ in 0..20 {
+        for _ in 0..100 {
             filtered = shell.bash_output(shell_id, "keep", 1);
             if filtered.contains("keep 2") {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(50));
         }
 
-        assert!(filtered.contains("keep 2"));
+        assert!(filtered.contains("keep 2"), "filtered was: {filtered:?}");
         assert!(!filtered.contains("keep 1\n"));
     }
 
