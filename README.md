@@ -220,15 +220,34 @@ Restore prompts before overwriting an existing **workspace** and again before ov
 
 ## Migrating from v0.18 (LanceDB → SQLite-vec)
 
-v0.19 moved memory storage from LanceDB to SQLite-vec. If you ran a pre-0.19 Lethe, use the one-shot [`lethe-migrate`](migrator/) tool to copy your `archival_memory`, `message_history`, and `notes` into the new layout:
+v0.19 moved memory storage from LanceDB to SQLite-vec. If you ran a pre-0.19 Lethe, use the one-shot `lethe-migrate` tool to copy your `archival_memory`, `message_history`, and `notes` into the new layout.
+
+`install.sh` and binary release tarballs ship `lethe-migrate` alongside `lethe`, so if you installed Lethe through the installer you already have it at `~/.lethe/bin/lethe-migrate`. Source builders can build it explicitly with `cargo build --release --manifest-path migrator/Cargo.toml` — it's a standalone Cargo project so the Arrow/LanceDB stack stays out of the main `lethe` build.
+
+**Recommended workflow** (no destructive step until you've verified):
 
 ```bash
+# 1. Dry-run: writes to lethe-memory.db.dryrun, runs full verification.
+lethe-migrate \
+  --lancedb-dir  ~/.lethe/data/memory/lancedb \
+  --sqlite-path  ~/.lethe/data/memory/lethe-memory.db \
+  --dry-run
+
+# 2. Inspect the dry-run file if you want, then run for real.
 lethe-migrate \
   --lancedb-dir  ~/.lethe/data/memory/lancedb \
   --sqlite-path  ~/.lethe/data/memory/lethe-memory.db
+
+# 3. Smoke-test the new storage.
+lethe check
+lethe memory recall -m "<something you remember>"
+
+# 4. The old LanceDB directory is never touched. After step 3 looks good,
+#    back it up, move it, or delete it — the migrator prints the full
+#    path on success.
 ```
 
-`lethe-migrate` is a standalone subproject under [`migrator/`](migrator/) with its own dependency tree — the Arrow/LanceDB stack stays out of the main `lethe` build. Full data contract is in [`MIGRATION-SPEC.md`](MIGRATION-SPEC.md).
+Flags: `--dry-run`, `--force` (overwrite an existing destination), `--embedding-dim N` (override the 768-dim guard if you used a non-default embedding model). Exit codes and the full data contract are in [`migrator/README.md`](migrator/) and [`MIGRATION-SPEC.md`](MIGRATION-SPEC.md).
 
 ## Logging
 
