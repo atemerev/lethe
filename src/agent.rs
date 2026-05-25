@@ -9,9 +9,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 mod summarizer;
-mod tool_context;
 mod tool_loop;
-use tool_context::recent_tool_context_for_turn;
 use tool_loop::{
     TurnExecutionContext, actor_turn_executor, complete_turn_with_tools_config_shared,
 };
@@ -73,7 +71,6 @@ pub struct AgentTurn {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentOptions {
     pub use_hippocampus: bool,
-    pub history_limit: usize,
     /// History compaction budget for this turn. Derived per-turn from the
     /// configured context limit + recent prompt token usage (see
     /// [`CompactionBudget::from_settings`]); tests and entry points without
@@ -86,7 +83,6 @@ impl Default for AgentOptions {
     fn default() -> Self {
         Self {
             use_hippocampus: true,
-            history_limit: 20,
             compaction_budget: CompactionBudget::legacy_default(),
         }
     }
@@ -500,8 +496,8 @@ pub fn prepare_turn(
     options: &AgentOptions,
 ) -> AgentResult<AgentTurn> {
     let synthetic = MessageMetadata::from_value(metadata).is_internal();
-    let raw_recent = memory.messages.get_recent(history_fetch_limit(options))?;
-    let recent = history_records_for_turn(raw_recent.clone(), options.history_limit);
+    let raw_recent = memory.messages.get_recent(HISTORY_FETCH_LIMIT)?;
+    let recent = history_records_for_turn(raw_recent.clone());
     let recall = if options.use_hippocampus && !synthetic {
         Hippocampus::new(HippocampusConfig {
             enabled: settings.background.hippocampus_enabled,
@@ -512,19 +508,18 @@ pub fn prepare_turn(
         None
     };
 
-    let tool_context = recent_tool_context_for_turn(&raw_recent, settings);
-    let parts =
-        build_system_prompt(memory, prompts, recall.as_deref(), tool_context.as_deref())?;
+    let parts = build_system_prompt(memory, prompts, recall.as_deref())?;
     let dialect = dialect_for_model(&settings.llm.llm_model);
     let mut messages = parts.into_messages();
     apply_cache_markers(&mut messages, dialect.as_ref());
     let mut history_messages = history_to_llm_messages(recent);
     let dropped_for_summary = compact_history(&mut history_messages, options.compaction_budget);
     messages.extend(history_messages);
+    let stamped = stamp_user_message(message);
     let user_message = if attachments.is_empty() {
-        LlmMessage::user(message.to_string())
+        LlmMessage::user(stamped)
     } else {
-        LlmMessage::user_with_attachments(message.to_string(), attachments)
+        LlmMessage::user_with_attachments(stamped, attachments)
     };
     messages.push(user_message);
 
@@ -574,7 +569,6 @@ fn build_system_prompt(
     memory: &MemoryStore,
     prompts: &PromptStore,
     recall: Option<&str>,
-    tool_context: Option<&str>,
 ) -> AgentResult<SystemParts> {
     let identity = memory
         .blocks
@@ -599,13 +593,6 @@ fn build_system_prompt(
     }
     volatile_builder.raw(memory_volatile).raw(clock_block);
 
-    if let Some(tool_context) = tool_context {
-        volatile_builder.block_with(
-            "runtime_context",
-            [("source", "recent_tool_history")],
-            tool_context,
-        );
-    }
     if let Some(recall) = recall.filter(|value| !value.trim().is_empty()) {
         let timestamp = Local::now().format("%a %Y-%m-%d %H:%M:%S %Z").to_string();
         let body = format!(
@@ -625,16 +612,14 @@ fn build_system_prompt(
     })
 }
 
-fn history_fetch_limit(options: &AgentOptions) -> usize {
-    let visible_limit = if options.history_limit == 0 {
-        AgentOptions::default().history_limit
-    } else {
-        options.history_limit
-    };
-    visible_limit.saturating_mul(8).max(100)
-}
+/// How many recent messages to pull from storage per turn. Python `main`
+/// doesn't enforce a count cap at all — it relies on token-budget
+/// compaction. We still cap the DB read so we don't load thousands of
+/// rows on long-lived sessions; `compact_history` then trims to the
+/// active context budget.
+const HISTORY_FETCH_LIMIT: usize = 500;
 
-fn history_records_for_turn(recent: Vec<StoredMessage>, limit: usize) -> Vec<StoredMessage> {
+fn history_records_for_turn(recent: Vec<StoredMessage>) -> Vec<StoredMessage> {
     let mut history = Vec::new();
     let mut inside_internal_turn = false;
     for message in recent {
@@ -654,18 +639,6 @@ fn history_records_for_turn(recent: Vec<StoredMessage>, limit: usize) -> Vec<Sto
     }
 
     drop_history_before_first_user(&mut history);
-
-    let visible_limit = if limit == 0 {
-        AgentOptions::default().history_limit
-    } else {
-        limit
-    };
-    if history.len() > visible_limit {
-        let start = history.len() - visible_limit;
-        history.drain(0..start);
-        drop_history_before_first_user(&mut history);
-    }
-
     history
 }
 
@@ -723,9 +696,8 @@ fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
                     if intended_tool_calls {
                         continue;
                     }
-                    let content = history_content_with_timestamp(&message);
-                    if !content.trim().is_empty() {
-                        out.push(LlmMessage::assistant(content));
+                    if !message.content.trim().is_empty() {
+                        out.push(LlmMessage::assistant(message.content));
                     }
                     continue;
                 }
@@ -771,8 +743,7 @@ fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
                 if seen.len() != expected.len() {
                     continue;
                 }
-                let text = history_content_with_timestamp(&message);
-                out.push(LlmMessage::assistant_with_tool_calls(text, calls));
+                out.push(LlmMessage::assistant_with_tool_calls(message.content, calls));
                 out.push(LlmMessage::tool_results(responses));
             }
             // Orphaned tool result (no preceding assistant tool_call). Skip.
@@ -1121,24 +1092,20 @@ fn apply_cache_markers(messages: &mut [LlmMessage], dialect: &dyn crate::llm::Pr
     }
 }
 
-/// Threshold above which a history message is prefixed with its timestamp.
-/// Short bursty exchanges (sub-5-minute gaps) stay timestamp-free so the
-/// model sees clean dialogue; longer gaps surface the time so the model can
-/// reason about staleness without calling conversation_search.
-const HISTORY_TIMESTAMP_THRESHOLD_SECONDS: i64 = 300;
-
 fn history_content_with_timestamp(message: &StoredMessage) -> String {
     let Ok(created) = chrono::DateTime::parse_from_rfc3339(&message.created_at) else {
         return message.content.clone();
     };
-    let created = created.with_timezone(&chrono::Utc);
-    let age = chrono::Utc::now().signed_duration_since(created).num_seconds();
-    if age < HISTORY_TIMESTAMP_THRESHOLD_SECONDS {
-        return message.content.clone();
-    }
-    let local = created.with_timezone(&Local);
-    let stamp = local.format("%a %Y-%m-%d %H:%M %Z").to_string();
-    format!("[{stamp}] {}", message.content)
+    let stamp = created
+        .with_timezone(&Local)
+        .format("%a %Y-%m-%d %H:%M:%S %Z")
+        .to_string();
+    format!("[{stamp}]\n{}", message.content)
+}
+
+fn stamp_user_message(message: &str) -> String {
+    let stamp = Local::now().format("%a %Y-%m-%d %H:%M:%S %Z").to_string();
+    format!("[{stamp}]\n{message}")
 }
 
 #[cfg(test)]
@@ -1208,11 +1175,14 @@ mod tests {
         assert!(
             turn.messages
                 .iter()
-                .any(|message| message.content == "previous graph question")
+                .any(|message| message.content.ends_with("previous graph question"))
         );
-        assert_eq!(
-            turn.messages.last().unwrap().content,
-            "How do I use graph email?"
+        assert!(
+            turn.messages
+                .last()
+                .unwrap()
+                .content
+                .ends_with("How do I use graph email?")
         );
     }
 
@@ -1263,14 +1233,12 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
-        assert!(!contents.contains(&"I will inspect that now."));
-        assert!(!contents.contains(&"secret tool output"));
-        assert!(contents.contains(&"previous visible user request"));
+        assert!(!contents.iter().any(|c| c.contains("I will inspect that now.")));
+        assert!(!contents.iter().any(|c| c.contains("secret tool output")));
+        assert!(contents.iter().any(|c| c.ends_with("previous visible user request")));
         assert!(contents.contains(&"previous visible answer"));
         let system = system_content(&turn.messages);
-        assert!(system.contains("<runtime_context source=\"recent_tool_history\">"));
-        assert!(system.contains("<tool_call name=\"bash\""));
-        assert!(system.contains("secret tool output"));
+        assert!(!system.contains("recent_tool_history"));
     }
 
     #[test]
@@ -1319,7 +1287,6 @@ mod tests {
             Vec::new(),
             None,
             &AgentOptions {
-                history_limit: 20,
                 use_hippocampus: false,
                 ..Default::default()
             },
@@ -1520,7 +1487,6 @@ mod tests {
             Vec::new(),
             None,
             &AgentOptions {
-                history_limit: 20,
                 use_hippocampus: false,
                 ..Default::default()
             },
@@ -1537,7 +1503,7 @@ mod tests {
         assert!(
             turn.messages
                 .iter()
-                .any(|m| m.content == "do two things")
+                .any(|m| m.content.ends_with("do two things"))
         );
     }
 
@@ -1585,9 +1551,9 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
-        assert!(!contents.contains(&"internal heartbeat prompt"));
-        assert!(!contents.contains(&"internal heartbeat answer"));
-        assert!(contents.contains(&"visible question"));
+        assert!(!contents.iter().any(|c| c.contains("internal heartbeat prompt")));
+        assert!(!contents.iter().any(|c| c.contains("internal heartbeat answer")));
+        assert!(contents.iter().any(|c| c.ends_with("visible question")));
     }
 
     #[test]

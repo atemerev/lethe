@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::llm::response_format::message_envelope_segments;
 
 /// Map a Telegram parse-mode hint to the API value, returning `None` for
 /// "no formatting".
@@ -169,34 +168,45 @@ pub fn split_telegram_messages(text: &str) -> Vec<String> {
     }
 }
 
+/// Split on `---` lines, matching Python `main`'s telegram send_message
+/// (`segments = [s.strip() for s in text.split("---") if s.strip()]`).
+/// We refine slightly: split only on `---` lines that sit OUTSIDE fenced
+/// code blocks, so a literal `---` inside a code sample doesn't shatter
+/// the message. Lines containing `---` inline (e.g. inside a markdown
+/// table separator like `|---|---|`) are also preserved as-is — only
+/// pure `---`/`-----` lines act as bubble dividers.
 fn telegram_message_segments(text: &str) -> Vec<String> {
-    message_envelope_segments(text).unwrap_or_else(|| split_paragraph_segments(text))
-}
-
-fn split_paragraph_segments(text: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = Vec::new();
     let mut in_code_block = false;
     for line in text.lines() {
         if line.trim_start().starts_with("```") {
             in_code_block = !in_code_block;
-        }
-        if !in_code_block && line.trim().is_empty() {
-            let segment = current.join("\n").trim().to_string();
-            if !segment.is_empty() {
-                segments.push(segment);
-            }
-            current.clear();
-        } else {
             current.push(line);
+            continue;
         }
+        if !in_code_block && is_divider_line(line) {
+            push_segment(&mut segments, &mut current);
+            continue;
+        }
+        current.push(line);
     }
-    let segment = current.join("\n").trim().to_string();
-    if !segment.is_empty() {
-        segments.push(segment);
-    }
+    push_segment(&mut segments, &mut current);
     if segments.is_empty() && !text.trim().is_empty() {
         segments.push(text.trim().to_string());
     }
     segments
+}
+
+fn is_divider_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() >= 3 && trimmed.chars().all(|c| c == '-')
+}
+
+fn push_segment(out: &mut Vec<String>, buffer: &mut Vec<&str>) {
+    let joined = buffer.join("\n").trim().to_string();
+    if !joined.is_empty() {
+        out.push(joined);
+    }
+    buffer.clear();
 }

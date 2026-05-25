@@ -80,17 +80,44 @@ impl TelegramClient {
     }
 
     pub async fn send_message(&self, chat_id: i64, text: &str) -> TelegramResult<i64> {
+        // Try Markdown first so **bold**, `code`, etc. render. Telegram returns
+        // 400 with a parse error when the markdown is malformed (unbalanced
+        // backticks, stray brackets); fall back to plain text in that case so
+        // the user still sees the message.
+        match self.send_message_with_mode(chat_id, text, Some("Markdown")).await {
+            Ok(id) => Ok(id),
+            Err(error) if is_parse_entity_error(&error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Telegram rejected Markdown parse, retrying as plain text"
+                );
+                self.send_message_with_mode(chat_id, text, None).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn send_message_with_mode(
+        &self,
+        chat_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+    ) -> TelegramResult<i64> {
+        // Telegram returns 400 with a structured `{ok:false, description:"..."}`
+        // body when markdown parsing fails. Skip `error_for_status()` so the
+        // description survives into [`TelegramError::Api`] for callers (e.g.
+        // [`is_parse_entity_error`]) to inspect.
         let response = self
             .http
             .post(self.method_url("sendMessage"))
             .json(&SendMessageRequest {
                 chat_id,
                 text,
+                parse_mode,
                 disable_web_page_preview: true,
             })
             .send()
             .await?
-            .error_for_status()?
             .json::<TelegramResponse<SentTelegramMessage>>()
             .await?;
         response.into_result().map(|message| message.message_id)
@@ -733,7 +760,20 @@ impl<T> TelegramResponse<T> {
 struct SendMessageRequest<'a> {
     chat_id: i64,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<&'a str>,
     disable_web_page_preview: bool,
+}
+
+/// Telegram returns 400 with a "can't parse entities" message when the
+/// markdown is malformed. We retry without parse_mode in that case so the
+/// user still gets the message body, even if formatting is dropped.
+fn is_parse_entity_error(error: &TelegramError) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("can't parse entities")
+        || message.contains("can't find end")
+        || message.contains("unsupported start tag")
+        || (message.contains("400") && message.contains("entities"))
 }
 
 #[derive(Debug, Serialize)]
@@ -1613,23 +1653,28 @@ mod tests {
     }
 
     #[test]
-    fn split_messages_uses_typed_envelope_and_size_limit() {
-        let chunks = split_telegram_messages(r#"{"messages":["one","two"]}"#);
-        assert_eq!(chunks, vec!["one", "two"]);
-
-        let chunks = split_telegram_messages(
-            "```json\n{\"messages\":[{\"text\":\"one\"},{\"message\":\"two\"}]}\n```",
-        );
-        assert_eq!(chunks, vec!["one", "two"]);
-
+    fn split_messages_splits_on_dashes_and_respects_size_limit() {
+        // --- on its own line is the bubble divider (matches Python main).
         let chunks = split_telegram_messages("one\n---\ntwo");
-        assert_eq!(chunks, vec!["one\n---\ntwo"]);
-
-        let chunks = split_telegram_messages("one\n\n two");
         assert_eq!(chunks, vec!["one", "two"]);
 
-        let chunks = split_telegram_messages("```\none\n\n two\n```");
-        assert_eq!(chunks, vec!["```\none\n\n two\n```"]);
+        // Multiple bubbles separated by ---, with surrounding blank lines.
+        let chunks = split_telegram_messages("one\n\n---\n\ntwo\n\n---\n\nthree");
+        assert_eq!(chunks, vec!["one", "two", "three"]);
+
+        // No --- divider → whole text is a single bubble (paragraph blanks
+        // inside are preserved, not used as splitters anymore).
+        let chunks = split_telegram_messages("one\n\ntwo");
+        assert_eq!(chunks, vec!["one\n\ntwo"]);
+
+        // `---` inside a fenced code block must NOT split.
+        let chunks = split_telegram_messages("```\nbefore\n---\nafter\n```");
+        assert_eq!(chunks, vec!["```\nbefore\n---\nafter\n```"]);
+
+        // Markdown table separator `|---|---|` should be left alone — it's
+        // not a divider line because it contains `|`.
+        let chunks = split_telegram_messages("| a | b |\n|---|---|\n| 1 | 2 |");
+        assert_eq!(chunks.len(), 1);
 
         let long = "x".repeat(5000);
         let chunks = split_telegram_messages(&long);

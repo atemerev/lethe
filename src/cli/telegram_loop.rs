@@ -735,7 +735,14 @@ async fn process_telegram_actor_updates(
             "actor_update",
         ));
     let response = with_telegram_typing(client, chat_id, agent.chat_once(req)).await?;
-    send_guarded_telegram_final_response(client, chat_id, &response, guard).await?;
+    // Match Python heartbeat: the synthetic prompt explicitly instructs the
+    // model to reply with literal "ok" when there's nothing to surface.
+    // Anything else is forwarded. This is a sentinel contract, not pattern
+    // matching arbitrary acknowledgments.
+    let is_idle_ack = response.trim().eq_ignore_ascii_case("ok");
+    if !is_idle_ack {
+        send_guarded_telegram_final_response(client, chat_id, &response, guard).await?;
+    }
     if !response.trim().is_empty() {
         agent.memory().messages.add(
             MessageRole::Assistant,
@@ -783,12 +790,12 @@ fn actor_update_synthetic_message(updates: &[ActorNamedEvent]) -> String {
     lines.push(String::new());
     if terminal {
         lines.push(
-            "At least one subagent finished or failed. Send the user a concise update with the result, blocker, or next action."
+            "At least one subagent finished or failed. Send the user a concise update with the result, blocker, or next action. Respond with `ok` only if there's truly nothing worth telling them."
                 .to_string(),
         );
     } else {
         lines.push(
-            "These are progress updates. Send a brief user-visible status only if it adds value; otherwise return no text."
+            "These are progress updates. Respond with `ok` unless something here is worth surfacing to the user — in which case send a brief status."
                 .to_string(),
         );
     }

@@ -8,11 +8,13 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::anyhow;
 use genai::chat::{ChatMessage, ContentPart, MessageContent, ToolCall, ToolResponse};
-use serde_json::{Value, json};
+use regex::Regex;
+use serde_json::{Map, Value, json};
+use uuid::Uuid;
 
 use crate::actor::{ActorError, ActorRunSpec, ActorRuntime, ActorTurnExecutor, ModelTier};
 use crate::config::Settings;
@@ -24,7 +26,130 @@ use crate::tools::shell::ShellTools;
 
 use super::{AgentError, AgentResult};
 
-pub(super) const MAX_TOOL_ITERATIONS: usize = 8;
+/// Max LLM/tool round-trips per turn. Python `main` runs up to 10 per batch
+/// with up to 5 auto-continuation batches (~50 total); we collapse that into
+/// a single flat cap.
+pub(super) const MAX_TOOL_ITERATIONS: usize = 50;
+const MAX_TOOL_ERRORS: usize = 8;
+const MAX_REPEATED_TOOL_CALLS: usize = 4;
+const MAX_NO_PROGRESS_TURNS: usize = 4;
+const MAX_EMPTY_RESPONSES: usize = 2;
+
+/// Tools that don't count as "work" against [`total_tool_calls`] — memory
+/// reads/writes, telegram side effects, actor lifecycle. Matches Python's
+/// `FREE_TOOL_NAMES`.
+const FREE_TOOL_NAMES: &[&str] = &[
+    // Memory
+    "memory_read",
+    "memory_update",
+    "memory_append",
+    "archival_search",
+    "archival_insert",
+    "conversation_search",
+    "note_search",
+    "note_get",
+    // Telegram
+    "telegram_send_message",
+    "telegram_send_file",
+    "telegram_react",
+    // Actor lifecycle
+    "send_message",
+    "user_notify",
+    "terminate",
+    "ping_actor",
+    "wait_for_response",
+    "discover_actors",
+    "discover_recently_finished",
+    "spawn_actor",
+    "spawn_chain",
+    "kill_actor",
+    "update_task_state",
+    "get_task_state",
+    "restart_self",
+];
+
+/// Tools whose results we skip recording in the per-turn tool log
+/// (search results are recursive bloat). Matches Python's
+/// `SEARCH_RESULT_SKIP_TOOL_NAMES`.
+const SKIP_TOOL_LOG_TOOLS: &[&str] = &["conversation_search", "archival_search"];
+
+fn is_free_tool(name: &str) -> bool {
+    FREE_TOOL_NAMES.contains(&name)
+}
+
+fn skip_tool_log(name: &str) -> bool {
+    SKIP_TOOL_LOG_TOOLS.contains(&name)
+}
+
+fn is_error_result(result: &str) -> bool {
+    result.starts_with("Error:") || result.starts_with("Unknown tool:")
+}
+
+/// Per-turn record of one tool execution. Currently used by circuit
+/// breakers; future callers (auto-archival) can read this back.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ToolLogEntry {
+    name: String,
+    args_preview: String,
+    result_preview: String,
+    success: bool,
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    value.chars().take(limit).collect()
+}
+
+/// Recover Gemma/llama.cpp text-embedded tool calls of the form
+/// `<tool_call:func_name{key:"value", ...}>`. Returns native [`ToolCall`]s
+/// when at least one is matched. Matches Python's `_extract_text_tool_calls`.
+fn recover_text_tool_calls(content: &str) -> Vec<ToolCall> {
+    static OUTER: OnceLock<Regex> = OnceLock::new();
+    static QUOTED: OnceLock<Regex> = OnceLock::new();
+    let outer = OUTER
+        .get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"));
+    let quoted =
+        QUOTED.get_or_init(|| Regex::new(r#"(\w+):"([^"]*)""#).expect("valid regex"));
+
+    let mut calls = Vec::new();
+    for caps in outer.captures_iter(content) {
+        let fn_name = caps.get(1).map_or("", |m| m.as_str()).trim().to_string();
+        let raw_args = caps.get(2).map_or("", |m| m.as_str());
+        let clean = raw_args.replace("<|\"|>", "\"");
+        let mut args = Map::new();
+        let mut pairs = quoted.captures_iter(&clean).peekable();
+        if pairs.peek().is_some() {
+            for pair in pairs {
+                args.insert(
+                    pair[1].trim().to_string(),
+                    Value::String(pair[2].trim().to_string()),
+                );
+            }
+        } else {
+            // Fallback: split a comma-separated `key:value` list without
+            // requiring quotes. Single-arg cases pass through unchanged.
+            for piece in clean.split(',') {
+                if let Some((key, value)) = piece.split_once(':') {
+                    let key = key.trim();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    args.insert(key.to_string(), Value::String(value.trim().to_string()));
+                }
+            }
+        }
+        calls.push(ToolCall {
+            call_id: format!("call-{}", Uuid::new_v4().simple()),
+            fn_name,
+            fn_arguments: Value::Object(args),
+            thought_signatures: None,
+        });
+    }
+    calls
+}
 
 /// Bag of clones used to thread the agent's dependencies into the free-fn
 /// tool loop. Cheap to clone because all members are already shared handles.
@@ -111,6 +236,14 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     );
     let mut request = build_chat_request(messages);
     let mut last_text = String::new();
+    let mut total_tool_calls: usize = 0;
+    let mut total_tool_errors: usize = 0;
+    let mut repeated_tool_call_streak: usize = 0;
+    let mut last_tool_signature = String::new();
+    let mut no_progress_turns: usize = 0;
+    let mut empty_count: usize = 0;
+    let mut tool_log: Vec<ToolLogEntry> = Vec::new();
+    let mut circuit_breaker_reason: Option<String> = None;
 
     for iteration in 0..MAX_TOOL_ITERATIONS {
         request.tools = Some(registry.tools_for_active(&active_tools));
@@ -133,11 +266,24 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 .store(prompt_tokens as u64, Ordering::Relaxed);
         }
         let text = response.first_text().unwrap_or_default().to_string();
-        let tool_calls = response
+        let mut tool_calls = response
             .tool_calls()
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
+        if tool_calls.is_empty() && !text.is_empty() {
+            // Gemma 4 / llama.cpp sometimes emit tool calls embedded in
+            // assistant text instead of the native protocol field.
+            let recovered = recover_text_tool_calls(&text);
+            if !recovered.is_empty() {
+                tracing::info!(
+                    iteration,
+                    recovered = recovered.len(),
+                    "recovered text-embedded tool calls"
+                );
+                tool_calls = recovered;
+            }
+        }
         tracing::info!(
             iteration,
             text_chars = text.chars().count(),
@@ -146,8 +292,30 @@ pub(super) async fn complete_turn_with_tools_config_shared(
         );
 
         if tool_calls.is_empty() {
-            return Ok(text);
+            if !text.trim().is_empty() {
+                return Ok(text);
+            }
+            // Empty content + no tool calls — model stuck. Nudge once;
+            // on second strike, fall through to the no-tools wrap-up.
+            empty_count += 1;
+            if empty_count >= MAX_EMPTY_RESPONSES {
+                tracing::warn!(empty_count, "model stuck on empty responses, forcing wrap-up");
+                break;
+            }
+            tracing::warn!(empty_count, "empty response, nudging model");
+            request.messages.push(ChatMessage::user(
+                "[You returned an empty response. Respond to the user with what you know so far.]"
+                    .to_string(),
+            ));
+            continue;
         }
+
+        empty_count = 0;
+        let billable = tool_calls
+            .iter()
+            .filter(|call| !is_free_tool(&call.fn_name))
+            .count();
+        total_tool_calls += billable;
 
         if !text.trim().is_empty() {
             last_text = text.clone();
@@ -164,16 +332,27 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             .push(assistant_tool_message(text, tool_calls.clone()));
 
         let mut image_views = Vec::new();
+        let mut turn_had_successful_tool = false;
         for call in tool_calls {
             let call_id = call.call_id.clone();
             let tool_name = call.fn_name.clone();
+            let args_string = call.fn_arguments.to_string();
             tracing::info!(
                 iteration,
                 tool = %tool_name,
                 call_id = %call_id,
-                args = %truncate_log_text(&call.fn_arguments.to_string(), 1200),
+                args = %truncate_log_text(&args_string, 1200),
                 "tool call started"
             );
+
+            let signature = format!("{tool_name}:{args_string}");
+            if signature == last_tool_signature {
+                repeated_tool_call_streak += 1;
+            } else {
+                repeated_tool_call_streak = 1;
+                last_tool_signature = signature;
+            }
+
             let should_stop_after_tool =
                 matches!(call.fn_name.as_str(), "terminate" | "restart_self");
             let raw_result = if call.fn_name == "request_tool" {
@@ -203,6 +382,22 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 "tool call completed"
             );
             image_views.extend(views);
+
+            let is_error = is_error_result(&result);
+            if is_error {
+                total_tool_errors += 1;
+            } else {
+                turn_had_successful_tool = true;
+            }
+            if !skip_tool_log(&tool_name) {
+                tool_log.push(ToolLogEntry {
+                    name: tool_name.clone(),
+                    args_preview: truncate_chars(&args_string, 100),
+                    result_preview: truncate_chars(&result, 200),
+                    success: !is_error,
+                });
+            }
+
             if record_tool_messages {
                 context.memory.messages.add(
                     MessageRole::Tool,
@@ -220,16 +415,78 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             if should_stop_after_tool {
                 return Ok(stop_result);
             }
+
+            if total_tool_errors >= MAX_TOOL_ERRORS {
+                circuit_breaker_reason = Some(format!(
+                    "tool_error_cap hit ({total_tool_errors} errors >= {MAX_TOOL_ERRORS})"
+                ));
+                break;
+            }
+            if repeated_tool_call_streak >= MAX_REPEATED_TOOL_CALLS {
+                circuit_breaker_reason = Some(format!(
+                    "repeated_tool_call_cap hit ({repeated_tool_call_streak} >= {MAX_REPEATED_TOOL_CALLS})"
+                ));
+                break;
+            }
         }
+
+        if turn_had_successful_tool {
+            no_progress_turns = 0;
+        } else {
+            no_progress_turns += 1;
+            if circuit_breaker_reason.is_none() && no_progress_turns >= MAX_NO_PROGRESS_TURNS {
+                circuit_breaker_reason = Some(format!(
+                    "no_progress_cap hit ({no_progress_turns} turns >= {MAX_NO_PROGRESS_TURNS})"
+                ));
+            }
+        }
+
         for image_view in image_views {
             request.messages.push(image_view_message(image_view));
         }
+
+        if let Some(reason) = &circuit_breaker_reason {
+            tracing::warn!(reason = %reason, "circuit breaker triggered");
+            request.messages.push(ChatMessage::user(
+                "[Circuit breaker triggered. Stop tool exploration. Respond with a concise partial report now.]"
+                    .to_string(),
+            ));
+            break;
+        }
     }
 
-    if last_text.trim().is_empty() {
-        Ok("Tool iteration limit reached before a final response.".to_string())
-    } else {
+    tracing::warn!(
+        total_tool_calls,
+        total_tool_errors,
+        tool_log_entries = tool_log.len(),
+        breaker = ?circuit_breaker_reason,
+        "tool iteration limit / breaker — requesting final wrap-up response"
+    );
+    let nudge = format!(
+        "[WRAP UP: You've made {total_tool_calls} tool calls. \
+         You MUST respond to the user NOW with what you have. \
+         No more tool calls.]"
+    );
+    request.messages.push(ChatMessage::user(nudge));
+    request.tools = None;
+    let router = context
+        .router
+        .read()
+        .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
+        .clone();
+    let response = router.exec_chat_request(request, use_aux).await?;
+    if let Some(prompt_tokens) = response.usage.prompt_tokens {
+        context
+            .last_prompt_tokens
+            .store(prompt_tokens as u64, Ordering::Relaxed);
+    }
+    let final_text = response.first_text().unwrap_or_default().to_string();
+    if !final_text.trim().is_empty() {
+        Ok(final_text)
+    } else if !last_text.trim().is_empty() {
         Ok(last_text)
+    } else {
+        Ok("Task processing limit reached. The work done so far has been saved.".to_string())
     }
 }
 
@@ -383,4 +640,62 @@ pub(super) fn image_view_message(image: ImageView) -> ChatMessage {
             image.attachment.name,
         ),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recover_text_tool_calls_parses_gemma_style() {
+        let content =
+            "let me check this. <tool_call:read_file{file_path:\"/tmp/foo.txt\"}> done.";
+        let calls = recover_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fn_name, "read_file");
+        assert_eq!(
+            calls[0].fn_arguments.get("file_path").and_then(Value::as_str),
+            Some("/tmp/foo.txt")
+        );
+    }
+
+    #[test]
+    fn recover_text_tool_calls_handles_escaped_quotes() {
+        let content = r#"<tool_call:grep_search{query:<|"|>foo<|"|>, path:<|"|>src<|"|>}>"#;
+        let calls = recover_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fn_name, "grep_search");
+        assert_eq!(
+            calls[0].fn_arguments.get("query").and_then(Value::as_str),
+            Some("foo")
+        );
+        assert_eq!(
+            calls[0].fn_arguments.get("path").and_then(Value::as_str),
+            Some("src")
+        );
+    }
+
+    #[test]
+    fn recover_text_tool_calls_returns_empty_for_plain_text() {
+        assert!(recover_text_tool_calls("just a normal sentence").is_empty());
+    }
+
+    #[test]
+    fn free_tool_carve_out_recognizes_memory_and_telegram() {
+        assert!(is_free_tool("archival_search"));
+        assert!(is_free_tool("note_search"));
+        assert!(is_free_tool("telegram_send_message"));
+        assert!(is_free_tool("terminate"));
+        assert!(!is_free_tool("bash"));
+        assert!(!is_free_tool("read_file"));
+        assert!(!is_free_tool("edit_file"));
+    }
+
+    #[test]
+    fn is_error_result_detects_standard_error_prefixes() {
+        assert!(is_error_result("Error: file not found"));
+        assert!(is_error_result("Unknown tool: foo"));
+        assert!(!is_error_result("Successfully wrote 12 bytes"));
+        assert!(!is_error_result(""));
+    }
 }
