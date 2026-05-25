@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         system_messages.len()
     );
 
-    let memory = lethe::store::MemoryStore::from_settings(&settings)?;
+    let memory = lethe::memory::MemoryStore::from_settings(&settings)?;
     let shell = ShellTools::new(&settings.paths.workspace_dir);
 
     // Cortex registry: actor context with is_subagent = false, no transport.

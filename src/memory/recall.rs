@@ -8,7 +8,7 @@ use crate::memory::archival::{ArchivalEntry, ArchivalError};
 use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, StoredMessage};
 use crate::memory::notes::{NoteError, NoteSearchResult, parse_frontmatter};
-use crate::store::{MemoryStore, MemoryStoreError};
+use crate::memory::{MemoryStore, MemoryStoreError};
 
 const MAX_RECALL_LINES: usize = 500;
 const MAX_RECALL_CHARS: usize = 2_500 * 4;
@@ -449,7 +449,7 @@ mod tests {
 
     use super::*;
     use crate::memory::messages::MessageRole;
-    use crate::store::MemoryStore;
+    use crate::memory::MemoryStore;
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
         let tmp = tempdir().unwrap();

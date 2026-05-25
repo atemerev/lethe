@@ -134,6 +134,15 @@ pub async fn telegram_command(command: TelegramCommand) -> Result<()> {
         }
         TelegramCommand::Run { timeout, no_recall } => {
             let settings = Settings::from_env();
+            if let Err(message) = settings.llm.ensure_ready() {
+                anyhow::bail!(message);
+            }
+            if settings.telegram.bot_token.trim().is_empty() {
+                anyhow::bail!(
+                    "TELEGRAM_BOT_TOKEN is not set. Get one from @BotFather and \n\
+                     re-run, or run `lethe init` for guided Telegram setup."
+                );
+            }
             let client = TelegramClient::new(
                 settings.telegram.bot_token.clone(),
                 settings.telegram.allowed_user_ids.clone(),

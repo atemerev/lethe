@@ -70,6 +70,10 @@ impl ArchivalMemory {
         Self { db }
     }
 
+    pub fn embedder(&self) -> &super::semantic::EmbeddingEngine {
+        self.db.embedder()
+    }
+
     #[cfg(test)]
     fn open_with_hash_embedder(
         data_path: impl Into<PathBuf>,

@@ -3,4 +3,5 @@
 //! top-level Clap parsing and dispatch.
 
 pub mod handlers;
+pub mod init;
 pub mod telegram_loop;

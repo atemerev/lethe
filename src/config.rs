@@ -44,15 +44,62 @@ pub struct LlmConfig {
     pub llm_provider: String,
     pub llm_api_base: String,
     pub llm_context_limit: usize,
+    /// Per-request `max_tokens` cap on model output. Some models require this
+    /// to be set (Anthropic); others infer from context. Used both for the
+    /// API call and as the reserve we subtract from the context window when
+    /// computing the compaction budget — keeping the two in sync.
+    pub llm_max_output: u32,
 }
 
 impl LlmConfig {
+    /// Return Err with a user-facing message when the minimum LLM config is
+    /// missing — no model id or no auth key. Called from the entry points
+    /// that actually need an LLM (chat, api, telegram) so the user gets a
+    /// specific pointer to `lethe init` instead of a deep-stack bail later.
+    pub fn ensure_ready(&self) -> Result<(), String> {
+        if self.llm_model.trim().is_empty() {
+            return Err(
+                "No LLM model configured. Run `lethe init` for a guided setup,\n\
+                 or set LLM_MODEL=<id> in your environment.\n\
+                 \n\
+                 See .env.example for catalog ids and provider keys."
+                    .to_string(),
+            );
+        }
+        let has_auth = !self.openrouter_api_key.trim().is_empty()
+            || !self.openai_api_key.trim().is_empty()
+            || std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+            || std::env::var("ANTHROPIC_AUTH_TOKEN")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty());
+        if !has_auth {
+            return Err(format!(
+                "No LLM auth key configured for model `{}`. Run `lethe init`,\n\
+                 or set one of: OPENROUTER_API_KEY, ANTHROPIC_API_KEY,\n\
+                 OPENAI_API_KEY (or ANTHROPIC_AUTH_TOKEN for Claude Code subscribers).",
+                self.llm_model
+            ));
+        }
+        Ok(())
+    }
+
     pub fn effective_aux_model(&self) -> &str {
         if self.llm_model_aux.trim().is_empty() {
             &self.llm_model
         } else {
             &self.llm_model_aux
         }
+    }
+
+    /// Effective context window in tokens for the given model id, falling
+    /// back to the configured `llm_context_limit` when the model isn't in
+    /// the catalog. Resolves at call time so a `/model` swap picks up the
+    /// new model's limit on the next turn.
+    pub fn context_limit_for(&self, model_id: &str) -> u64 {
+        crate::llm::models::context_limit_for_model(model_id)
+            .unwrap_or(self.llm_context_limit as u64)
     }
 }
 
@@ -147,6 +194,7 @@ impl Settings {
                 llm_provider: env_string("LLM_PROVIDER", ""),
                 llm_api_base: env_string("LLM_API_BASE", ""),
                 llm_context_limit: env_usize("LLM_CONTEXT_LIMIT", 100_000),
+                llm_max_output: env_u32("LLM_MAX_OUTPUT", 8_000),
             },
             transcription: TranscriptionConfig {
                 provider: env_string("TRANSCRIPTION_PROVIDER", ""),
@@ -267,6 +315,7 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
             llm_provider: String::new(),
             llm_api_base: String::new(),
             llm_context_limit: 100_000,
+            llm_max_output: 8_000,
         },
         telegram: TelegramConfig {
             bot_token: String::new(),

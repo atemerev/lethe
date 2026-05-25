@@ -26,7 +26,7 @@ use lethe::memory::recall::{Hippocampus, HippocampusConfig};
 use lethe::scheduler::curator::MemoryCurator;
 use lethe::scheduler::heartbeat::{Heartbeat, HeartbeatConfig, render_summary_prompt};
 use lethe::scheduler::proactive::{ActiveReminder, format_active_reminders};
-use lethe::store::MemoryStore;
+use lethe::memory::MemoryStore;
 use lethe::todos::{NewTodo, TodoFilter, TodoManager, TodoPriority, TodoStatus, TodoUpdate};
 use lethe::tools::filesystem::FileTools;
 use lethe::tools::shell::ShellTools;
@@ -39,6 +39,9 @@ use crate::{
 
 pub(crate) async fn api_command(port: Option<u16>) -> Result<()> {
     let settings = Settings::from_env();
+    if let Err(message) = settings.llm.ensure_ready() {
+        anyhow::bail!(message);
+    }
     let port = port.unwrap_or(settings.api.port);
     lethe::interfaces::api::serve(settings, port).await
 }
@@ -47,30 +50,106 @@ pub(crate) fn prompt_store(settings: &Settings) -> PromptStore {
     PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir)
 }
 
-pub(crate) fn check() -> Result<()> {
+pub(crate) async fn check() -> Result<()> {
     let settings = Settings::from_env();
     let store = prompt_store(&settings);
     let prompt = store.load("agent_instructions", "");
 
     println!("Lethe Rust runtime");
-    println!("mode: {:?}", settings.mode);
-    println!("home: {}", settings.paths.lethe_home.display());
-    println!("workspace: {}", settings.paths.workspace_dir.display());
-    println!("config: {}", settings.paths.config_dir.display());
-    println!("llm_model: {}", empty_marker(&settings.llm.llm_model));
+    println!("  mode: {:?}", settings.mode);
+    println!("  home: {}", settings.paths.lethe_home.display());
+    println!("  workspace: {}", settings.paths.workspace_dir.display());
+    println!("  config: {}", settings.paths.config_dir.display());
+    println!("  llm_model: {}", empty_marker(&settings.llm.llm_model));
     println!(
-        "llm_model_aux: {}",
+        "  llm_model_aux: {}",
         empty_marker(settings.effective_aux_model())
     );
-    println!("llm_auth: {}", llm_auth_mode_for_settings(&settings));
+    println!("  llm_auth: {}", llm_auth_mode_for_settings(&settings));
     println!(
-        "agent_instructions_source: {}",
+        "  agent_instructions_source: {}",
         source_label(&prompt.source)
     );
     println!(
-        "single_binary_prompt_fallback: {}",
+        "  single_binary_prompt_fallback: {}",
         matches!(prompt.source, PromptSource::Embedded)
     );
+    println!();
+    println!("Live subsystem checks:");
+
+    // -- Config gate --------------------------------------------------------
+    match settings.llm.ensure_ready() {
+        Ok(()) => println!("  [OK]   llm config — model + auth key present"),
+        Err(message) => {
+            println!("  [FAIL] llm config:");
+            for line in message.lines() {
+                println!("         {line}");
+            }
+            println!();
+            println!("Run `lethe init` for a guided setup.");
+            return Ok(());
+        }
+    }
+
+    // -- Memory store -------------------------------------------------------
+    let memory = match lethe::memory::MemoryStore::from_settings(&settings) {
+        Ok(memory) => {
+            println!("  [OK]   memory store — workspace + sqlite open");
+            memory
+        }
+        Err(error) => {
+            println!("  [FAIL] memory store: {error}");
+            return Ok(());
+        }
+    };
+
+    // -- Embedding pipeline -------------------------------------------------
+    // First call triggers the ONNX runtime + model download on a fresh box.
+    // Honour the dotenv-controlled disable knob (some deployments skip this).
+    if std::env::var("LETHE_SEMANTIC_SEARCH_ENABLED")
+        .map(|value| value.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        println!("  [SKIP] embeddings — disabled via LETHE_SEMANTIC_SEARCH_ENABLED=false");
+    } else {
+        let embedder = memory.archival.embedder().clone();
+        match embedder.embed_query("lethe check probe") {
+            Ok(vector) if !vector.is_empty() => println!(
+                "  [OK]   embeddings — produced {}-dim vector",
+                vector.len()
+            ),
+            Ok(_) => println!("  [FAIL] embeddings — returned empty vector"),
+            Err(error) => {
+                println!("  [FAIL] embeddings: {error}");
+                println!("         (first run downloads ~150MB; check network access)");
+            }
+        }
+    }
+
+    // -- LLM ping (cheap aux-model round-trip) ------------------------------
+    let router = LlmRouter::new(LlmRouterConfig::from_settings(&settings));
+    let probe = vec![
+        LlmMessage::system("Reply with the single word: ok"),
+        LlmMessage::user("ready?"),
+    ];
+    match router.complete(probe, true).await {
+        Ok(reply) => {
+            let preview = reply.trim().lines().next().unwrap_or("").to_string();
+            println!(
+                "  [OK]   llm — `{}` ({} via aux model)",
+                preview,
+                settings.effective_aux_model()
+            );
+        }
+        Err(error) => {
+            println!("  [FAIL] llm: {error}");
+            println!(
+                "         (check that the key is valid and the model id `{}` exists)",
+                settings.effective_aux_model()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -264,6 +343,9 @@ pub(crate) fn todo_command(command: TodoCommand) -> Result<()> {
 
 pub(crate) async fn agent_command(command: AgentCommand) -> Result<()> {
     let settings = Settings::from_env();
+    if let Err(message) = settings.llm.ensure_ready() {
+        anyhow::bail!(message);
+    }
     let agent = Agent::from_settings(settings)?;
     let options = AgentOptions {
         use_hippocampus: !matches!(
@@ -632,6 +714,9 @@ pub(crate) fn note_command(command: NoteCommand) -> Result<()> {
 
 pub(crate) async fn chat(message: String, system: Option<String>, aux: bool) -> Result<()> {
     let settings = Settings::from_env();
+    if let Err(message) = settings.llm.ensure_ready() {
+        anyhow::bail!(message);
+    }
     let config = LlmRouterConfig::from_settings(&settings);
     let router = LlmRouter::new(config);
     let system = system.unwrap_or_else(|| {

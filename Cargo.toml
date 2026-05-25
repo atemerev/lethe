@@ -44,3 +44,8 @@ walkdir = "2.5"
 
 [dev-dependencies]
 tempfile = "3.23"
+
+# Local fork of genai 0.5.3 that adds CacheControl::Persistent for Anthropic
+# 1h prompt-cache TTL. See vendor/genai/LETHE_FORK.md for the patch surface.
+[patch.crates-io]
+genai = { path = "vendor/genai" }

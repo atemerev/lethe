@@ -7,6 +7,24 @@ Lethe is a long-running personal AI assistant with local memory, Telegram and HT
 
 This v1 branch is the Rust runtime. It builds as a single binary, uses `genai` as the universal LLM router, and intentionally does not include a web console.
 
+## Quickstart
+
+```bash
+# 1. Build (or download a binary from Releases)
+cargo build --release
+install -m 755 target/release/lethe ~/.local/bin/lethe
+
+# 2. Set up — interactive prompts for provider, model, API key, workspace
+lethe init
+
+# 3. Chat
+lethe chat -m "hello"
+```
+
+`lethe init` writes `~/.lethe/config/.env`, seeds the workspace and core memory blocks, and runs a smoke test against the LLM and embedding pipeline before declaring success. If you'd rather configure by hand, copy `.env.example` and edit. The first turn that uses recall/notes triggers a one-time ~150MB download of the embedding runtime and model (progress is shown).
+
+Sanity-check an existing setup any time with `lethe check` — it pings the model and exercises the embedding pipeline rather than just printing config.
+
 ## Architecture
 
 ```

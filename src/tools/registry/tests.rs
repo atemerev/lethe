@@ -4,7 +4,7 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use super::*;
-use crate::store::MemoryStore;
+use crate::memory::MemoryStore;
 use crate::tools::shell::ShellTools;
 use crate::tools::web::WebTools;
 

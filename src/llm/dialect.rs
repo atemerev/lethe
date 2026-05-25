@@ -32,9 +32,14 @@ pub struct ClaudeDialect;
 
 impl PromptDialect for ClaudeDialect {
     fn cache_marker_for_stable(&self) -> Option<CacheHint> {
-        Some(CacheHint::Ephemeral)
+        // 1-hour TTL: identity, persona, instructions change rarely. The
+        // stable prefix survives between user replies on an always-on
+        // assistant, which is the whole point of prompt caching for us.
+        Some(CacheHint::Persistent)
     }
     fn cache_marker_for_volatile(&self) -> Option<CacheHint> {
+        // 5-minute TTL: memory state, clock, recall change often. Still
+        // worth caching for rapid back-and-forth within a conversation.
         Some(CacheHint::Ephemeral)
     }
 }

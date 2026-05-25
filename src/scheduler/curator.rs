@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::memory::archival::ArchivalError;
 use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, StoredMessage};
-use crate::store::{MemoryStore, MemoryStoreError};
+use crate::memory::{MemoryStore, MemoryStoreError};
 
 pub const CURATOR_CADENCE_SECONDS: i64 = 6 * 60 * 60;
 const HARVEST_RECENT_LIMIT: usize = 200;
@@ -245,7 +245,7 @@ mod tests {
 
     use super::*;
     use crate::memory::messages::MessageRole;
-    use crate::store::MemoryStore;
+    use crate::memory::MemoryStore;
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
         let tmp = tempdir().unwrap();

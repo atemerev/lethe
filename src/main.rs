@@ -19,6 +19,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Interactive setup: pick provider + model + API key, write
+    /// ~/.lethe/config/.env, seed the workspace, run a smoke test.
+    Init,
     /// Validate the Rust runtime configuration and embedded prompt access.
     Check,
     /// Print a prompt template after workspace/config/embedded resolution.
@@ -471,7 +474,8 @@ async fn main() -> Result<()> {
     };
     use cli::handlers as h;
     match command {
-        Command::Check => h::check(),
+        Command::Init => cli::init::run().await,
+        Command::Check => h::check().await,
         Command::Prompt { name } => h::print_prompt(&name),
         Command::InitMemory => h::init_memory(),
         Command::Memory { command } => h::memory_command(command),

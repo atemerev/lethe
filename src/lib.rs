@@ -7,6 +7,5 @@ pub mod llm;
 pub mod memory;
 pub mod scheduler;
 pub mod sqlite_ext;
-pub mod store;
 pub mod todos;
 pub mod tools;

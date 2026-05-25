@@ -9,10 +9,15 @@ use crate::memory::messages::StoredMessage;
 const RECENT_TOOL_CONTEXT_GROUPS: usize = 2;
 const OLD_TOOL_RESULT_PREVIEW_LINES: usize = 5;
 const OLD_TOOL_RESULT_PREVIEW_CHARS: usize = 2_000;
-const TOOL_CONTEXT_MIN_CHARS: usize = 64 * 1024;
-const TOOL_CONTEXT_MAX_CHARS: usize = 400_000;
+/// Tool-context block gets this share of the effective model context. 30%
+/// is generous because tool history is genuinely high-signal, but it leaves
+/// room for the system prompt, user message, and conversation history.
 const TOOL_CONTEXT_SHARE_NUMERATOR: usize = 3;
 const TOOL_CONTEXT_SHARE_DENOMINATOR: usize = 10;
+/// Hard floor for the tool-context block — guarantees at least one
+/// meaningful tool call fits even when the model's context is tiny. ~16k
+/// chars is roughly 4k tokens, room for one big assistant call + result.
+const TOOL_CONTEXT_FLOOR_CHARS: usize = 16 * 1024;
 const SEARCH_RESULT_SKIP_TOOLS: &[&str] = &["conversation_search", "archival_search"];
 
 #[derive(Clone, Debug)]
@@ -293,13 +298,16 @@ fn preview_tool_result(content: &str) -> String {
 }
 
 fn tool_context_budget_chars(settings: &Settings) -> usize {
-    let proportional = settings
+    // Use the per-model context limit when known so a /model swap to a
+    // larger window grows the tool-context allowance correspondingly.
+    let context_tokens = settings
         .llm
-        .llm_context_limit
+        .context_limit_for(&settings.llm.llm_model) as usize;
+    let proportional = context_tokens
         .saturating_mul(4)
         .saturating_mul(TOOL_CONTEXT_SHARE_NUMERATOR)
         / TOOL_CONTEXT_SHARE_DENOMINATOR;
-    proportional.clamp(TOOL_CONTEXT_MIN_CHARS, TOOL_CONTEXT_MAX_CHARS)
+    proportional.max(TOOL_CONTEXT_FLOOR_CHARS)
 }
 
 fn cap_context_text(value: &str, max_chars: usize, label: &str) -> String {

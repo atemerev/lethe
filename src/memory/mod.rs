@@ -9,6 +9,7 @@ pub mod messages;
 pub mod notes;
 pub mod recall;
 pub mod semantic;
+pub mod store;
 
 pub use db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow, ScoredRow};
 
@@ -34,3 +35,4 @@ pub use semantic::{
     EmbeddingEngine, LEGACY_EMBEDDING_DIMENSIONS, LEGACY_EMBEDDING_MODEL, SemanticDocument,
     SemanticHit, SemanticIndexConfig, TextEmbedder,
 };
+pub use store::{MemoryStats, MemoryStore, MemoryStoreError, MemoryStoreResult};

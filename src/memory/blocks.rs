@@ -102,6 +102,14 @@ impl BlockManager {
             embedded_meta("human"),
         )?;
         self.write_seed_if_missing("project", embedded_block("project").unwrap(), None)?;
+        // The conversation_summary block is maintained automatically by the
+        // summarizer when history overflows the live window. Seeded empty
+        // and hidden so it doesn't clutter memory_list.
+        self.write_seed_if_missing(
+            "conversation_summary",
+            embedded_block("conversation_summary").unwrap_or(""),
+            embedded_meta("conversation_summary"),
+        )?;
         // Backfill: legacy installs may already have a `human` block without the
         // `stable: true` marker. Patch its metadata in place so the system prompt
         // continues to place it in the stable section.
@@ -185,6 +193,23 @@ impl BlockManager {
         value: Option<&str>,
         description: Option<&str>,
     ) -> MemoryResult<bool> {
+        self.update_internal(label, value, description, false)
+    }
+
+    /// Like [`update`] but ignores the `read_only` flag. Used by the runtime
+    /// to refresh blocks the model is not allowed to edit by hand
+    /// (`conversation_summary`, future maintenance blocks).
+    pub fn system_update(&self, label: &str, value: &str) -> MemoryResult<bool> {
+        self.update_internal(label, Some(value), None, true)
+    }
+
+    fn update_internal(
+        &self,
+        label: &str,
+        value: Option<&str>,
+        description: Option<&str>,
+        bypass_read_only: bool,
+    ) -> MemoryResult<bool> {
         validate_label(label)?;
         let block_path = self.block_path(label);
         if !block_path.exists() {
@@ -192,7 +217,7 @@ impl BlockManager {
         }
 
         let mut meta = self.load_meta(label)?;
-        if meta.read_only && value.is_some() {
+        if !bypass_read_only && meta.read_only && value.is_some() {
             return Err(MemoryError::ReadOnly(label.to_string()));
         }
         if let Some(value) = value {
@@ -352,11 +377,14 @@ fn enforce_limit(value: &str, limit: usize) -> MemoryResult<()> {
     }
 }
 
+pub(crate) const CONVERSATION_SUMMARY_LABEL: &str = "conversation_summary";
+
 fn embedded_block(name: &str) -> Option<&'static str> {
     match name {
         "identity" => Some(include_str!("../../config/blocks/identity.md")),
         "human" => Some(include_str!("../../config/blocks/human.md")),
         "project" => Some(include_str!("../../config/blocks/project.md")),
+        "conversation_summary" => Some(include_str!("../../config/blocks/conversation_summary.md")),
         _ => None,
     }
 }
@@ -365,6 +393,9 @@ fn embedded_meta(name: &str) -> Option<&'static str> {
     match name {
         "identity" => Some(include_str!("../../config/blocks/identity.meta.json")),
         "human" => Some(include_str!("../../config/blocks/human.meta.json")),
+        "conversation_summary" => {
+            Some(include_str!("../../config/blocks/conversation_summary.meta.json"))
+        }
         _ => None,
     }
 }
@@ -454,7 +485,10 @@ mod tests {
             .into_iter()
             .map(|block| block.label)
             .collect();
-        assert_eq!(labels, vec!["human", "identity", "project"]);
+        assert_eq!(
+            labels,
+            vec!["conversation_summary", "human", "identity", "project"]
+        );
         let identity = manager.get("identity").unwrap().unwrap();
         assert_eq!(identity.limit, 20_000);
         assert!(identity.description.contains("System prompt"));

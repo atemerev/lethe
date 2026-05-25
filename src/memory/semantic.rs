@@ -140,9 +140,13 @@ impl FastEmbedTextEmbedder {
                 legacy_snowflake_embedder(&self.cache_dir)?
             } else {
                 let model = parse_fastembed_model(&self.model_name)?;
+                // First-run download is ~150MB (ONNX runtime + model). Show
+                // progress so users on a fresh machine see what's happening
+                // instead of an apparent hang. Quiet on subsequent runs since
+                // there's nothing to download.
                 let options = InitOptions::new(model)
                     .with_cache_dir(self.cache_dir.clone())
-                    .with_show_download_progress(false);
+                    .with_show_download_progress(true);
                 TextEmbedding::try_new(options)?
             });
         }

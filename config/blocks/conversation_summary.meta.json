@@ -1,0 +1,8 @@
+{
+  "label": "conversation_summary",
+  "description": "Rolling structured summary of conversation turns that have aged out of the live history window. Auto-maintained — do not edit by hand.",
+  "limit": 8000,
+  "read_only": true,
+  "hidden": true,
+  "stable": false
+}

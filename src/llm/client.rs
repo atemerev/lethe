@@ -44,14 +44,19 @@ pub enum LlmRole {
 }
 
 /// Cache hint that survives the LlmMessage abstraction. Mirrors the subset of
-/// genai's CacheControl we actually use (currently just an ephemeral marker
-/// for Anthropic). Mapped at the boundary in `into_chat_message`.
+/// genai's CacheControl we actually use. Mapped at the boundary in
+/// `into_chat_message`. Other providers ignore the hint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheHint {
-    /// Mark this message as a cache breakpoint. Anthropic caches the prefix
-    /// up to and including this message; other providers ignore it.
+    /// Standard 5-minute ephemeral cache. Use for content that may shift
+    /// turn-to-turn but should still cache for quick follow-ups.
     Ephemeral,
+    /// 1-hour extended cache (Anthropic `{type: ephemeral, ttl: "1h"}`,
+    /// via our vendored genai patch). Use for the long-stable prefix
+    /// (identity, persona, instructions) so it survives gaps between user
+    /// replies on an always-on assistant.
+    Persistent,
 }
 
 /// A tool call recorded earlier (either in this turn's iterations or in a
@@ -62,6 +67,12 @@ pub struct HistoricalToolCall {
     pub call_id: String,
     pub fn_name: String,
     pub fn_arguments: serde_json::Value,
+    /// Reasoning continuation tokens emitted by thinking-capable models
+    /// (currently Gemini). Round-tripped so multi-turn tool chains preserve
+    /// the model's internal reasoning state. `None` for providers that
+    /// don't use this mechanism.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signatures: Option<Vec<String>>,
 }
 
 /// Tool result associated with a previously emitted tool_use_id.
@@ -69,6 +80,11 @@ pub struct HistoricalToolCall {
 pub struct HistoricalToolResponse {
     pub call_id: String,
     pub content: String,
+    /// Persistent message id of the tool result row, when known. Lets us
+    /// archive the full text and leave a `conversation_get(message_id=...)`
+    /// reference that the agent can resolve back to the original payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -199,7 +215,7 @@ impl LlmRouterConfig {
             aux_model: settings.effective_aux_model().to_string(),
             provider: settings.llm.llm_provider.clone(),
             api_base: settings.llm.llm_api_base.clone(),
-            max_output_tokens: 8000,
+            max_output_tokens: settings.llm.llm_max_output,
             temperature_millidegrees: 700,
         }
     }
@@ -256,7 +272,11 @@ impl LlmRouter {
     ) -> Result<ChatResponse> {
         let model = self.config.model_for(use_aux).trim();
         if model.is_empty() {
-            bail!("LLM_MODEL is required for chat");
+            bail!(
+                "LLM_MODEL is not set. Run `lethe init` for guided setup, or \
+                 set LLM_MODEL=<id> in your environment (see .env.example for \
+                 known ids and provider keys)."
+            );
         }
 
         let options = self.config.chat_options();
@@ -1606,7 +1626,7 @@ fn into_chat_message(message: LlmMessage) -> ChatMessage {
                 call_id: call.call_id,
                 fn_name: call.fn_name,
                 fn_arguments: call.fn_arguments,
-                thought_signatures: None,
+                thought_signatures: call.thought_signatures,
             }));
         }
         let mut chat = ChatMessage::assistant(MessageContent::from_parts(parts));
@@ -1631,6 +1651,7 @@ fn into_chat_message(message: LlmMessage) -> ChatMessage {
 fn cache_hint_to_genai(hint: CacheHint) -> genai::chat::CacheControl {
     match hint {
         CacheHint::Ephemeral => genai::chat::CacheControl::Ephemeral,
+        CacheHint::Persistent => genai::chat::CacheControl::Persistent,
     }
 }
 

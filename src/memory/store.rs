@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::Settings;
-use crate::memory::archival::{ArchivalEntry, ArchivalError, ArchivalMemory};
-use crate::memory::messages::{MessageHistory, MessageHistoryError, MessageRole, StoredMessage};
-use crate::memory::notes::{NoteError, NoteSearchResult, NoteStore};
-use crate::memory::{BlockManager, MemoryBlock, MemoryDb, MemoryError};
 use crate::todos::{TodoError, TodoManager};
+
+use super::archival::{ArchivalEntry, ArchivalError, ArchivalMemory};
+use super::blocks::{BlockManager, MemoryBlock, MemoryError};
+use super::db::MemoryDb;
+use super::messages::{MessageHistory, MessageHistoryError, MessageRole, StoredMessage};
+use super::notes::{NoteError, NoteSearchResult, NoteStore};
 
 #[derive(Debug, Error)]
 pub enum MemoryStoreError {
@@ -143,6 +145,27 @@ impl MemoryStore {
             .join("\n\n"))
     }
 
+    /// Current rolling summary of conversation turns that have aged out of the
+    /// live history window. Maintained by the summarizer; the prompt assembler
+    /// renders it as a dedicated `<conversation_summary>` block.
+    pub fn conversation_summary(&self) -> MemoryStoreResult<String> {
+        Ok(self
+            .blocks
+            .get(super::blocks::CONVERSATION_SUMMARY_LABEL)?
+            .map(|block| block.value)
+            .unwrap_or_default())
+    }
+
+    /// Replace the rolling conversation summary. Called by the summarizer
+    /// after merging the dropped batch with the previous summary. Uses the
+    /// system bypass so the block can stay `read_only` against the LLM.
+    pub fn set_conversation_summary(&self, value: &str) -> MemoryStoreResult<()> {
+        self.blocks
+            .system_update(super::blocks::CONVERSATION_SUMMARY_LABEL, value)
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     pub fn get_context_split(&self) -> MemoryStoreResult<(String, String)> {
         let blocks = self.blocks.list_blocks(false)?;
         let mut stable_blocks = Vec::new();
@@ -243,35 +266,6 @@ impl MemoryStore {
         lines.push("</memory_metadata>".to_string());
         Ok(lines.join("\n"))
     }
-}
-
-/// Coarse time-of-day label for behavioural nudges. Keeps the buckets small
-/// so the model has a clear signal without having to do clock math.
-pub fn time_of_day_label(hour: u32) -> &'static str {
-    match hour {
-        5..=6 => "early_morning",
-        7..=11 => "morning",
-        12..=16 => "afternoon",
-        17..=20 => "evening",
-        21..=23 => "night",
-        _ => "late_night",
-    }
-}
-
-/// `<runtime_context source="clock">` block surfacing the current time. Lives
-/// outside `memory_metadata` so a model scanning for "when is now?" finds it
-/// at a stable location instead of buried in memory state.
-pub fn format_clock_block() -> String {
-    let now = Utc::now();
-    let local = now.with_timezone(&Local);
-    let weekday = local.format("%A").to_string();
-    let hour = local.format("%H").to_string().parse::<u32>().unwrap_or(0);
-    format!(
-        "<runtime_context source=\"clock\">\n- now={}\n- weekday={}\n- time_of_day={}\n</runtime_context>",
-        format_timestamp(now),
-        weekday,
-        time_of_day_label(hour),
-    )
 }
 
 fn ensure_skills_bootstrap(skills_dir: &Path) -> std::io::Result<()> {
@@ -472,14 +466,17 @@ mod tests {
             .into_iter()
             .map(|block| block.label)
             .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["human", "identity", "project"]);
+        assert_eq!(
+            labels,
+            vec!["conversation_summary", "human", "identity", "project"]
+        );
 
         store
             .notes
             .create("Test note", "body", &["skill".to_string()], None)
             .unwrap();
         let stats = store.stats().unwrap();
-        assert_eq!(stats.memory_blocks, 3);
+        assert_eq!(stats.memory_blocks, 4);
         assert_eq!(stats.notes, 1);
         assert_eq!(stats.total_messages, 0);
         drop(tmp);

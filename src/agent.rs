@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::anyhow;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+mod summarizer;
 mod tool_context;
 mod tool_loop;
 use tool_context::recent_tool_context_for_turn;
@@ -32,7 +34,7 @@ use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, MessageRole, StoredMessage};
 use crate::memory::recall::{Hippocampus, HippocampusConfig, HippocampusError};
 use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
-use crate::store::{MemoryStore, MemoryStoreError};
+use crate::memory::{MemoryStore, MemoryStoreError};
 use crate::tools::registry::{
     ActorToolContext, SharedActorRegistry, ToolRuntime, requestable_tools_directory_for,
 };
@@ -61,12 +63,23 @@ pub struct AgentTurn {
     pub messages: Vec<LlmMessage>,
     pub recall: Option<String>,
     pub synthetic: bool,
+    /// History messages that compaction dropped from this turn. Carried so
+    /// the post-turn summarizer can incorporate them into the rolling
+    /// conversation_summary block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_for_summary: Vec<LlmMessage>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentOptions {
     pub use_hippocampus: bool,
     pub history_limit: usize,
+    /// History compaction budget for this turn. Derived per-turn from the
+    /// configured context limit + recent prompt token usage (see
+    /// [`CompactionBudget::from_settings`]); tests and entry points without
+    /// settings should leave [`CompactionBudget::legacy_default`].
+    #[serde(skip)]
+    pub compaction_budget: CompactionBudget,
 }
 
 impl Default for AgentOptions {
@@ -74,6 +87,7 @@ impl Default for AgentOptions {
         Self {
             use_hippocampus: true,
             history_limit: 20,
+            compaction_budget: CompactionBudget::legacy_default(),
         }
     }
 }
@@ -128,6 +142,11 @@ pub struct Agent {
     principal_actor_id: Option<String>,
     notification_gate: Mutex<NotificationGate>,
     processed_notification_events: Mutex<HashSet<String>>,
+    /// `prompt_tokens` from the most recent LLM response. Drives the
+    /// per-turn compaction budget so we shrink history when we're actually
+    /// pressing the model's context limit, not based on a crude char guess.
+    /// Zero means "no measurement yet".
+    last_prompt_tokens: Arc<AtomicU64>,
 }
 
 impl Agent {
@@ -138,6 +157,7 @@ impl Agent {
             &settings,
         ))));
         let shell = ShellTools::new(&settings.paths.workspace_dir);
+        let last_prompt_tokens = Arc::new(AtomicU64::new(0));
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
             let principal_id = registry.spawn(
@@ -152,6 +172,7 @@ impl Agent {
                     memory.clone(),
                     router.clone(),
                     shell.clone(),
+                    last_prompt_tokens.clone(),
                 ))
                 .map_err(|error| AgentError::Llm(anyhow!("actor runtime failed: {error}")))?;
             (Some(runtime), Some(principal_id))
@@ -168,6 +189,7 @@ impl Agent {
             principal_actor_id,
             notification_gate: Mutex::new(NotificationGate::new(15 * 60)),
             processed_notification_events: Mutex::new(HashSet::new()),
+            last_prompt_tokens,
         })
     }
 
@@ -222,6 +244,18 @@ impl Agent {
 
     /// Assemble the LLM messages for a single turn without calling the model.
     pub async fn prepare_turn(&self, req: &TurnRequest) -> AgentResult<AgentTurn> {
+        let mut request_options = req.options.clone();
+        let last_prompt_tokens = match self.last_prompt_tokens.load(Ordering::Relaxed) {
+            0 => None,
+            value => Some(value),
+        };
+        request_options.compaction_budget =
+            CompactionBudget::from_settings(&self.settings, last_prompt_tokens);
+        let req = TurnRequest {
+            options: request_options,
+            ..req.clone()
+        };
+        let req = &req;
         let mut turn = prepare_turn(
             &self.settings,
             self.memory.as_ref(),
@@ -292,6 +326,7 @@ impl Agent {
                 .add(MessageRole::User, &message, metadata)?;
         }
         let runtime = self.with_actor_runtime(runtime);
+        let dropped_for_summary = turn.dropped_for_summary.clone();
         let response = self
             .complete_turn_with_tools(turn.messages, runtime, !turn.synthetic)
             .await?;
@@ -300,6 +335,21 @@ impl Agent {
             self.memory
                 .messages
                 .add(MessageRole::Assistant, &history_content, None)?;
+        }
+        if !dropped_for_summary.is_empty() {
+            // Roll the dropped batch into the persistent conversation_summary
+            // block. Errors are logged, not propagated — losing a summary
+            // update should never abort the user-facing turn.
+            if let Err(error) = summarizer::update_conversation_summary(
+                self.memory.as_ref(),
+                &self.prompts,
+                self.router.clone(),
+                &dropped_for_summary,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, "conversation summary update failed");
+            }
         }
         if self.settings.background.curator_enabled {
             let _ = self.run_curator_once(false);
@@ -428,6 +478,7 @@ impl Agent {
                 memory: self.memory.clone(),
                 router: self.router.clone(),
                 shell: self.shell.clone(),
+                last_prompt_tokens: self.last_prompt_tokens.clone(),
             },
             messages,
             runtime,
@@ -467,7 +518,9 @@ pub fn prepare_turn(
     let dialect = dialect_for_model(&settings.llm.llm_model);
     let mut messages = parts.into_messages();
     apply_cache_markers(&mut messages, dialect.as_ref());
-    messages.extend(history_to_llm_messages(recent));
+    let mut history_messages = history_to_llm_messages(recent);
+    let dropped_for_summary = compact_history(&mut history_messages, options.compaction_budget);
+    messages.extend(history_messages);
     let user_message = if attachments.is_empty() {
         LlmMessage::user(message.to_string())
     } else {
@@ -479,6 +532,7 @@ pub fn prepare_turn(
         messages,
         recall,
         synthetic,
+        dropped_for_summary,
     })
 }
 
@@ -530,7 +584,8 @@ fn build_system_prompt(
         .unwrap_or_default();
     let instructions = prompts.load("agent_instructions", "You are Lethe.").text;
     let (memory_stable, memory_volatile) = memory.get_context_split()?;
-    let clock_block = crate::store::format_clock_block();
+    let summary = memory.conversation_summary()?;
+    let clock_block = format_clock_block();
 
     let mut stable_builder = PromptBuilder::new();
     stable_builder
@@ -539,6 +594,9 @@ fn build_system_prompt(
         .raw(memory_stable);
 
     let mut volatile_builder = PromptBuilder::new();
+    if !summary.trim().is_empty() {
+        volatile_builder.block("conversation_summary", summary);
+    }
     volatile_builder.raw(memory_volatile).raw(clock_block);
 
     if let Some(tool_context) = tool_context {
@@ -703,6 +761,7 @@ fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
                         responses.push(HistoricalToolResponse {
                             call_id,
                             content: tool_msg.content,
+                            source_message_id: Some(tool_msg.id),
                         });
                     }
                 }
@@ -748,10 +807,20 @@ fn extract_historical_tool_calls(metadata: &Value) -> Vec<HistoricalToolCall> {
                                 .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                         })
                         .unwrap_or(Value::Object(serde_json::Map::new()));
+                    let thought_signatures =
+                        call.get("thought_signatures").and_then(Value::as_array).map(
+                            |values| {
+                                values
+                                    .iter()
+                                    .filter_map(|value| value.as_str().map(str::to_string))
+                                    .collect::<Vec<_>>()
+                            },
+                        );
                     Some(HistoricalToolCall {
                         call_id: call_id.to_string(),
                         fn_name: fn_name.to_string(),
                         fn_arguments,
+                        thought_signatures,
                     })
                 })
                 .collect()
@@ -770,6 +839,262 @@ fn volatile_system_message_mut(messages: &mut [LlmMessage]) -> Option<&mut LlmMe
         .iter_mut()
         .rev()
         .find(|message| message.role == LlmRole::System)
+}
+
+/// Coarse time-of-day label for behavioural nudges. Keeps the buckets small
+/// so the model has a clear signal without having to do clock math.
+fn time_of_day_label(hour: u32) -> &'static str {
+    match hour {
+        5..=6 => "early_morning",
+        7..=11 => "morning",
+        12..=16 => "afternoon",
+        17..=20 => "evening",
+        21..=23 => "night",
+        _ => "late_night",
+    }
+}
+
+/// `<runtime_context source="clock">` block surfacing the current time. Lives
+/// at top level of the volatile system prompt so a model scanning for "when
+/// is now?" finds it at a stable location instead of buried in memory state.
+fn format_clock_block() -> String {
+    let now = chrono::Utc::now();
+    let local = now.with_timezone(&Local);
+    let weekday = local.format("%A").to_string();
+    let hour = local.format("%H").to_string().parse::<u32>().unwrap_or(0);
+    format!(
+        "<runtime_context source=\"clock\">\n- now={}\n- weekday={}\n- time_of_day={}\n</runtime_context>",
+        local.format("%a %Y-%m-%d %H:%M:%S %Z"),
+        weekday,
+        time_of_day_label(hour),
+    )
+}
+
+/// Floor for the per-tool-result inline cap when we can't derive a budget
+/// from the model's context window (e.g. tests, fallback paths).
+const MIN_TOOL_RESULT_INLINE_CHARS: usize = 4_000;
+/// Cap on a single tool result that stays inline, as a fraction of total
+/// history budget. Larger results get replaced with a compact reference
+/// pointing at the persistent message id (`conversation_get(message_id=...)`).
+const TOOL_RESULT_INLINE_BUDGET_DIVISOR: usize = 15;
+/// Number of trailing tool-call groups whose results we never archive. The
+/// most recent two turns of tool work are the freshest reasoning context.
+const RECENT_TOOL_CALL_GROUPS_TO_PRESERVE: usize = 2;
+
+/// Rough conversion factor — Anthropic/OpenAI English+JSON averages ~4
+/// chars per token. Use as a budget heuristic, not for exact accounting.
+const CHARS_PER_TOKEN: usize = 4;
+/// Fallback fixed-overhead estimate when we have no measured prompt size
+/// yet. Covers system prompt + tool schemas + memory blocks for a typical
+/// cortex turn. Refined per-turn via [`CompactionBudget::from_settings`].
+const ESTIMATED_FIXED_OVERHEAD_TOKENS: u64 = 6_000;
+/// Start compacting when history chars exceed this fraction of the budget.
+const COMPACTION_TRIGGER_PCT: usize = 85;
+/// Compact down to this fraction of the budget so we have slack to grow
+/// across the next few turns before retriggering.
+const COMPACTION_KEEP_PCT: usize = 70;
+/// User messages weigh this much less when deciding the keep window — a
+/// user message of N chars contributes N/3 to the running cutoff total so
+/// user turns survive deeper into the kept history than assistant turns.
+const USER_MESSAGE_WEIGHT_DIVISOR: usize = 3;
+
+/// Per-turn budget for the history portion of the prompt. Computed from the
+/// configured context limit, the output reservation, and (when known) the
+/// prompt-token count from the prior LLM response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompactionBudget {
+    pub max_history_chars: usize,
+}
+
+impl Default for CompactionBudget {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl CompactionBudget {
+    /// Derive a budget from settings + the prompt-token count reported by
+    /// the most recent LLM response (if any). Without prior measurement we
+    /// fall back to a conservative fixed-overhead estimate. The output
+    /// reservation is read from `settings.llm.llm_max_output` so a deployment
+    /// that raises max_output (e.g. for a thinking-capable model) also
+    /// raises the reserve automatically. Context window is auto-detected
+    /// from the current model id via the per-model catalog.
+    pub fn from_settings(settings: &Settings, last_prompt_tokens: Option<u64>) -> Self {
+        let context_tokens = settings.llm.context_limit_for(&settings.llm.llm_model);
+        let output_reserve_tokens = settings.llm.llm_max_output as u64;
+        let overhead_tokens = match last_prompt_tokens {
+            // Use the prior prompt size as an overhead floor: it includes
+            // the system + tools + memory + history we just sent. Halving it
+            // gives a soft estimate of the non-history portion that's likely
+            // stable, leaving the rest for new history this turn.
+            Some(prior) if prior > 0 => (prior / 2).max(ESTIMATED_FIXED_OVERHEAD_TOKENS),
+            _ => ESTIMATED_FIXED_OVERHEAD_TOKENS,
+        };
+        let available = context_tokens
+            .saturating_sub(output_reserve_tokens)
+            .saturating_sub(overhead_tokens);
+        Self {
+            max_history_chars: (available as usize).saturating_mul(CHARS_PER_TOKEN),
+        }
+    }
+
+    /// Legacy fixed budget for tests and entry points without a configured
+    /// context limit.
+    pub fn legacy_default() -> Self {
+        Self {
+            max_history_chars: 120_000,
+        }
+    }
+
+    fn trigger_chars(self) -> usize {
+        self.max_history_chars * COMPACTION_TRIGGER_PCT / 100
+    }
+
+    fn keep_chars(self) -> usize {
+        self.max_history_chars * COMPACTION_KEEP_PCT / 100
+    }
+
+    /// Per-tool-result inline cap scaled to this budget. Big-context models
+    /// keep more inline before archiving; small-context models archive
+    /// aggressively to avoid one chunky tool result eating the whole budget.
+    fn max_tool_result_inline_chars(self) -> usize {
+        (self.max_history_chars / TOOL_RESULT_INLINE_BUDGET_DIVISOR.max(1))
+            .max(MIN_TOOL_RESULT_INLINE_CHARS)
+    }
+}
+
+/// Multi-pass compaction modelled after the Python main branch.
+///
+/// Pass 1: archive any tool result older than the most recent
+/// [`RECENT_TOOL_CALL_GROUPS_TO_PRESERVE`] groups whose payload exceeds
+/// the budget's per-tool inline cap. We replace the content with a one-line
+/// reference that points back at the persistent message id, so the agent can
+/// `conversation_get(message_id="…")` to retrieve the full text if needed.
+///
+/// Pass 2: if we're still over the trigger threshold, drop oldest messages
+/// down to the keep target. Counts user messages at reduced weight
+/// ([`USER_MESSAGE_WEIGHT_DIVISOR`]) so user turns survive deeper into the
+/// kept window than equally-sized assistant turns. Tool_call/tool_result
+/// pairs are dropped atomically so the wire format stays valid.
+///
+/// The dropped batch is returned to the caller so it can be summarized into
+/// the rolling `conversation_summary` block (Pass 3, async, in chat_once).
+fn compact_history(messages: &mut Vec<LlmMessage>, budget: CompactionBudget) -> Vec<LlmMessage> {
+    archive_old_tool_results(messages, budget.max_tool_result_inline_chars());
+    if total_chars(messages) <= budget.trigger_chars() {
+        return Vec::new();
+    }
+    drop_oldest_to_target(messages, budget.keep_chars())
+}
+
+fn message_chars(message: &LlmMessage) -> usize {
+    message.content.chars().count()
+        + message
+            .tool_responses
+            .iter()
+            .map(|response| response.content.chars().count())
+            .sum::<usize>()
+}
+
+fn total_chars(messages: &[LlmMessage]) -> usize {
+    messages.iter().map(message_chars).sum()
+}
+
+/// Per Python's logic: walk newest-first, accumulating `effective` weighted
+/// chars, find the index at which we'd exceed `target_chars`. User messages
+/// count at 1/[`USER_MESSAGE_WEIGHT_DIVISOR`] of their raw size so they're
+/// retained more aggressively.
+fn weighted_keep_cutoff(messages: &[LlmMessage], target_chars: usize) -> usize {
+    let mut weighted = 0usize;
+    for (idx, message) in messages.iter().enumerate().rev() {
+        let raw = message_chars(message);
+        let effective = if message.role == LlmRole::User {
+            raw / USER_MESSAGE_WEIGHT_DIVISOR.max(1)
+        } else {
+            raw
+        };
+        if weighted.saturating_add(effective) > target_chars {
+            return idx + 1;
+        }
+        weighted += effective;
+    }
+    0
+}
+
+/// Adjust the proposed cutoff so we never split a tool_call/tool_result
+/// pair across the kept/dropped boundary. Back up until the boundary
+/// neither cuts off a trailing assistant_tool_calls nor starts with a
+/// leading tool_results.
+fn pair_safe_cutoff(messages: &[LlmMessage], proposed: usize) -> usize {
+    let mut cutoff = proposed;
+    while cutoff > 0 && cutoff < messages.len() {
+        let prev_has_calls = !messages[cutoff - 1].tool_calls.is_empty();
+        let at_has_responses = !messages[cutoff].tool_responses.is_empty();
+        if prev_has_calls || at_has_responses {
+            cutoff -= 1;
+        } else {
+            break;
+        }
+    }
+    cutoff
+}
+
+fn archive_old_tool_results(messages: &mut [LlmMessage], inline_cap: usize) {
+    // Walk back from the end to find the indices of the last N tool_result
+    // messages; those are the "fresh" groups we leave untouched.
+    let mut fresh_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut seen_groups = 0;
+    for (idx, message) in messages.iter().enumerate().rev() {
+        if !message.tool_responses.is_empty() {
+            fresh_indices.insert(idx);
+            seen_groups += 1;
+            if seen_groups >= RECENT_TOOL_CALL_GROUPS_TO_PRESERVE {
+                break;
+            }
+        }
+    }
+
+    for (idx, message) in messages.iter_mut().enumerate() {
+        if message.tool_responses.is_empty() || fresh_indices.contains(&idx) {
+            continue;
+        }
+        for response in &mut message.tool_responses {
+            if response.content.chars().count() <= inline_cap {
+                continue;
+            }
+            let original_chars = response.content.chars().count();
+            let reference = match &response.source_message_id {
+                Some(id) => format!(
+                    "[{} chars archived — conversation_get(message_id=\"{}\") for full text]",
+                    original_chars, id
+                ),
+                None => format!(
+                    "[{} chars archived — original message id unavailable]",
+                    original_chars
+                ),
+            };
+            response.content = reference;
+        }
+    }
+}
+
+fn drop_oldest_to_target(
+    messages: &mut Vec<LlmMessage>,
+    target_chars: usize,
+) -> Vec<LlmMessage> {
+    // Always keep at least the last two messages so the LLM has SOME
+    // immediate context to react to.
+    const MIN_RETAINED: usize = 2;
+    let proposed = weighted_keep_cutoff(messages, target_chars);
+    let cutoff = pair_safe_cutoff(messages, proposed)
+        .min(messages.len().saturating_sub(MIN_RETAINED));
+
+    let mut dropped = Vec::with_capacity(cutoff);
+    for _ in 0..cutoff {
+        dropped.push(messages.remove(0));
+    }
+    dropped
 }
 
 /// Attach the dialect's cache hints to the system messages: the first system
@@ -996,6 +1321,7 @@ mod tests {
             &AgentOptions {
                 history_limit: 20,
                 use_hippocampus: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1019,6 +1345,135 @@ mod tests {
         assert_eq!(result_msg.tool_responses.len(), 1);
         assert_eq!(result_msg.tool_responses[0].call_id, "call-abc");
         assert_eq!(result_msg.tool_responses[0].content, "file contents: hello");
+    }
+
+    #[test]
+    fn compact_history_archives_old_tool_results_above_inline_cap() {
+        let inline_cap = CompactionBudget::legacy_default().max_tool_result_inline_chars();
+        let big = "x".repeat(inline_cap + 100);
+        let small = "y".repeat(200);
+        let mut messages = vec![
+            LlmMessage::user("first"),
+            LlmMessage::assistant_with_tool_calls(
+                "running A",
+                vec![HistoricalToolCall {
+                    call_id: "c-old".to_string(),
+                    fn_name: "bash".to_string(),
+                    fn_arguments: json!({}),
+                    thought_signatures: None,
+                }],
+            ),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "c-old".to_string(),
+                content: big.clone(),
+                source_message_id: Some("msg-old".to_string()),
+            }]),
+            // 2 recent groups follow — they must NOT be archived.
+            LlmMessage::assistant_with_tool_calls(
+                "running B",
+                vec![HistoricalToolCall {
+                    call_id: "c-mid".to_string(),
+                    fn_name: "bash".to_string(),
+                    fn_arguments: json!({}),
+                    thought_signatures: None,
+                }],
+            ),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "c-mid".to_string(),
+                content: big.clone(),
+                source_message_id: Some("msg-mid".to_string()),
+            }]),
+            LlmMessage::assistant_with_tool_calls(
+                "running C",
+                vec![HistoricalToolCall {
+                    call_id: "c-new".to_string(),
+                    fn_name: "bash".to_string(),
+                    fn_arguments: json!({}),
+                    thought_signatures: None,
+                }],
+            ),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "c-new".to_string(),
+                content: small.clone(),
+                source_message_id: Some("msg-new".to_string()),
+            }]),
+        ];
+
+        compact_history(&mut messages, CompactionBudget::legacy_default());
+
+        // Old tool result was archived with a reference back to msg-old.
+        let old_response = &messages[2].tool_responses[0];
+        assert!(old_response.content.contains("archived"));
+        assert!(old_response.content.contains("msg-old"));
+        // Recent results were preserved untouched.
+        assert_eq!(messages[4].tool_responses[0].content.len(), big.len());
+        assert_eq!(messages[6].tool_responses[0].content, small);
+    }
+
+    #[test]
+    fn compact_history_drops_oldest_messages_when_over_budget() {
+        let budget = CompactionBudget {
+            max_history_chars: 4_000,
+        };
+        let chunk = "z".repeat(budget.max_history_chars / 4);
+        let mut messages = vec![
+            LlmMessage::user(chunk.clone()),
+            LlmMessage::assistant(chunk.clone()),
+            LlmMessage::user(chunk.clone()),
+            LlmMessage::assistant(chunk.clone()),
+            LlmMessage::user("recent-marker".to_string()),
+            LlmMessage::assistant(chunk),
+        ];
+        let initial_chars = total_chars(&messages);
+        assert!(initial_chars > budget.trigger_chars());
+
+        let dropped = compact_history(&mut messages, budget);
+
+        assert!(!dropped.is_empty(), "compaction should drop some history");
+        // Pass-2 compacts down to ~keep_chars; we should be at or below it.
+        assert!(total_chars(&messages) <= budget.max_history_chars);
+        // Newest messages survived; the "recent-marker" anchor is still there.
+        assert!(messages.iter().any(|m| m.content == "recent-marker"));
+    }
+
+    #[test]
+    fn weighted_cutoff_keeps_more_when_history_is_all_user_messages() {
+        // Build two histories of equal raw size — one all user, one all
+        // assistant — and run compaction with the same budget. The user
+        // history should keep more messages because each is counted at
+        // 1/USER_MESSAGE_WEIGHT_DIVISOR of its raw chars when computing the
+        // keep cutoff.
+        let chunk = "x".repeat(2_000);
+        let mut all_user: Vec<LlmMessage> =
+            (0..10).map(|_| LlmMessage::user(chunk.clone())).collect();
+        let mut all_assistant: Vec<LlmMessage> = (0..10)
+            .map(|_| LlmMessage::assistant(chunk.clone()))
+            .collect();
+        let budget = CompactionBudget {
+            max_history_chars: 8_000,
+        };
+
+        compact_history(&mut all_user, budget);
+        compact_history(&mut all_assistant, budget);
+
+        assert!(
+            all_user.len() > all_assistant.len(),
+            "user-heavy history should keep more messages than assistant-heavy \
+             under the same budget (user={}, assistant={})",
+            all_user.len(),
+            all_assistant.len(),
+        );
+    }
+
+    #[test]
+    fn budget_from_settings_uses_prior_prompt_tokens_when_available() {
+        let tmp = tempdir().unwrap();
+        let settings = settings(tmp.path());
+        let no_prior = CompactionBudget::from_settings(&settings, None);
+        let with_prior = CompactionBudget::from_settings(&settings, Some(50_000));
+        // A real prior measurement makes the budget smaller (we know overhead
+        // is at least prior/2), which means less room for new history.
+        assert!(with_prior.max_history_chars < no_prior.max_history_chars);
     }
 
     #[test]
@@ -1067,6 +1522,7 @@ mod tests {
             &AgentOptions {
                 history_limit: 20,
                 use_hippocampus: false,
+                ..Default::default()
             },
         )
         .unwrap();

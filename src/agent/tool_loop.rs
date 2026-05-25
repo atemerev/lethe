@@ -7,6 +7,7 @@
 //! executor without dragging Agent itself across the kameo boundary.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::anyhow;
@@ -17,7 +18,7 @@ use crate::actor::{ActorError, ActorRunSpec, ActorRuntime, ActorTurnExecutor, Mo
 use crate::config::Settings;
 use crate::llm::{LlmAttachment, LlmMessage, LlmRouter, build_chat_request};
 use crate::memory::MessageRole;
-use crate::store::MemoryStore;
+use crate::memory::MemoryStore;
 use crate::tools::registry::{ActorToolContext, BoxToolFuture, ToolRegistry, ToolRuntime};
 use crate::tools::shell::ShellTools;
 
@@ -33,6 +34,10 @@ pub(super) struct TurnExecutionContext {
     pub memory: Arc<MemoryStore>,
     pub router: Arc<RwLock<LlmRouter>>,
     pub shell: ShellTools,
+    /// Shared atomic that captures `prompt_tokens` from each LLM response so
+    /// the next turn's compaction budget reflects real usage instead of a
+    /// crude char estimate. Zero means "no measurement yet".
+    pub last_prompt_tokens: Arc<AtomicU64>,
 }
 
 /// Build the actor turn executor that the [`ActorRuntime`] supervisor calls
@@ -42,12 +47,14 @@ pub(super) fn actor_turn_executor(
     memory: Arc<MemoryStore>,
     router: Arc<RwLock<LlmRouter>>,
     shell: ShellTools,
+    last_prompt_tokens: Arc<AtomicU64>,
 ) -> ActorTurnExecutor {
     let context = TurnExecutionContext {
         settings,
         memory,
         router,
         shell,
+        last_prompt_tokens,
     };
     Arc::new(move |spec: ActorRunSpec, runtime: ActorRuntime| {
         let context = context.clone();
@@ -120,6 +127,11 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
             .clone();
         let response = router.exec_chat_request(request.clone(), use_aux).await?;
+        if let Some(prompt_tokens) = response.usage.prompt_tokens {
+            context
+                .last_prompt_tokens
+                .store(prompt_tokens as u64, Ordering::Relaxed);
+        }
         let text = response.first_text().unwrap_or_default().to_string();
         let tool_calls = response
             .tool_calls()
@@ -285,7 +297,7 @@ pub(super) fn tool_calls_metadata(tool_calls: &[ToolCall]) -> Vec<Value> {
     tool_calls
         .iter()
         .map(|call| {
-            json!({
+            let mut entry = json!({
                 "id": call.call_id,
                 "type": "function",
                 "function": {
@@ -295,7 +307,16 @@ pub(super) fn tool_calls_metadata(tool_calls: &[ToolCall]) -> Vec<Value> {
                 "call_id": call.call_id,
                 "fn_name": call.fn_name,
                 "fn_arguments": call.fn_arguments,
-            })
+            });
+            // Carry thought_signatures (Gemini thinking) through history so
+            // multi-turn reasoning chains stay connected across persistence.
+            if let Some(signatures) = &call.thought_signatures
+                && !signatures.is_empty()
+                && let Some(map) = entry.as_object_mut()
+            {
+                map.insert("thought_signatures".to_string(), json!(signatures));
+            }
+            entry
         })
         .collect()
 }

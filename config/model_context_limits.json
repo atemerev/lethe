@@ -1,0 +1,38 @@
+{
+  "_note": "Per-model context window in tokens. Used to auto-derive the compaction budget. Falls back to LLM_CONTEXT_LIMIT env var (default 100k) when the model id is not present here. Update when a new model ships or when a model id is renamed.",
+  "_updated": "2026-05-25",
+
+  "claude-opus-4-7": 200000,
+  "claude-opus-4-6": 200000,
+  "claude-opus-4-5": 200000,
+  "claude-sonnet-4-6": 200000,
+  "claude-sonnet-4-5": 200000,
+  "claude-haiku-4-5": 200000,
+  "claude-haiku-4-5-20251001": 200000,
+
+  "openrouter/anthropic/claude-opus-4.7": 200000,
+  "openrouter/anthropic/claude-opus-4.6": 200000,
+  "openrouter/anthropic/claude-sonnet-4.6": 200000,
+  "openrouter/anthropic/claude-haiku-4.5": 200000,
+
+  "gpt-5": 400000,
+  "gpt-5.4": 400000,
+  "gpt-5.4-mini": 400000,
+  "gpt-5.4-nano": 400000,
+
+  "openrouter/openai/gpt-5.4": 400000,
+  "openrouter/openai/gpt-5.4-nano": 400000,
+
+  "openrouter/google/gemini-3.1-pro-preview": 1000000,
+  "openrouter/google/gemini-3-flash-preview": 1000000,
+  "openrouter/google/gemini-3.1-flash-lite-preview": 1000000,
+
+  "openrouter/moonshotai/kimi-k2.6": 200000,
+  "openrouter/moonshotai/kimi-k2.5": 200000,
+
+  "openrouter/x-ai/grok-4.20-beta": 256000,
+  "openrouter/z-ai/glm-5.1": 128000,
+  "openrouter/qwen/qwen3.5-plus-02-15": 128000,
+  "openrouter/qwen/qwen3.5-flash-02-23": 128000,
+  "openrouter/xiaomi/mimo-v2-flash": 128000
+}

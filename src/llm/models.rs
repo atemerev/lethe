@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 const EMBEDDED_MODEL_CATALOG: &str = include_str!("../../config/model_catalog.json");
+const EMBEDDED_CONTEXT_LIMITS: &str =
+    include_str!("../../config/model_context_limits.json");
 
 pub type ModelCatalog = BTreeMap<String, BTreeMap<String, Vec<ModelEntry>>>;
 
@@ -58,6 +60,26 @@ pub fn available_providers_with(mut env_has: impl FnMut(&str) -> bool) -> Vec<Pr
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// Per-model context window (tokens), as declared in
+/// `config/model_context_limits.json`. Returns `None` for unknown model ids
+/// — callers should fall back to a configured env default.
+pub fn context_limit_for_model(model_id: &str) -> Option<u64> {
+    static CONTEXT_LIMITS: OnceLock<BTreeMap<String, u64>> = OnceLock::new();
+    let map = CONTEXT_LIMITS.get_or_init(|| {
+        let raw = serde_json::from_str::<serde_json::Value>(EMBEDDED_CONTEXT_LIMITS).ok();
+        let Some(serde_json::Value::Object(mut object)) = raw else {
+            return BTreeMap::new();
+        };
+        object.retain(|key, _| !key.starts_with('_'));
+        object
+            .into_iter()
+            .filter_map(|(key, value)| value.as_u64().map(|tokens| (key, tokens)))
+            .collect()
+    });
+    let key = model_id.trim();
+    map.get(key).copied()
 }
 
 pub fn provider_for_model(model_id: &str) -> Option<&'static str> {

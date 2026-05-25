@@ -727,7 +727,7 @@ async fn process_api_heartbeat_once(
 }
 
 fn active_reminders(settings: &Settings) -> Result<String> {
-    let memory = crate::store::MemoryStore::from_settings(settings)?;
+    let memory = crate::memory::MemoryStore::from_settings(settings)?;
     let todos = memory.todos.list(TodoFilter {
         include_completed: false,
         limit: 20,
