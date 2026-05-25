@@ -9,4 +9,5 @@
 - Added `genai` LLM routing with OpenRouter model-id normalization and `LLM_API_BASE` support for OpenAI-compatible local servers.
 - Added filesystem, shell, PTY terminal, browser, image, web, memory, notes, todos, actor, and transport tools.
 - Added binary release packaging and binary-first install/update scripts with source-build fallback.
+- Added `lethe backup` / `lethe restore` to pack and unpack the workspace, agent state (memory + history), and `.env` as a single tar.gz, prompting before overwriting an existing workspace or `.env`.
 - Removed the former package/test stack and the web console while keeping Anthropic subscription/OAuth support in the Rust runtime.

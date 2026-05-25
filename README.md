@@ -198,6 +198,26 @@ Lethe stores runtime state under the workspace and data directories:
 
 Core memory block defaults and prompt templates are embedded into the binary, so `lethe check` and first startup work without copying prompt files into the workspace.
 
+## Backup & Restore
+
+Pack the workspace, agent state (memory + history), and `.env` into a single tar.gz archive:
+
+```bash
+lethe backup                              # ./lethe-backup-YYYYMMDD-HHMMSS.tar.gz
+lethe backup --output ~/backups/lethe.tgz
+```
+
+The archive is written with `0600` permissions because it contains the `.env` secrets — keep it private.
+
+Restore an archive into the current `$LETHE_HOME`:
+
+```bash
+lethe restore lethe-backup-20260525-160522.tar.gz
+lethe restore archive.tgz --yes          # skip prompts (for scripts / non-TTY)
+```
+
+Restore prompts before overwriting an existing **workspace** and again before overwriting an existing **`.env`** — declining either keeps the local copy intact. Memory and history are restored unconditionally (that is the point of restoring).
+
 ## Logging
 
 Lethe writes structured runtime logs to `$LOGS_DIR/lethe.log` and mirrors them to stderr. The default level is `info`; override it with `RUST_LOG`, for example:

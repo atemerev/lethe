@@ -103,6 +103,19 @@ enum Command {
         #[arg(long)]
         aux: bool,
     },
+    /// Pack workspace, agent state (memory + history), and the `.env`
+    /// file into a single tar.gz archive.
+    Backup {
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Restore a `lethe backup` archive. Asks before overwriting an
+    /// existing workspace and before overwriting an existing `.env`.
+    Restore {
+        archive: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -499,6 +512,8 @@ async fn main() -> Result<()> {
             system,
             aux,
         } => h::chat(message, system, aux).await,
+        Command::Backup { output } => cli::backup::backup(output),
+        Command::Restore { archive, yes } => cli::backup::restore(archive, yes),
     }
 }
 
