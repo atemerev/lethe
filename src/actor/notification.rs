@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::actor::MessageIntent;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationSource {
@@ -122,6 +124,20 @@ pub fn notification_origin_from_metadata(
     }
 }
 
+/// Map a [`MessageIntent`] to the notification category it implies. Returns
+/// `None` for variants whose meaning is not a notification (Progress, Done,
+/// Info, Message, MaxTurns) so the caller can fall back to extra heuristics.
+fn category_from_intent(intent: MessageIntent) -> Option<NotificationCategory> {
+    match intent {
+        MessageIntent::Alert => Some(NotificationCategory::Warning),
+        MessageIntent::Reminder => Some(NotificationCategory::Reminder),
+        MessageIntent::Error | MessageIntent::Failed => Some(NotificationCategory::Error),
+        MessageIntent::Done | MessageIntent::Progress => Some(NotificationCategory::Update),
+        MessageIntent::MaxTurns => Some(NotificationCategory::Warning),
+        MessageIntent::Info | MessageIntent::Message => None,
+    }
+}
+
 pub fn notification_category_from_metadata(
     metadata: &serde_json::Map<String, Value>,
     kind: &str,
@@ -132,15 +148,22 @@ pub fn notification_category_from_metadata(
         return category;
     }
 
+    // Primary: ask MessageIntent. Both layers now share the same vocabulary.
+    if let Some(category) = category_from_intent(MessageIntent::from_strings("", kind)) {
+        return category;
+    }
+
+    // Notification-only kinds. These substring checks are intentional here
+    // because the notification layer accepts free-form kind strings (e.g.
+    // "deadline_reminder", "weekly_update") that don't map to a strict
+    // MessageIntent variant.
     let kind_lower = kind.to_ascii_lowercase();
-    if kind_lower.contains("warning") || kind_lower.contains("alert") {
-        NotificationCategory::Warning
-    } else if kind_lower.contains("deadline") || kind_lower.contains("reminder") {
+    if kind_lower.contains("reminder") || kind_lower.contains("deadline") {
         NotificationCategory::Reminder
+    } else if kind_lower.contains("alert") || kind_lower.contains("warning") {
+        NotificationCategory::Warning
     } else if kind_lower.contains("update") {
         NotificationCategory::Update
-    } else if kind_lower.contains("error") || kind_lower.contains("fatal") {
-        NotificationCategory::Error
     } else if kind_lower.contains("insight") || kind_lower.contains("idea") {
         NotificationCategory::Insight
     } else {

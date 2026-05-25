@@ -8,7 +8,7 @@ use crate::actor::{
     ActorConfig, ActorError, ActorNamedEvent, ActorRegistry, ActorRuntime, ActorSupervisor,
     MessageIntent, ModelTier,
 };
-use crate::conversation::notification::{
+use crate::actor::notification::{
     GateAction, GateDecision, NotificationAssessment, NotificationGate, NotificationScoring,
     UserNotificationSignal,
 };
@@ -237,7 +237,7 @@ mod tests {
 
     use super::*;
     use crate::actor::ActorConfig;
-    use crate::conversation::notification::{NotificationCategory, NotificationSource};
+    use crate::actor::notification::{NotificationCategory, NotificationSource};
 
     fn registry() -> (ActorRegistry, String) {
         let mut registry = ActorRegistry::new();

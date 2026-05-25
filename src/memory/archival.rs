@@ -9,7 +9,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::search::{clean_tags, indent_block, query_terms, search_result_text, tags_match_any};
-use super::store::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
+use super::db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
 
 const SEARCH_RESULT_MAX_LINES: usize = 50;
 
@@ -210,6 +210,27 @@ impl ArchivalMemory {
             .into_iter()
             .map(ArchivalEntry::from_row)
             .collect())
+    }
+
+    /// Render a single archival entry in full, including the entire text
+    /// without the line-cap that search results apply. Used by `archival_get`.
+    pub fn format_detail(entry: &ArchivalEntry) -> String {
+        let mut lines = vec![format!("id: {}", entry.id)];
+        lines.push(format!("created_at: {}", entry.created_at));
+        if !entry.tags.is_empty() {
+            lines.push(format!("tags: {}", entry.tags.join(", ")));
+        }
+        if entry.metadata.is_object()
+            && entry.metadata.as_object().is_some_and(|map| !map.is_empty())
+        {
+            lines.push(format!(
+                "metadata: {}",
+                serde_json::to_string(&entry.metadata).unwrap_or_default()
+            ));
+        }
+        lines.push(String::new());
+        lines.push(entry.text.clone());
+        lines.join("\n")
     }
 
     pub fn format_entries(entries: &[ArchivalEntry]) -> String {

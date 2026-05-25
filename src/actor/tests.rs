@@ -23,11 +23,21 @@ fn unknown_user_notify_kind_defaults_to_info() {
         MessageIntent::from_strings("user_notify", "routine"),
         MessageIntent::Info
     );
+    // Strict parse: exact aliases match, compound/unknown strings default to Info.
+    assert_eq!(MessageIntent::from_strings("", "warning"), MessageIntent::Alert);
+    assert_eq!(
+        MessageIntent::from_strings("", "deadline"),
+        MessageIntent::Reminder
+    );
     assert_eq!(
         MessageIntent::from_strings("", "deadline_warning"),
-        MessageIntent::Alert
+        MessageIntent::Info
     );
     assert_eq!(MessageIntent::from_strings("", "done"), MessageIntent::Done);
+    assert_eq!(
+        MessageIntent::from_strings("task_update", ""),
+        MessageIntent::Progress
+    );
 }
 
 #[test]
@@ -81,7 +91,7 @@ fn registry_spawns_discovers_and_cleans_terminated_actors() {
             .is_empty()
     );
 
-    assert!(registry.terminate(&worker, "done").unwrap());
+    assert!(registry.terminate(&worker, Outcome::Success, "done").unwrap());
     assert_eq!(registry.active_count(), 1);
     assert_eq!(registry.discover("main").len(), 2);
     assert_eq!(registry.discover_active("main").len(), 1);
@@ -156,7 +166,11 @@ fn registry_enforces_relationships_and_routes_messages() {
 fn termination_and_kill_notify_parent_once() {
     let (mut registry, principal, worker) = registry_with_principal_and_worker();
 
-    assert!(registry.terminate(&worker, "Found 5 results").unwrap());
+    assert!(
+        registry
+            .terminate(&worker, Outcome::Success, "Found 5 results")
+            .unwrap()
+    );
     let done = registry.pop_inbox(&principal).unwrap();
     assert_eq!(done.intent, MessageIntent::Done);
     assert_eq!(done.metadata.get("kind").unwrap(), "done");
@@ -170,7 +184,11 @@ fn termination_and_kill_notify_parent_once() {
             && event.payload.get("channel") == Some(&json!("task_update"))
             && event.payload.get("intent") == Some(&json!("done"))
     }));
-    assert!(!registry.terminate(&worker, "second").unwrap());
+    assert!(
+        !registry
+            .terminate(&worker, Outcome::Success, "second")
+            .unwrap()
+    );
     assert_eq!(
         registry.get(&worker).unwrap().result(),
         Some("Found 5 results")
@@ -236,7 +254,7 @@ fn system_prompt_includes_relationships_and_inbox() {
             .to_ascii_lowercase()
             .contains("quick tasks")
     );
-    assert!(principal_prompt.contains("kill_actor"));
+    assert!(principal_prompt.contains("<available_on_request>"));
     assert!(principal_prompt.contains("[child]"));
 
     let worker_prompt = registry.build_system_prompt(&worker).unwrap();
@@ -272,8 +290,9 @@ fn actor_tool_methods_spawn_discover_send_and_ping() {
             },
         )
         .unwrap();
-    assert!(result.contains("Spawned actor 'code-helper'"));
-    assert!(result.contains("model=main"));
+    assert!(matches!(result, SpawnReport::Spawned { .. }));
+    assert!(result.message().contains("Spawned actor 'code-helper'"));
+    assert!(result.message().contains("model=main"));
     assert!(registry.find_by_name("code-helper", Some("main")).is_some());
 
     let duplicate = registry
@@ -289,8 +308,9 @@ fn actor_tool_methods_spawn_discover_send_and_ping() {
             },
         )
         .unwrap();
-    assert!(duplicate.contains("DUPLICATE BLOCKED"));
-    assert!(duplicate.contains(&worker));
+    assert!(matches!(duplicate, SpawnReport::Rejected { .. }));
+    assert!(duplicate.message().contains("DUPLICATE BLOCKED"));
+    assert!(duplicate.message().contains(&worker));
 
     let sent = registry.send_message_tool(&principal, &worker, "Hello", None, "", "");
     assert!(sent.contains("Message sent"));
@@ -309,7 +329,7 @@ fn actor_tool_methods_kill_terminate_restart_and_finished_listing() {
         registry.terminate_tool(&worker, "All done", "partial", "src/lib.rs", "run tests");
     assert!(terminate.contains("Terminated"));
     let finished = registry
-        .discover_recently_finished_for_actor(&principal, None, 5)
+        .discover_for_actor(&principal, None, true)
         .unwrap();
     assert!(finished.contains("researcher"));
     assert!(finished.contains("[outcome: partial]"));
@@ -399,14 +419,10 @@ async fn runtime_executor_wakes_resident_actor_without_external_round() {
     }
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let lookup_runtime = runtime.clone();
-    let info = tokio::task::spawn_blocking(move || {
-        lookup_runtime
-            .find_by_name_blocking("researcher", Some("main"))
-            .unwrap()
-    })
-    .await
-    .unwrap();
+    let info = runtime
+        .find_by_name("researcher", Some("main"))
+        .await
+        .unwrap();
     assert_eq!(info.state, ActorState::Waiting);
 }
 
@@ -426,7 +442,9 @@ async fn runtime_returns_principal_task_update_events() {
             None,
         )
         .unwrap();
-    registry.terminate(&worker, "Found the answer").unwrap();
+    registry
+        .terminate(&worker, Outcome::Success, "Found the answer")
+        .unwrap();
 
     let runtime = ActorRuntime::new(registry);
     let events = runtime

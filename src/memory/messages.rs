@@ -35,10 +35,62 @@ pub enum MessageHistoryError {
 
 pub type MessageHistoryResult<T> = Result<T, MessageHistoryError>;
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", untagged)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+    /// Anything the persisted store contains that doesn't map to the known
+    /// roles above. Round-tripped verbatim through the database.
+    Other(String),
+}
+
+impl MessageRole {
+    pub fn parse(value: &str) -> Self {
+        match value.trim() {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "tool" => Self::Tool,
+            "system" => Self::System,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::System => "system",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    pub fn is_user(&self) -> bool {
+        matches!(self, Self::User)
+    }
+
+    pub fn is_assistant(&self) -> bool {
+        matches!(self, Self::Assistant)
+    }
+
+    pub fn is_tool(&self) -> bool {
+        matches!(self, Self::Tool)
+    }
+}
+
+impl std::fmt::Display for MessageRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: String,
-    pub role: String,
+    pub role: MessageRole,
     pub content: String,
     pub metadata: Value,
     pub created_at: String,
@@ -54,8 +106,17 @@ pub struct MessageHistory {
 impl MessageHistory {
     pub fn open(data_path: impl Into<PathBuf>) -> MessageHistoryResult<Self> {
         let data_path = data_path.into();
+        let embedder = EmbeddingEngine::from_env(parent_dir(&data_path));
+        Self::open_with_embedder(data_path, embedder)
+    }
+
+    pub fn open_with_embedder(
+        data_path: impl Into<PathBuf>,
+        embedder: EmbeddingEngine,
+    ) -> MessageHistoryResult<Self> {
+        let data_path = data_path.into();
         let history = Self {
-            embedder: EmbeddingEngine::from_env(parent_dir(&data_path)),
+            embedder,
             data_path,
         };
         history.ensure_schema()?;
@@ -67,23 +128,19 @@ impl MessageHistory {
         data_path: impl Into<PathBuf>,
         dimensions: usize,
     ) -> MessageHistoryResult<Self> {
-        let data_path = data_path.into();
-        let history = Self {
-            embedder: EmbeddingEngine::with_hash_dimensions(dimensions),
+        Self::open_with_embedder(
             data_path,
-        };
-        history.ensure_schema()?;
-        Ok(history)
+            EmbeddingEngine::with_hash_dimensions(dimensions),
+        )
     }
 
     pub fn add(
         &self,
-        role: &str,
+        role: MessageRole,
         content: &str,
         metadata: Option<Value>,
     ) -> MessageHistoryResult<String> {
-        let role = role.trim();
-        if role.is_empty() {
+        if role.as_str().is_empty() {
             return Err(MessageHistoryError::EmptyRole);
         }
         let metadata = metadata.unwrap_or_else(|| json!({}));
@@ -95,13 +152,14 @@ impl MessageHistory {
         let now = Utc::now().to_rfc3339();
         let vector = self.embedder.embed_document(content)?;
         let metadata_str = serde_json::to_string(&metadata)?;
+        let role_str = role.as_str();
 
         let mut conn = self.open_conn()?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO message_history (id, role, content, metadata, created_at) \
              VALUES (?, ?, ?, ?, ?)",
-            params![id, role, content, metadata_str, now],
+            params![id, role_str, content, metadata_str, now],
         )?;
         tx.execute(
             "INSERT INTO message_history_vec (id, embedding) VALUES (?, ?)",
@@ -143,16 +201,15 @@ impl MessageHistory {
         &self,
         query: &str,
         limit: usize,
-        role: Option<&str>,
+        role: Option<&MessageRole>,
     ) -> MessageHistoryResult<Vec<StoredMessage>> {
         let query = query.trim();
         let limit = if limit == 0 { 20 } else { limit };
         let terms = query_terms(query);
-        let role = role.map(str::trim).filter(|role| !role.is_empty());
         let mut merged = HashMap::new();
 
         for mut message in self.all()? {
-            if role.is_some_and(|role| message.role != role) {
+            if role.is_some_and(|role| &message.role != role) {
                 continue;
             }
             message.score = score_message(query, &terms, &message);
@@ -165,7 +222,7 @@ impl MessageHistory {
             match self.vector_search(query, limit * 4) {
                 Ok(messages) => {
                     for message in messages {
-                        if role.is_some_and(|role| message.role != role) {
+                        if role.is_some_and(|role| &message.role != role) {
                             continue;
                         }
                         merged
@@ -191,7 +248,7 @@ impl MessageHistory {
     pub fn search_by_role(
         &self,
         query: &str,
-        role: &str,
+        role: &MessageRole,
         limit: usize,
     ) -> MessageHistoryResult<Vec<StoredMessage>> {
         self.search(query, limit, Some(role))
@@ -199,7 +256,7 @@ impl MessageHistory {
 
     pub fn get_by_role(
         &self,
-        role: &str,
+        role: &MessageRole,
         limit: usize,
     ) -> MessageHistoryResult<Vec<StoredMessage>> {
         let conn = self.open_conn()?;
@@ -208,7 +265,7 @@ impl MessageHistory {
             "SELECT id, role, content, metadata, created_at FROM message_history \
              WHERE role = ? ORDER BY created_at, id LIMIT ?",
         )?;
-        let rows = stmt.query_map(params![role, limit as i64], row_to_message)?;
+        let rows = stmt.query_map(params![role.as_str(), limit as i64], row_to_message)?;
         let mut messages = Vec::new();
         for row in rows {
             messages.push(row?);
@@ -252,7 +309,7 @@ impl MessageHistory {
         let messages = self.all()?;
         let mut tool_call_names = HashMap::new();
         for message in &messages {
-            if message.role != "assistant" {
+            if !message.role.is_assistant() {
                 continue;
             }
             let Some(calls) = message.metadata.get("tool_calls").and_then(Value::as_array) else {
@@ -275,7 +332,7 @@ impl MessageHistory {
 
         let mut deleted = 0;
         for message in messages {
-            if message.role != "tool" {
+            if !message.role.is_tool() {
                 continue;
             }
             let Some(call_id) = message.metadata.get("tool_call_id").and_then(Value::as_str) else {
@@ -325,6 +382,30 @@ impl MessageHistory {
             result.insert(0, message);
         }
         Ok(result)
+    }
+
+    /// Render a single stored message in full, including the entire content
+    /// without the line-cap that search results apply. Used by
+    /// `conversation_get` so the agent can drill into a hit whose body was
+    /// trimmed by recall or search formatting.
+    pub fn format_detail(message: &StoredMessage) -> String {
+        let mut lines = vec![format!("id: {}", message.id)];
+        lines.push(format!("role: {}", message.role));
+        lines.push(format!("created_at: {}", message.created_at));
+        if message.metadata.is_object()
+            && message
+                .metadata
+                .as_object()
+                .is_some_and(|map| !map.is_empty())
+        {
+            lines.push(format!(
+                "metadata: {}",
+                serde_json::to_string(&message.metadata).unwrap_or_default()
+            ));
+        }
+        lines.push(String::new());
+        lines.push(message.content.clone());
+        lines.join("\n")
     }
 
     pub fn format_messages(messages: &[StoredMessage]) -> String {
@@ -436,7 +517,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
     };
     Ok(StoredMessage {
         id,
-        role,
+        role: MessageRole::parse(&role),
         content,
         metadata,
         created_at,
@@ -505,8 +586,8 @@ mod tests {
     #[test]
     fn add_get_recent_count_and_clear_messages() {
         let (_tmp, history) = history();
-        let first = history.add("user", "hello", None).unwrap();
-        let second = history.add("assistant", "hi there", None).unwrap();
+        let first = history.add(MessageRole::User, "hello", None).unwrap();
+        let second = history.add(MessageRole::Assistant, "hi there", None).unwrap();
 
         assert_eq!(history.count().unwrap(), 2);
         assert_eq!(history.get(&first).unwrap().unwrap().content, "hello");
@@ -525,20 +606,26 @@ mod tests {
     #[test]
     fn search_and_role_filters_rank_messages() {
         let (_tmp, history) = history();
-        history.add("user", "Graph API email access", None).unwrap();
-        history.add("assistant", "Use cargo fmt", None).unwrap();
         history
-            .add("user", "Graph tokens are in a file", None)
+            .add(MessageRole::User, "Graph API email access", None)
+            .unwrap();
+        history
+            .add(MessageRole::Assistant, "Use cargo fmt", None)
+            .unwrap();
+        history
+            .add(MessageRole::User, "Graph tokens are in a file", None)
             .unwrap();
 
         let results = history.search("graph email", 10, None).unwrap();
         assert_eq!(results[0].content, "Graph API email access");
 
-        let assistant = history.search_by_role("cargo", "assistant", 10).unwrap();
+        let assistant = history
+            .search_by_role("cargo", &MessageRole::Assistant, 10)
+            .unwrap();
         assert_eq!(assistant.len(), 1);
-        assert_eq!(assistant[0].role, "assistant");
+        assert_eq!(assistant[0].role, MessageRole::Assistant);
 
-        let users = history.get_by_role("user", 10).unwrap();
+        let users = history.get_by_role(&MessageRole::User, 10).unwrap();
         assert_eq!(users.len(), 2);
     }
 
@@ -550,7 +637,7 @@ mod tests {
             .join("\n");
         let formatted = MessageHistory::format_messages(&[StoredMessage {
             id: "msg-test".to_string(),
-            role: "assistant".to_string(),
+            role: MessageRole::Assistant,
             content,
             metadata: json!({}),
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -566,9 +653,13 @@ mod tests {
     #[test]
     fn context_window_keeps_recent_messages_within_char_budget() {
         let (_tmp, history) = history();
-        history.add("user", "one", None).unwrap();
-        history.add("assistant", "two two", None).unwrap();
-        history.add("user", "three three three", None).unwrap();
+        history.add(MessageRole::User, "one", None).unwrap();
+        history
+            .add(MessageRole::Assistant, "two two", None)
+            .unwrap();
+        history
+            .add(MessageRole::User, "three three three", None)
+            .unwrap();
 
         let window = history.get_context_window(3, 10).unwrap();
         assert!(window.is_empty() || window.last().unwrap().content.len() <= 10);

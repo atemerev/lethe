@@ -20,23 +20,10 @@ impl RuntimeMode {
     }
 }
 
+/// All on-disk locations the runtime needs. Centralizes path layout so other
+/// modules only depend on the slice they care about.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Settings {
-    pub agent_name: String,
-    pub mode: RuntimeMode,
-    pub telegram_bot_token: String,
-    pub telegram_allowed_user_ids: Vec<i64>,
-    pub telegram_transcription_enabled: bool,
-    pub lethe_api_token: String,
-    pub lethe_api_host: String,
-    pub lethe_api_port: u16,
-    pub openrouter_api_key: String,
-    pub openai_api_key: String,
-    pub llm_model: String,
-    pub llm_model_aux: String,
-    pub llm_provider: String,
-    pub llm_api_base: String,
-    pub llm_context_limit: usize,
+pub struct Paths {
     pub lethe_home: PathBuf,
     pub config_dir: PathBuf,
     pub workspace_dir: PathBuf,
@@ -46,10 +33,53 @@ pub struct Settings {
     pub cache_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub notes_dir: PathBuf,
-    pub transcription_provider: String,
-    pub transcription_model: String,
-    pub transcription_language: String,
-    pub transcription_local_command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub openrouter_api_key: String,
+    pub openai_api_key: String,
+    pub llm_model: String,
+    pub llm_model_aux: String,
+    pub llm_provider: String,
+    pub llm_api_base: String,
+    pub llm_context_limit: usize,
+}
+
+impl LlmConfig {
+    pub fn effective_aux_model(&self) -> &str {
+        if self.llm_model_aux.trim().is_empty() {
+            &self.llm_model
+        } else {
+            &self.llm_model_aux
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    pub bot_token: String,
+    pub allowed_user_ids: Vec<i64>,
+    pub transcription_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiServerConfig {
+    pub token: String,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptionConfig {
+    pub provider: String,
+    pub model: String,
+    pub language: String,
+    pub local_command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundConfig {
     pub actors_enabled: bool,
     pub hippocampus_enabled: bool,
     pub curator_enabled: bool,
@@ -58,6 +88,18 @@ pub struct Settings {
     pub debounce_seconds: f64,
     pub proactive_max_per_day: u32,
     pub proactive_cooldown_minutes: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Settings {
+    pub agent_name: String,
+    pub mode: RuntimeMode,
+    pub paths: Paths,
+    pub llm: LlmConfig,
+    pub telegram: TelegramConfig,
+    pub api: ApiServerConfig,
+    pub transcription: TranscriptionConfig,
+    pub background: BackgroundConfig,
 }
 
 impl Settings {
@@ -71,24 +113,8 @@ impl Settings {
         let data_dir = lethe_home.join("data");
         let memory_dir = env_path("MEMORY_DIR").unwrap_or_else(|| data_dir.join("memory"));
 
-        Self {
-            agent_name: env_string("LETHE_AGENT_NAME", "lethe"),
-            mode: RuntimeMode::parse(env_string("LETHE_MODE", "cli")),
-            telegram_bot_token: env_string("TELEGRAM_BOT_TOKEN", ""),
-            telegram_allowed_user_ids: env_i64_list("TELEGRAM_ALLOWED_USER_IDS"),
-            telegram_transcription_enabled: env_bool("TELEGRAM_TRANSCRIPTION_ENABLED", true),
-            lethe_api_token: env_string("LETHE_API_TOKEN", ""),
-            lethe_api_host: env_string("LETHE_API_HOST", "127.0.0.1"),
-            lethe_api_port: env_u16("LETHE_API_PORT", 8080),
-            openrouter_api_key: env_string("OPENROUTER_API_KEY", ""),
-            openai_api_key: env_string("OPENAI_API_KEY", ""),
-            llm_model: env_string("LLM_MODEL", ""),
-            llm_model_aux: env_string("LLM_MODEL_AUX", ""),
-            llm_provider: env_string("LLM_PROVIDER", ""),
-            llm_api_base: env_string("LLM_API_BASE", ""),
-            llm_context_limit: env_usize("LLM_CONTEXT_LIMIT", 100_000),
+        let paths = Paths {
             config_dir: env_path("LETHE_CONFIG_DIR").unwrap_or_else(|| PathBuf::from("config")),
-            lethe_home,
             workspace_dir: workspace_dir.clone(),
             memory_dir: memory_dir.clone(),
             db_path: env_path("DB_PATH").unwrap_or_else(|| data_dir.join("lethe.db")),
@@ -97,27 +123,53 @@ impl Settings {
             cache_dir: env_path("CACHE_DIR").unwrap_or_else(|| workspace_dir.join("../cache")),
             logs_dir: env_path("LOGS_DIR").unwrap_or_else(|| workspace_dir.join("../logs")),
             notes_dir: env_path("NOTES_DIR").unwrap_or_else(|| workspace_dir.join("notes")),
-            transcription_provider: env_string("TRANSCRIPTION_PROVIDER", ""),
-            transcription_model: env_string("TRANSCRIPTION_MODEL", ""),
-            transcription_language: env_string("TRANSCRIPTION_LANGUAGE", ""),
-            transcription_local_command: env_string("TRANSCRIPTION_LOCAL_COMMAND", "whisper"),
-            actors_enabled: env_bool("ACTORS_ENABLED", true),
-            hippocampus_enabled: env_bool("HIPPOCAMPUS_ENABLED", true),
-            curator_enabled: env_bool("CURATOR_ENABLED", true),
-            heartbeat_enabled: env_bool("HEARTBEAT_ENABLED", true),
-            heartbeat_interval_seconds: env_u64("HEARTBEAT_INTERVAL", 60 * 60),
-            debounce_seconds: env_f64("DEBOUNCE_SECONDS", 5.0),
-            proactive_max_per_day: env_u32("PROACTIVE_MAX_PER_DAY", 4),
-            proactive_cooldown_minutes: env_u32("PROACTIVE_COOLDOWN_MINUTES", 60),
+            lethe_home,
+        };
+
+        Self {
+            agent_name: env_string("LETHE_AGENT_NAME", "lethe"),
+            mode: RuntimeMode::parse(env_string("LETHE_MODE", "cli")),
+            telegram: TelegramConfig {
+                bot_token: env_string("TELEGRAM_BOT_TOKEN", ""),
+                allowed_user_ids: env_i64_list("TELEGRAM_ALLOWED_USER_IDS"),
+                transcription_enabled: env_bool("TELEGRAM_TRANSCRIPTION_ENABLED", true),
+            },
+            api: ApiServerConfig {
+                token: env_string("LETHE_API_TOKEN", ""),
+                host: env_string("LETHE_API_HOST", "127.0.0.1"),
+                port: env_u16("LETHE_API_PORT", 8080),
+            },
+            llm: LlmConfig {
+                openrouter_api_key: env_string("OPENROUTER_API_KEY", ""),
+                openai_api_key: env_string("OPENAI_API_KEY", ""),
+                llm_model: env_string("LLM_MODEL", ""),
+                llm_model_aux: env_string("LLM_MODEL_AUX", ""),
+                llm_provider: env_string("LLM_PROVIDER", ""),
+                llm_api_base: env_string("LLM_API_BASE", ""),
+                llm_context_limit: env_usize("LLM_CONTEXT_LIMIT", 100_000),
+            },
+            transcription: TranscriptionConfig {
+                provider: env_string("TRANSCRIPTION_PROVIDER", ""),
+                model: env_string("TRANSCRIPTION_MODEL", ""),
+                language: env_string("TRANSCRIPTION_LANGUAGE", ""),
+                local_command: env_string("TRANSCRIPTION_LOCAL_COMMAND", "whisper"),
+            },
+            background: BackgroundConfig {
+                actors_enabled: env_bool("ACTORS_ENABLED", true),
+                hippocampus_enabled: env_bool("HIPPOCAMPUS_ENABLED", true),
+                curator_enabled: env_bool("CURATOR_ENABLED", true),
+                heartbeat_enabled: env_bool("HEARTBEAT_ENABLED", true),
+                heartbeat_interval_seconds: env_u64("HEARTBEAT_INTERVAL", 60 * 60),
+                debounce_seconds: env_f64("DEBOUNCE_SECONDS", 5.0),
+                proactive_max_per_day: env_u32("PROACTIVE_MAX_PER_DAY", 4),
+                proactive_cooldown_minutes: env_u32("PROACTIVE_COOLDOWN_MINUTES", 60),
+            },
+            paths,
         }
     }
 
     pub fn effective_aux_model(&self) -> &str {
-        if self.llm_model_aux.trim().is_empty() {
-            &self.llm_model
-        } else {
-            &self.llm_model_aux
-        }
+        self.llm.effective_aux_model()
     }
 }
 
@@ -189,6 +241,62 @@ fn env_i64_list(key: &str) -> Vec<i64> {
         .collect()
 }
 
+/// Minimal Settings instance for tests and examples. Always available so
+/// integration tests in the binary crate can use it (cfg(test)-gated items
+/// in the lib are invisible to the binary).
+pub fn test_settings(root: &std::path::Path) -> Settings {
+    Settings {
+        agent_name: "lethe".to_string(),
+        mode: RuntimeMode::Cli,
+        paths: Paths {
+            lethe_home: root.to_path_buf(),
+            config_dir: root.join("config"),
+            workspace_dir: root.join("workspace"),
+            memory_dir: root.join("data/memory"),
+            db_path: root.join("data/lethe.db"),
+            credentials_dir: root.join("credentials"),
+            cache_dir: root.join("cache"),
+            logs_dir: root.join("logs"),
+            notes_dir: root.join("workspace/notes"),
+        },
+        llm: LlmConfig {
+            openrouter_api_key: String::new(),
+            openai_api_key: String::new(),
+            llm_model: "test-model".to_string(),
+            llm_model_aux: String::new(),
+            llm_provider: String::new(),
+            llm_api_base: String::new(),
+            llm_context_limit: 100_000,
+        },
+        telegram: TelegramConfig {
+            bot_token: String::new(),
+            allowed_user_ids: vec![],
+            transcription_enabled: true,
+        },
+        api: ApiServerConfig {
+            token: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+        },
+        transcription: TranscriptionConfig {
+            provider: String::new(),
+            model: String::new(),
+            language: String::new(),
+            local_command: "whisper".to_string(),
+        },
+        background: BackgroundConfig {
+            actors_enabled: true,
+            hippocampus_enabled: true,
+            curator_enabled: true,
+            heartbeat_enabled: true,
+            heartbeat_interval_seconds: 3600,
+            debounce_seconds: 5.0,
+            proactive_max_per_day: 4,
+            proactive_cooldown_minutes: 60,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,47 +311,10 @@ mod tests {
 
     #[test]
     fn effective_aux_model_falls_back_to_main() {
-        let mut settings = Settings {
-            agent_name: "lethe".to_string(),
-            mode: RuntimeMode::Cli,
-            telegram_bot_token: String::new(),
-            telegram_allowed_user_ids: vec![],
-            telegram_transcription_enabled: true,
-            lethe_api_token: String::new(),
-            lethe_api_host: "127.0.0.1".to_string(),
-            lethe_api_port: 8080,
-            openrouter_api_key: String::new(),
-            openai_api_key: String::new(),
-            llm_model: "gpt-5".to_string(),
-            llm_model_aux: String::new(),
-            llm_provider: String::new(),
-            llm_api_base: String::new(),
-            llm_context_limit: 100_000,
-            lethe_home: PathBuf::from("/tmp/lethe"),
-            config_dir: PathBuf::from("config"),
-            workspace_dir: PathBuf::from("/tmp/lethe/workspace"),
-            memory_dir: PathBuf::from("/tmp/lethe/data/memory"),
-            db_path: PathBuf::from("/tmp/lethe/data/lethe.db"),
-            credentials_dir: PathBuf::from("/tmp/lethe/credentials"),
-            cache_dir: PathBuf::from("/tmp/lethe/cache"),
-            logs_dir: PathBuf::from("/tmp/lethe/logs"),
-            notes_dir: PathBuf::from("/tmp/lethe/workspace/notes"),
-            transcription_provider: String::new(),
-            transcription_model: String::new(),
-            transcription_language: String::new(),
-            transcription_local_command: "whisper".to_string(),
-            actors_enabled: true,
-            hippocampus_enabled: true,
-            curator_enabled: true,
-            heartbeat_enabled: true,
-            heartbeat_interval_seconds: 3600,
-            debounce_seconds: 5.0,
-            proactive_max_per_day: 4,
-            proactive_cooldown_minutes: 60,
-        };
-
+        let mut settings = test_settings(std::path::Path::new("/tmp/lethe"));
+        settings.llm.llm_model = "gpt-5".to_string();
         assert_eq!(settings.effective_aux_model(), "gpt-5");
-        settings.llm_model_aux = "gpt-5-mini".to_string();
+        settings.llm.llm_model_aux = "gpt-5-mini".to_string();
         assert_eq!(settings.effective_aux_model(), "gpt-5-mini");
     }
 }

@@ -96,6 +96,29 @@ fn error_json(message: &str) -> String {
     .to_string()
 }
 
+use serde_json::Value;
+
+use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::args::{string_arg, usize_arg};
+use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_int, p_str_req};
+
+fn exec_view_image(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .image
+        .view_image(&string_arg(args, "file_path"), usize_arg(args, "max_size", 1568))
+}
+
+pub const TOOL_DEFS: &[ToolDef] = &[ToolDef {
+    name: "view_image",
+    description: "Attach a local image to the next model turn.",
+    params: &[
+        p_str_req("file_path", "Image path."),
+        p_int("max_size", "Max image dimension hint."),
+    ],
+    category: ToolCategory::Initial,
+    execute: ToolExecutor::Sync(exec_view_image),
+}];
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;

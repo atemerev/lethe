@@ -104,7 +104,6 @@ fn prompt_file_name(name: &str) -> String {
 fn embedded_prompt(name: &str) -> Option<&'static str> {
     match name.trim_end_matches(".md") {
         "agent_instructions" => Some(include_str!("../../config/prompts/agent_instructions.md")),
-        "agent_tools" => Some(include_str!("../../config/prompts/agent_tools.md")),
         "llm_summarize" => Some(include_str!("../../config/prompts/llm_summarize.md")),
         "llm_summarize_update" => {
             Some(include_str!("../../config/prompts/llm_summarize_update.md"))

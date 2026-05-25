@@ -200,14 +200,8 @@ fn format_raw_results(query: &str, results: &[ExaResult], max_chars: usize) -> S
         }
         lines.push(String::new());
     }
-    let mut text = lines.join("\n");
-    if text.len() > max_chars {
-        text = format!(
-            "{}\n[...truncated]",
-            text.chars().take(max_chars).collect::<String>()
-        );
-    }
-    text
+    let text = lines.join("\n");
+    crate::llm::truncate::truncate_with_ellipsis(&text, max_chars)
 }
 
 fn error_json(message: &str) -> String {
@@ -219,7 +213,7 @@ fn error_json(message: &str) -> String {
 }
 
 fn trim(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+    crate::llm::truncate::truncate_with_ellipsis(value, max_chars)
 }
 
 fn safe_filename(query: &str) -> String {
@@ -245,6 +239,55 @@ fn valid_category(category: &str) -> bool {
         "company" | "research paper" | "news" | "pdf" | "github" | "tweet"
     )
 }
+
+use serde_json::Value;
+
+use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::args::{bool_arg, string_arg, string_arg_default, usize_arg};
+use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req};
+
+fn exec_web_search(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.web.web_search(
+        &string_arg(args, "query"),
+        usize_arg(args, "num_results", 10),
+        bool_arg(args, "include_text", false),
+        &string_arg_default(args, "category", ""),
+    )
+}
+
+fn exec_fetch_webpage(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .web
+        .fetch_webpage(&string_arg(args, "url"), usize_arg(args, "max_chars", 5000))
+}
+
+pub const TOOL_DEFS: &[ToolDef] = &[
+    ToolDef {
+        name: "web_search",
+        description: "Search the web for current external information.",
+        params: &[
+            p_str_req("query", "Search query."),
+            p_int("num_results", "Max results (1-20)."),
+            p_bool("include_text", "Include page text snippets."),
+            p_str(
+                "category",
+                "Optional: company, research paper, news, pdf, github, tweet.",
+            ),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_web_search),
+    },
+    ToolDef {
+        name: "fetch_webpage",
+        description: "Fetch a webpage's text.",
+        params: &[
+            p_str_req("url", "URL."),
+            p_int("max_chars", "Max characters."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_fetch_webpage),
+    },
+];
 
 #[cfg(test)]
 mod tests {

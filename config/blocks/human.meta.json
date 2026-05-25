@@ -1,0 +1,6 @@
+{
+  "label": "human",
+  "description": "What you know about the user — preferences, history, working style. Stable section that caches well.",
+  "limit": 20000,
+  "stable": true
+}

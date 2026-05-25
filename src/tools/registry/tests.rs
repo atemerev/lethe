@@ -191,8 +191,8 @@ fn executes_todo_update_and_reminder_tools() {
     assert!(invalid.contains("invalid todo status"));
 }
 
-#[test]
-fn exposes_and_executes_actor_tools_when_context_is_present() {
+#[tokio::test]
+async fn exposes_and_executes_actor_tools_when_context_is_present() {
     use crate::actor::{ActorConfig, ActorRegistry, ActorRuntime, TaskState};
 
     let (_tmp, memory, shell) = registry();
@@ -231,52 +231,61 @@ fn exposes_and_executes_actor_tools_when_context_is_present() {
     assert!(names.contains(&"terminate".to_string()));
     assert!(!names.contains(&"restart_self".to_string()));
 
-    let spawned = registry.execute(
-        "spawn_actor",
-        &json!({
-            "name": "Worker",
-            "goals": "Read the report and summarize risks",
-            "tools": "read_file",
-            "model": "aux",
-            "max_turns": 3
-        }),
-    );
+    let spawned = registry
+        .execute_async(
+            "spawn_actor",
+            &json!({
+                "name": "Worker",
+                "goals": "Read the report and summarize risks",
+                "tools": "read_file",
+                "model": "aux",
+                "max_turns": 3
+            }),
+        )
+        .await;
     assert!(spawned.contains("Spawned actor 'worker'"));
     let worker = shared
-        .find_by_name_blocking("worker", Some("main"))
+        .find_by_name("worker", Some("main"))
+        .await
         .unwrap()
         .id
         .clone();
 
-    let discovered = registry.execute("discover_actors", &json!({}));
+    let discovered = registry.execute_async("discover_actors", &json!({})).await;
     assert!(discovered.contains("worker"));
     assert!(discovered.contains("[child]"));
 
-    let sent = registry.execute(
-        "send_message",
-        &json!({"actor_id": worker.clone(), "content": "Please start now"}),
-    );
+    let sent = registry
+        .execute_async(
+            "send_message",
+            &json!({"actor_id": worker.clone(), "content": "Please start now"}),
+        )
+        .await;
     assert!(sent.contains("Message sent"));
     assert_eq!(
-        shared.pop_inbox_blocking(&worker).unwrap().content,
+        shared.pop_inbox(&worker).await.unwrap().content,
         "Please start now"
     );
 
-    let updated = registry.execute(
-        "update_task_state",
-        &json!({"state": "blocked", "note": "waiting on worker"}),
-    );
+    let updated = registry
+        .execute_async(
+            "update_task_state",
+            &json!({"state": "blocked", "note": "waiting on worker"}),
+        )
+        .await;
     assert!(updated.contains("running -> blocked"));
     assert_eq!(
-        shared.task_state_blocking(&principal).unwrap(),
+        shared.task_state(&principal).await.unwrap(),
         TaskState::Blocked
     );
     assert_eq!(
-        registry.execute("get_task_state", &json!({})),
+        registry.execute_async("get_task_state", &json!({})).await,
         "Task state: blocked"
     );
 
-    let killed = registry.execute("kill_actor", &json!({"actor_id": worker}));
+    let killed = registry
+        .execute_async("kill_actor", &json!({"actor_id": worker}))
+        .await;
     assert!(killed.contains("Killed"));
 }
 

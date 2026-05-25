@@ -1,17 +1,17 @@
 use serde_json::Value;
 
-pub(super) fn string_arg(args: &Value, key: &str) -> String {
+pub(crate) fn string_arg(args: &Value, key: &str) -> String {
     string_arg_default(args, key, "")
 }
 
-pub(super) fn string_arg_default(args: &Value, key: &str, default: &str) -> String {
+pub(crate) fn string_arg_default(args: &Value, key: &str, default: &str) -> String {
     args.get(key)
         .and_then(Value::as_str)
         .unwrap_or(default)
         .to_string()
 }
 
-pub(super) fn nonempty_string(args: &Value, key: &str) -> Option<String> {
+pub(crate) fn nonempty_string(args: &Value, key: &str) -> Option<String> {
     let value = string_arg(args, key);
     if value.trim().is_empty() {
         None
@@ -20,26 +20,26 @@ pub(super) fn nonempty_string(args: &Value, key: &str) -> Option<String> {
     }
 }
 
-pub(super) fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
+pub(crate) fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-pub(super) fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
+pub(crate) fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
     args.get(key)
         .and_then(Value::as_u64)
         .map(|value| value as usize)
         .unwrap_or(default)
 }
 
-pub(super) fn u64_arg(args: &Value, key: &str, default: u64) -> u64 {
+pub(crate) fn u64_arg(args: &Value, key: &str, default: u64) -> u64 {
     args.get(key).and_then(Value::as_u64).unwrap_or(default)
 }
 
-pub(super) fn i64_arg(args: &Value, key: &str, default: i64) -> i64 {
+pub(crate) fn i64_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key).and_then(Value::as_i64).unwrap_or(default)
 }
 
-pub(super) fn string_vec_arg(args: &Value, key: &str) -> Vec<String> {
+pub(crate) fn string_vec_arg(args: &Value, key: &str) -> Vec<String> {
     match args.get(key) {
         Some(Value::Array(values)) => values
             .iter()
@@ -56,6 +56,6 @@ pub(super) fn string_vec_arg(args: &Value, key: &str) -> Vec<String> {
     }
 }
 
-pub(super) fn optional_tags(tags: &[String]) -> Option<&[String]> {
+pub(crate) fn optional_tags(tags: &[String]) -> Option<&[String]> {
     if tags.is_empty() { None } else { Some(tags) }
 }

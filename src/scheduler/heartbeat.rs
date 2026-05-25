@@ -21,9 +21,9 @@ pub struct HeartbeatConfig {
 impl HeartbeatConfig {
     pub fn from_settings(settings: &Settings) -> Self {
         Self {
-            interval_seconds: settings.heartbeat_interval_seconds,
+            interval_seconds: settings.background.heartbeat_interval_seconds,
             full_context_interval_seconds: FULL_CONTEXT_INTERVAL_SECONDS,
-            enabled: settings.heartbeat_enabled,
+            enabled: settings.background.heartbeat_enabled,
         }
     }
 }

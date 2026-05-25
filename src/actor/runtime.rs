@@ -103,15 +103,6 @@ impl ActorRuntime {
             .map_err(actor_runtime_error)
     }
 
-    pub fn build_system_prompt_blocking(&self, actor_id: &str) -> ActorResult<String> {
-        self.supervisor
-            .ask(BuildSystemPrompt {
-                actor_id: actor_id.to_string(),
-            })
-            .blocking_send()
-            .map_err(actor_runtime_error)
-    }
-
     pub async fn build_system_prompt(&self, actor_id: &str) -> ActorResult<String> {
         self.supervisor
             .ask(BuildSystemPrompt {
@@ -121,13 +112,13 @@ impl ActorRuntime {
             .map_err(actor_runtime_error)
     }
 
-    pub fn is_subagent_blocking(&self, actor_id: &str) -> bool {
+    pub async fn build_requestable_directory(&self, actor_id: &str) -> ActorResult<String> {
         self.supervisor
-            .ask(IsSubagent {
+            .ask(BuildRequestableDirectory {
                 actor_id: actor_id.to_string(),
             })
-            .blocking_send()
-            .unwrap_or(false)
+            .await
+            .map_err(actor_runtime_error)
     }
 
     pub async fn is_subagent(&self, actor_id: &str) -> bool {
@@ -139,6 +130,8 @@ impl ActorRuntime {
             .unwrap_or(false)
     }
 
+    /// Sync entry point used by [`ToolRegistry::execute`] when invoked outside
+    /// an async context (CLI subcommands that share the tool registry).
     pub fn execute_actor_tool_blocking(&self, command: ActorToolCommand) -> String {
         self.supervisor
             .ask(command)
@@ -153,24 +146,26 @@ impl ActorRuntime {
             .unwrap_or_else(|error| format!("Error: actor runtime unavailable: {error:?}"))
     }
 
-    pub fn active_count_blocking(&self) -> usize {
+    /// Typed spawn helper for programmatic callers that need the new actor id
+    /// without re-parsing the LLM-facing display message.
+    pub async fn spawn_subagent(&self, request: SpawnSubagent) -> Result<SpawnReport, String> {
         self.supervisor
-            .ask(ActiveActorCount)
-            .blocking_send()
-            .unwrap_or(0)
+            .ask(request)
+            .await
+            .map_err(|error| format!("Error: actor runtime unavailable: {error:?}"))
     }
 
     pub async fn active_count(&self) -> usize {
         self.supervisor.ask(ActiveActorCount).await.unwrap_or(0)
     }
 
-    pub fn find_by_name_blocking(&self, name: &str, group: Option<&str>) -> Option<ActorInfo> {
+    pub async fn find_by_name(&self, name: &str, group: Option<&str>) -> Option<ActorInfo> {
         self.supervisor
             .ask(FindActorByName {
                 name: name.to_string(),
                 group: group.map(str::to_string),
             })
-            .blocking_send()
+            .await
             .unwrap_or(None)
     }
 
@@ -183,21 +178,21 @@ impl ActorRuntime {
             .unwrap_or(None)
     }
 
-    pub fn pop_inbox_blocking(&self, actor_id: &str) -> Option<ActorMessage> {
+    pub async fn pop_inbox(&self, actor_id: &str) -> Option<ActorMessage> {
         self.supervisor
             .ask(PopActorInbox {
                 actor_id: actor_id.to_string(),
             })
-            .blocking_send()
+            .await
             .unwrap_or(None)
     }
 
-    pub fn task_state_blocking(&self, actor_id: &str) -> Option<TaskState> {
+    pub async fn task_state(&self, actor_id: &str) -> Option<TaskState> {
         self.supervisor
             .ask(GetActorTaskState {
                 actor_id: actor_id.to_string(),
             })
-            .blocking_send()
+            .await
             .unwrap_or(None)
     }
 
@@ -417,6 +412,24 @@ impl Message<BuildSystemPrompt> for ActorSupervisor {
 }
 
 #[derive(Debug)]
+struct BuildRequestableDirectory {
+    actor_id: String,
+}
+
+impl Message<BuildRequestableDirectory> for ActorSupervisor {
+    type Reply = ActorResult<String>;
+
+    async fn handle(
+        &mut self,
+        message: BuildRequestableDirectory,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.registry
+            .build_requestable_directory(&message.actor_id)
+    }
+}
+
+#[derive(Debug)]
 struct IsSubagent {
     actor_id: String,
 }
@@ -542,11 +555,6 @@ pub enum ActorToolCommand {
         group: Option<String>,
         include_terminated: bool,
     },
-    DiscoverRecentlyFinished {
-        actor_id: String,
-        group: Option<String>,
-        limit: usize,
-    },
     SpawnActor {
         actor_id: String,
         name: String,
@@ -630,14 +638,6 @@ impl Message<ActorToolCommand> for ActorSupervisor {
                 .registry
                 .discover_for_actor(&actor_id, group.as_deref(), include_terminated)
                 .unwrap_or_else(|error| format!("Error: {error}")),
-            ActorToolCommand::DiscoverRecentlyFinished {
-                actor_id,
-                group,
-                limit,
-            } => self
-                .registry
-                .discover_recently_finished_for_actor(&actor_id, group.as_deref(), limit)
-                .unwrap_or_else(|error| format!("Error: {error}")),
             ActorToolCommand::SpawnActor {
                 actor_id,
                 name,
@@ -647,7 +647,7 @@ impl Message<ActorToolCommand> for ActorSupervisor {
                 model,
                 max_turns,
             } => {
-                let result = self
+                let outcome = self
                     .registry
                     .spawn_child_for_actor(
                         &actor_id,
@@ -660,10 +660,11 @@ impl Message<ActorToolCommand> for ActorSupervisor {
                             max_turns,
                         },
                     )
+                    .map(|report| report.message().to_string())
                     .unwrap_or_else(|error| format!("Error: {error}"));
                 self.sync_resident_actors(ctx.actor_ref().clone());
                 self.wake_active_actors("actor_spawned");
-                result
+                outcome
             }
             ActorToolCommand::PingActor {
                 actor_id: _,
@@ -722,6 +723,45 @@ impl Message<ActorToolCommand> for ActorSupervisor {
                 result
             }
         }
+    }
+}
+
+/// Typed spawn request used by programmatic callers (e.g. `spawn_chain`) that
+/// need the new actor id back. The LLM-facing `ActorToolCommand::SpawnActor`
+/// path goes through the same registry routine but renders the result to text.
+#[derive(Debug)]
+pub struct SpawnSubagent {
+    pub actor_id: String,
+    pub name: String,
+    pub goals: String,
+    pub group: Option<String>,
+    pub tools: String,
+    pub model: String,
+    pub max_turns: usize,
+}
+
+impl Message<SpawnSubagent> for ActorSupervisor {
+    type Reply = ActorResult<SpawnReport>;
+
+    async fn handle(
+        &mut self,
+        message: SpawnSubagent,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let report = self.registry.spawn_child_for_actor(
+            &message.actor_id,
+            ActorSpawnRequest {
+                name: &message.name,
+                goals: &message.goals,
+                group: message.group.as_deref(),
+                tools: &message.tools,
+                model: &message.model,
+                max_turns: message.max_turns,
+            },
+        )?;
+        self.sync_resident_actors(ctx.actor_ref().clone());
+        self.wake_active_actors("actor_spawned");
+        Ok(report)
     }
 }
 

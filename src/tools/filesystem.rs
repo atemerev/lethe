@@ -460,7 +460,7 @@ fn compact_size(size: u64) -> String {
 }
 
 fn preview(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+    crate::llm::truncate::truncate_with_ellipsis(value, max_chars)
 }
 
 fn split_preserving_logical_lines(content: &str) -> Vec<String> {
@@ -477,6 +477,126 @@ fn split_preserving_logical_lines(content: &str) -> Vec<String> {
 fn _format_size_for_tools(bytes_count: usize) -> String {
     format_size(bytes_count)
 }
+
+use serde_json::Value;
+
+use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::args::{bool_arg, string_arg, string_arg_default, usize_arg};
+use crate::tools::spec::{
+    ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req,
+};
+
+fn exec_read_file(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.files.read_file(
+        &string_arg(args, "file_path"),
+        usize_arg(args, "offset", 0),
+        usize_arg(args, "limit", 0),
+    )
+}
+
+fn exec_write_file(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .files
+        .write_file(&string_arg(args, "file_path"), &string_arg(args, "content"))
+}
+
+fn exec_edit_file(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.files.edit_file(
+        &string_arg(args, "file_path"),
+        &string_arg(args, "old_string"),
+        &string_arg(args, "new_string"),
+        bool_arg(args, "replace_all", false),
+    )
+}
+
+fn exec_list_directory(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.files.list_directory(
+        &string_arg_default(args, "path", "."),
+        bool_arg(args, "show_hidden", false),
+    )
+}
+
+fn exec_glob_search(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.files.glob_search(
+        &string_arg(args, "pattern"),
+        &string_arg_default(args, "path", "."),
+    )
+}
+
+fn exec_grep_search(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.files.grep_search(
+        &string_arg(args, "pattern"),
+        &string_arg_default(args, "path", "."),
+        &string_arg_default(args, "file_pattern", "*"),
+    )
+}
+
+pub const TOOL_DEFS: &[ToolDef] = &[
+    ToolDef {
+        name: "read_file",
+        description: "Read a file with line numbers.",
+        params: &[
+            p_str_req("file_path", "Path."),
+            p_int("offset", "Line offset (0 = start)."),
+            p_int("limit", "Max lines (0 = default)."),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_read_file),
+    },
+    ToolDef {
+        name: "write_file",
+        description: "Write a file (creates parent dirs).",
+        params: &[
+            p_str_req("file_path", "Path."),
+            p_str_req("content", "File content."),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_write_file),
+    },
+    ToolDef {
+        name: "edit_file",
+        description: "Replace exact text in a file.",
+        params: &[
+            p_str_req("file_path", "Path."),
+            p_str_req("old_string", "Exact text to replace."),
+            p_str_req("new_string", "Replacement."),
+            p_bool("replace_all", "Replace all occurrences."),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_edit_file),
+    },
+    ToolDef {
+        name: "list_directory",
+        description: "List a directory.",
+        params: &[
+            p_str("path", "Directory (default: workspace)."),
+            p_bool("show_hidden", "Include hidden files."),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_list_directory),
+    },
+    ToolDef {
+        name: "glob_search",
+        description: "Find files by glob.",
+        params: &[
+            p_str_req("pattern", "Glob pattern."),
+            p_str("path", "Base path (default: workspace)."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_glob_search),
+    },
+    ToolDef {
+        name: "grep_search",
+        description: "Regex search across file contents.",
+        params: &[
+            p_str_req("pattern", "Regex."),
+            p_str("path", "Base path (default: workspace)."),
+            p_str("file_pattern", "File glob (default: *)."),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_grep_search),
+    },
+];
 
 #[cfg(test)]
 mod tests {

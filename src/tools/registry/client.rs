@@ -32,6 +32,18 @@ impl fmt::Debug for ClientToolContext {
     }
 }
 
+impl super::MessageEgress for ClientToolContext {
+    fn send_message(&self, text: &str, parse_mode: &str) -> String {
+        Self::send_message(self, text, parse_mode)
+    }
+    fn send_file(&self, file_path_or_url: &str, caption: &str, as_document: bool) -> String {
+        Self::send_file(self, file_path_or_url, caption, as_document)
+    }
+    fn react(&self, emoji: &str, message_id: i64) -> String {
+        Self::react(self, emoji, message_id)
+    }
+}
+
 impl ClientToolContext {
     pub fn new(
         chat_id: i64,

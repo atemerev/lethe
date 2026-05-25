@@ -7,9 +7,10 @@ use thiserror::Error;
 
 use crate::config::Settings;
 use crate::memory::archival::{ArchivalEntry, ArchivalError, ArchivalMemory};
-use crate::memory::messages::{MessageHistory, MessageHistoryError, StoredMessage};
+use crate::memory::messages::{MessageHistory, MessageHistoryError, MessageRole, StoredMessage};
 use crate::memory::notes::{NoteError, NoteSearchResult, NoteStore};
 use crate::memory::{BlockManager, MemoryBlock, MemoryDb, MemoryError};
+use crate::todos::{TodoError, TodoManager};
 
 #[derive(Debug, Error)]
 pub enum MemoryStoreError {
@@ -21,6 +22,8 @@ pub enum MemoryStoreError {
     Messages(#[from] MessageHistoryError),
     #[error(transparent)]
     Notes(#[from] NoteError),
+    #[error(transparent)]
+    Todos(#[from] TodoError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -44,7 +47,7 @@ pub struct MemoryStore {
     pub archival: ArchivalMemory,
     pub messages: MessageHistory,
     pub notes: NoteStore,
-    db_path: PathBuf,
+    pub todos: TodoManager,
     memory_data_path: PathBuf,
     workspace_dir: PathBuf,
 }
@@ -52,10 +55,10 @@ pub struct MemoryStore {
 impl MemoryStore {
     pub fn from_settings(settings: &Settings) -> MemoryStoreResult<Self> {
         Self::open_with_data_path(
-            &settings.workspace_dir,
-            &settings.db_path,
-            &settings.notes_dir,
-            settings.memory_dir.join("lethe-memory.db"),
+            &settings.paths.workspace_dir,
+            Some(&settings.paths.db_path),
+            &settings.paths.notes_dir,
+            settings.paths.memory_dir.join("lethe-memory.db"),
         )
     }
 
@@ -68,17 +71,17 @@ impl MemoryStore {
         let db_path = db_path.into();
         let notes_dir = notes_dir.into();
         let memory_data_path = memory_data_path_for(&db_path);
-        Self::open_with_data_path(workspace_dir, db_path, notes_dir, memory_data_path)
+        Self::open_with_data_path(workspace_dir, Some(db_path), notes_dir, memory_data_path)
     }
 
     pub fn open_with_data_path(
         workspace_dir: impl Into<PathBuf>,
-        db_path: impl Into<PathBuf>,
+        legacy_db_path: Option<impl Into<PathBuf>>,
         notes_dir: impl Into<PathBuf>,
         memory_data_path: impl Into<PathBuf>,
     ) -> MemoryStoreResult<Self> {
         let workspace_dir = workspace_dir.into();
-        let db_path = db_path.into();
+        let legacy_db_path = legacy_db_path.map(Into::into);
         let notes_dir = notes_dir.into();
         let memory_data_path = memory_data_path.into();
 
@@ -90,22 +93,23 @@ impl MemoryStore {
         blocks.init_embedded_defaults()?;
         let memory_db = MemoryDb::open(&memory_data_path)?;
         let archival = ArchivalMemory::from_db(memory_db.clone());
-        let messages = MessageHistory::open(&memory_data_path)?;
+        let messages =
+            MessageHistory::open_with_embedder(&memory_data_path, memory_db.embedder().clone())?;
         let notes = NoteStore::new_with_db(notes_dir, memory_db)?;
+        let todos = TodoManager::open(&memory_data_path)?;
+        if let Some(legacy) = legacy_db_path.as_deref() {
+            migrate_legacy_todos(legacy, &memory_data_path)?;
+        }
 
         Ok(Self {
             blocks,
             archival,
             messages,
             notes,
-            db_path,
+            todos,
             memory_data_path,
             workspace_dir,
         })
-    }
-
-    pub fn db_path(&self) -> &Path {
-        &self.db_path
     }
 
     pub fn memory_data_path(&self) -> &Path {
@@ -149,7 +153,7 @@ impl MemoryStore {
                 continue;
             }
             let formatted = format_block(block);
-            if is_stable_block(&block.label) {
+            if block.stable {
                 stable_blocks.push(formatted);
             } else {
                 volatile_blocks.push(formatted);
@@ -191,7 +195,7 @@ impl MemoryStore {
         &self,
         query: &str,
         limit: usize,
-        role: Option<&str>,
+        role: Option<&MessageRole>,
     ) -> MemoryStoreResult<Vec<StoredMessage>> {
         self.messages
             .search(query, normalized_limit(limit, 20), role)
@@ -221,24 +225,53 @@ impl MemoryStore {
 
         let mut lines = vec![
             "<memory_metadata>".to_string(),
-            format!("- now={}", format_timestamp(now)),
             format!(
                 "- memory_blocks_last_modified={}",
                 format_timestamp(last_modified)
             ),
-            format!(
-                "- {message_count} previous messages between you and the user are stored in recall memory (use tools to access them)"
-            ),
-            "- Timestamps on messages are for your reference only. Do not include timestamps in your responses.".to_string(),
         ];
+        if message_count > 0 {
+            lines.push(format!(
+                "- {message_count} previous messages in recall memory (search via conversation_search)"
+            ));
+        }
         if archival_count > 0 {
             lines.push(format!(
-                "- {archival_count} total memories you created are stored in archival memory (use tools to access them)"
+                "- {archival_count} archival memories (search via archival_search)"
             ));
         }
         lines.push("</memory_metadata>".to_string());
         Ok(lines.join("\n"))
     }
+}
+
+/// Coarse time-of-day label for behavioural nudges. Keeps the buckets small
+/// so the model has a clear signal without having to do clock math.
+pub fn time_of_day_label(hour: u32) -> &'static str {
+    match hour {
+        5..=6 => "early_morning",
+        7..=11 => "morning",
+        12..=16 => "afternoon",
+        17..=20 => "evening",
+        21..=23 => "night",
+        _ => "late_night",
+    }
+}
+
+/// `<runtime_context source="clock">` block surfacing the current time. Lives
+/// outside `memory_metadata` so a model scanning for "when is now?" finds it
+/// at a stable location instead of buried in memory state.
+pub fn format_clock_block() -> String {
+    let now = Utc::now();
+    let local = now.with_timezone(&Local);
+    let weekday = local.format("%A").to_string();
+    let hour = local.format("%H").to_string().parse::<u32>().unwrap_or(0);
+    format!(
+        "<runtime_context source=\"clock\">\n- now={}\n- weekday={}\n- time_of_day={}\n</runtime_context>",
+        format_timestamp(now),
+        weekday,
+        time_of_day_label(hour),
+    )
 }
 
 fn ensure_skills_bootstrap(skills_dir: &Path) -> std::io::Result<()> {
@@ -261,14 +294,14 @@ Use core tools to work with skills:\n\
 }
 
 fn format_block(block: &MemoryBlock) -> String {
-    let mut lines = vec![
-        format!("<{}>", block.label),
-        "<description>".to_string(),
-        block.description.clone(),
-        "</description>".to_string(),
-        "<metadata>".to_string(),
-        format!("- chars={}/{}", block.value.len(), block.limit),
-    ];
+    let mut lines = vec![format!("<{}>", block.label)];
+    if !block.description.trim().is_empty() {
+        lines.push("<description>".to_string());
+        lines.push(block.description.clone());
+        lines.push("</description>".to_string());
+    }
+    lines.push("<metadata>".to_string());
+    lines.push(format!("- chars={}/{}", block.value.len(), block.limit));
     if let Some(created_at) = block.created_at {
         lines.push(format!("- created_at={}", format_timestamp(created_at)));
     }
@@ -285,10 +318,6 @@ fn format_block(block: &MemoryBlock) -> String {
     lines.join("\n")
 }
 
-fn is_stable_block(label: &str) -> bool {
-    label == "human"
-}
-
 fn format_timestamp(time: DateTime<Utc>) -> String {
     time.with_timezone(&Local)
         .format("%a %Y-%m-%d %H:%M:%S %Z")
@@ -300,6 +329,114 @@ fn memory_data_path_for(db_path: &Path) -> PathBuf {
         .parent()
         .map(|parent| parent.join("memory").join("lethe-memory.db"))
         .unwrap_or_else(|| PathBuf::from("memory").join("lethe-memory.db"))
+}
+
+/// Copy todos from the pre-consolidation `lethe.db` into the unified memory
+/// DB if (1) the legacy DB exists, (2) it has a `todos` table, and (3) the
+/// unified DB has no todos yet. Subsequent runs are no-ops.
+fn migrate_legacy_todos(
+    legacy_db_path: &Path,
+    unified_db_path: &Path,
+) -> MemoryStoreResult<()> {
+    if !legacy_db_path.exists() || legacy_db_path == unified_db_path {
+        return Ok(());
+    }
+
+    let unified = rusqlite::Connection::open(unified_db_path)?;
+    let existing_count: i64 = unified.query_row("SELECT COUNT(*) FROM todos", [], |row| row.get(0))?;
+    if existing_count > 0 {
+        return Ok(());
+    }
+
+    let legacy = rusqlite::Connection::open(legacy_db_path)?;
+    let has_table: bool = legacy
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='todos')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_table {
+        return Ok(());
+    }
+
+    struct LegacyTodoRow {
+        id: i64,
+        title: String,
+        description: Option<String>,
+        status: String,
+        priority: String,
+        created_at: Option<String>,
+        updated_at: Option<String>,
+        completed_at: Option<String>,
+        due_date: Option<String>,
+        last_reminded_at: Option<String>,
+        remind_count: i64,
+        tags: Option<String>,
+        source: Option<String>,
+    }
+
+    let mut stmt = legacy.prepare(
+        "SELECT id, title, description, status, priority, created_at, updated_at, completed_at, \
+         due_date, last_reminded_at, remind_count, tags, source FROM todos",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(LegacyTodoRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                status: row.get(3)?,
+                priority: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                completed_at: row.get(7)?,
+                due_date: row.get(8)?,
+                last_reminded_at: row.get(9)?,
+                remind_count: row.get(10)?,
+                tags: row.get(11)?,
+                source: row.get(12)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let inserted = rows.len();
+    let mut writer = unified;
+    let tx = writer.transaction()?;
+    for row in rows {
+        tx.execute(
+            "INSERT INTO todos (id, title, description, status, priority, created_at, \
+             updated_at, completed_at, due_date, last_reminded_at, remind_count, tags, source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                row.id,
+                row.title,
+                row.description,
+                row.status,
+                row.priority,
+                row.created_at,
+                row.updated_at,
+                row.completed_at,
+                row.due_date,
+                row.last_reminded_at,
+                row.remind_count,
+                row.tags,
+                row.source,
+            ],
+        )?;
+    }
+    tx.commit()?;
+    tracing::info!(
+        legacy = %legacy_db_path.display(),
+        unified = %unified_db_path.display(),
+        rows = inserted,
+        "migrated legacy todos into unified memory DB"
+    );
+    Ok(())
 }
 
 fn normalized_limit(limit: usize, default: usize) -> usize {
@@ -359,7 +496,7 @@ mod tests {
             .blocks
             .update("project", Some("Port Lethe to Rust."), None)
             .unwrap();
-        store.messages.add("user", "hello", None).unwrap();
+        store.messages.add(MessageRole::User, "hello", None).unwrap();
         store
             .archival
             .add(
@@ -375,7 +512,7 @@ mod tests {
         assert!(volatile.contains("<memory_blocks>"));
         assert!(volatile.contains("Port Lethe to Rust."));
         assert!(volatile.contains("- 1 previous messages"));
-        assert!(volatile.contains("- 1 total memories"));
+        assert!(volatile.contains("- 1 archival memories"));
         assert!(!stable.contains("<identity>"));
 
         let combined = store.get_context_for_prompt().unwrap();

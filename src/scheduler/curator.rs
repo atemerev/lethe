@@ -195,21 +195,17 @@ pub fn should_run_state(state: &CuratorState, now: DateTime<Utc>) -> bool {
 }
 
 fn is_harvestable_message(message: &StoredMessage, last_harvest_at: Option<&str>) -> bool {
-    if !matches!(message.role.as_str(), "user" | "assistant") {
+    if !(message.role.is_user() || message.role.is_assistant()) {
         return false;
     }
-    if MessageMetadata::from_value(Some(&message.metadata)).is_internal() {
+    let metadata = MessageMetadata::from_value(Some(&message.metadata));
+    if metadata.is_internal() {
         return false;
     }
     if message.content.trim().chars().count() < MIN_SUBSTANTIVE_CHARS {
         return false;
     }
-    if message
-        .metadata
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .is_some_and(|calls| !calls.is_empty())
-    {
+    if metadata.has_tool_calls() {
         return false;
     }
     last_harvest_at.is_none_or(|last| message.created_at.as_str() > last)
@@ -232,11 +228,7 @@ fn format_episode(messages: &[StoredMessage]) -> String {
 }
 
 fn truncate_for_episode(content: &str, max_chars: usize) -> String {
-    let mut out = content.trim().chars().take(max_chars).collect::<String>();
-    if content.trim().chars().count() > max_chars {
-        out.push_str("\n...[truncated]");
-    }
-    out
+    crate::llm::truncate::truncate_with_ellipsis(content.trim(), max_chars)
 }
 
 fn episode_fingerprint(text: &str) -> String {
@@ -252,6 +244,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::memory::messages::MessageRole;
     use crate::store::MemoryStore;
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
@@ -296,16 +289,16 @@ mod tests {
         store
             .messages
             .add(
-                "user",
+                MessageRole::User,
                 "Please remember that the permit support letter is important.",
                 None,
             )
             .unwrap();
-        store.messages.add("assistant", "ok", None).unwrap();
+        store.messages.add(MessageRole::Assistant, "ok", None).unwrap();
         store
             .messages
             .add(
-                "assistant",
+                MessageRole::Assistant,
                 "The support letter should mention the research center and lab context.",
                 None,
             )
@@ -333,7 +326,7 @@ mod tests {
         store
             .messages
             .add(
-                "user",
+                MessageRole::User,
                 "This message is substantive enough for a curator run.",
                 None,
             )

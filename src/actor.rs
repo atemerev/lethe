@@ -8,12 +8,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub mod background;
 mod helpers;
+pub mod notification;
 mod registry;
 mod runtime;
 
 pub use registry::ActorRegistry;
-pub use runtime::{ActorNamedEvent, ActorRuntime, ActorSupervisor, ActorToolCommand};
+pub use runtime::{
+    ActorNamedEvent, ActorRuntime, ActorSupervisor, ActorToolCommand, SpawnSubagent,
+};
 
 use helpers::short_id;
 
@@ -47,6 +51,51 @@ pub enum TaskState {
     Running,
     Blocked,
     Done,
+}
+
+/// Why an actor stopped running. Set on every termination so callers (the
+/// chain runner, the parent-notification path, the user-facing actor info)
+/// never have to parse the result text to learn the verdict.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Success,
+    Failure,
+    Partial,
+    Killed,
+    MaxTurns,
+    Restarted,
+    SystemShutdown,
+}
+
+impl Outcome {
+    pub fn parse_terminate_arg(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "success" | "" => Self::Success,
+            "failure" | "failed" | "error" => Self::Failure,
+            "partial" => Self::Partial,
+            _ => Self::Success,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Partial => "partial",
+            Self::Killed => "killed",
+            Self::MaxTurns => "max_turns",
+            Self::Restarted => "restarted",
+            Self::SystemShutdown => "system_shutdown",
+        }
+    }
+
+    pub fn is_failed(self) -> bool {
+        matches!(
+            self,
+            Self::Failure | Self::Killed | Self::MaxTurns | Self::SystemShutdown
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -86,33 +135,18 @@ impl MessageIntent {
     }
 
     pub fn from_strings(channel: &str, kind: &str) -> Self {
-        let kind_lower = kind.trim().to_ascii_lowercase();
-        match kind_lower.as_str() {
+        match kind.trim().to_ascii_lowercase().as_str() {
             "progress" => Self::Progress,
             "done" => Self::Done,
             "failed" => Self::Failed,
             "error" => Self::Error,
             "max_turns" => Self::MaxTurns,
-            "alert" => Self::Alert,
-            "reminder" => Self::Reminder,
+            "alert" | "warning" => Self::Alert,
+            "reminder" | "deadline" | "update_ready" => Self::Reminder,
             "info" => Self::Info,
             "message" => Self::Message,
-            _ => {
-                if kind_lower.contains("alert") || kind_lower.contains("warning") {
-                    Self::Alert
-                } else if kind_lower.contains("deadline")
-                    || kind_lower.contains("reminder")
-                    || kind_lower.contains("update_ready")
-                {
-                    Self::Reminder
-                } else if kind_lower.contains("error") || kind_lower.contains("fatal") {
-                    Self::Error
-                } else if channel == "task_update" {
-                    Self::Progress
-                } else {
-                    Self::Info
-                }
-            }
+            "" if channel.trim() == "task_update" => Self::Progress,
+            _ => Self::Info,
         }
     }
 }
@@ -277,6 +311,7 @@ pub struct ActorInfo {
     pub task_state: TaskState,
     pub spawned_by: String,
     pub result: Option<String>,
+    pub outcome: Option<Outcome>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,6 +322,29 @@ pub struct ActorSpawnRequest<'a> {
     pub tools: &'a str,
     pub model: &'a str,
     pub max_turns: usize,
+}
+
+/// Typed result of a spawn attempt. Callers that need the new actor id read
+/// `Spawned.actor_id` directly instead of grepping the formatted message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpawnReport {
+    Spawned { actor_id: String, message: String },
+    Rejected { message: String },
+}
+
+impl SpawnReport {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Spawned { message, .. } | Self::Rejected { message } => message,
+        }
+    }
+
+    pub fn actor_id(&self) -> Option<&str> {
+        match self {
+            Self::Spawned { actor_id, .. } => Some(actor_id.as_str()),
+            Self::Rejected { .. } => None,
+        }
+    }
 }
 
 impl ActorInfo {
@@ -320,6 +378,7 @@ pub struct Actor {
     pub task_state: TaskState,
     pub created_at: DateTime<Utc>,
     pub terminated_at: Option<DateTime<Utc>>,
+    pub(crate) outcome: Option<Outcome>,
     result: Option<String>,
     messages: Vec<ActorMessage>,
     inbox: VecDeque<ActorMessage>,
@@ -339,6 +398,7 @@ impl Actor {
             task_state: TaskState::Planned,
             created_at: Utc::now(),
             terminated_at: None,
+            outcome: None,
             result: None,
             messages: Vec::new(),
             inbox: VecDeque::new(),
@@ -358,6 +418,7 @@ impl Actor {
             task_state: self.task_state,
             spawned_by: self.spawned_by.clone(),
             result: self.result.clone(),
+            outcome: self.outcome,
         }
     }
 

@@ -360,6 +360,47 @@ impl TodoManager {
         Ok(conn.execute("DELETE FROM todos WHERE id = ?1", params![todo_id])? > 0)
     }
 
+    /// Render a single todo in full, including the entire description and all
+    /// metadata. Used by `todo_get` so the agent can drill into a row whose
+    /// description was truncated in the list view.
+    pub fn format_detail(todo: &Todo) -> String {
+        let mut lines = vec![format!(
+            "#{} [{}] ({}) {}",
+            todo.id,
+            todo.status.as_str(),
+            todo.priority.as_str(),
+            todo.title
+        )];
+        if let Some(due) = todo.due_date.as_deref() {
+            lines.push(format!("due: {due}"));
+        }
+        lines.push(format!("created_at: {}", todo.created_at));
+        if !todo.updated_at.is_empty() && todo.updated_at != todo.created_at {
+            lines.push(format!("updated_at: {}", todo.updated_at));
+        }
+        if let Some(completed) = todo.completed_at.as_deref() {
+            lines.push(format!("completed_at: {completed}"));
+        }
+        if todo.remind_count > 0 {
+            let last = todo.last_reminded_at.as_deref().unwrap_or("unknown");
+            lines.push(format!(
+                "reminded: {} time(s), last at {last}",
+                todo.remind_count
+            ));
+        }
+        if !todo.tags.is_empty() {
+            lines.push(format!("tags: {}", todo.tags.join(", ")));
+        }
+        if let Some(source) = todo.source.as_deref() {
+            lines.push(format!("source: {source}"));
+        }
+        if let Some(description) = todo.description.as_deref() {
+            lines.push(String::new());
+            lines.push(description.to_string());
+        }
+        lines.join("\n")
+    }
+
     pub fn format_list(todos: &[Todo]) -> String {
         if todos.is_empty() {
             return "No todos found matching criteria.".to_string();
@@ -396,7 +437,7 @@ impl TodoManager {
             if let Some(description) = todo.description.as_deref() {
                 lines.push(format!(
                     "   {}",
-                    description.chars().take(100).collect::<String>()
+                    crate::llm::truncate::truncate_with_ellipsis(description, 400)
                 ));
             }
         }
@@ -435,7 +476,7 @@ impl TodoManager {
             if let Some(description) = todo.description.as_deref() {
                 lines.push(format!(
                     "   {}",
-                    description.chars().take(100).collect::<String>()
+                    crate::llm::truncate::truncate_with_ellipsis(description, 400)
                 ));
             }
         }

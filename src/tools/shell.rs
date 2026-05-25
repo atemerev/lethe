@@ -688,6 +688,124 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+use serde_json::Value;
+
+use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::args::{
+    bool_arg, string_arg, string_arg_default, u64_arg, usize_arg,
+};
+use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req};
+
+fn exec_bash(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.shell.bash(
+        &string_arg(args, "command"),
+        u64_arg(args, "timeout", DEFAULT_TIMEOUT_SECONDS),
+        bool_arg(args, "run_in_background", false),
+        bool_arg(args, "use_pty", false),
+    )
+}
+
+fn exec_bash_output(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.shell.bash_output(
+        &string_arg(args, "shell_id"),
+        &string_arg_default(args, "filter_pattern", ""),
+        usize_arg(args, "last_lines", 0),
+    )
+}
+
+fn exec_kill_bash(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.shell.kill_bash(&string_arg(args, "shell_id"))
+}
+
+fn exec_get_terminal_screen(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .shell
+        .get_terminal_screen(&string_arg(args, "shell_id"))
+}
+
+fn exec_send_terminal_input(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.shell.send_terminal_input(
+        &string_arg(args, "shell_id"),
+        &string_arg(args, "text"),
+        bool_arg(args, "send_enter", true),
+    )
+}
+
+fn exec_get_environment_info(registry: &ToolRegistry<'_>, _args: &Value) -> String {
+    registry.shell.get_environment_info()
+}
+
+fn exec_check_command_exists(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .shell
+        .check_command_exists(&string_arg(args, "command_name"))
+}
+
+pub const TOOL_DEFS: &[ToolDef] = &[
+    ToolDef {
+        name: "bash",
+        description: "Run a shell command (use run_in_background for long-running).",
+        params: &[
+            p_str_req("command", "Shell command."),
+            p_int("timeout", "Timeout (sec)."),
+            p_bool("run_in_background", "Run in background."),
+            p_bool("use_pty", "Background PTY mode."),
+        ],
+        category: ToolCategory::Initial,
+        execute: ToolExecutor::Sync(exec_bash),
+    },
+    ToolDef {
+        name: "bash_output",
+        description: "Read background shell output.",
+        params: &[
+            p_str_req("shell_id", "Shell id."),
+            p_str("filter_pattern", "Substring filter."),
+            p_int("last_lines", "Last N lines (0 = all)."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_bash_output),
+    },
+    ToolDef {
+        name: "kill_bash",
+        description: "Kill a background shell.",
+        params: &[p_str_req("shell_id", "Shell id.")],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_kill_bash),
+    },
+    ToolDef {
+        name: "get_terminal_screen",
+        description: "Read a PTY background buffer.",
+        params: &[p_str_req("shell_id", "PTY shell id.")],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_get_terminal_screen),
+    },
+    ToolDef {
+        name: "send_terminal_input",
+        description: "Send input to a PTY background shell.",
+        params: &[
+            p_str_req("shell_id", "PTY shell id."),
+            p_str_req("text", "Text."),
+            p_bool("send_enter", "Append Enter."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_send_terminal_input),
+    },
+    ToolDef {
+        name: "get_environment_info",
+        description: "Show shell environment details.",
+        params: &[],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_get_environment_info),
+    },
+    ToolDef {
+        name: "check_command_exists",
+        description: "Check if a command is on PATH.",
+        params: &[p_str_req("command_name", "Command name.")],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_check_command_exists),
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

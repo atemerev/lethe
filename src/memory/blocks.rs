@@ -39,6 +39,10 @@ pub struct BlockMetadata {
     pub read_only: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// Stable blocks (user profile etc.) render in their own section ahead of
+    /// volatile blocks so they cache better in the system prompt.
+    #[serde(default)]
+    pub stable: bool,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -53,6 +57,7 @@ impl Default for BlockMetadata {
             limit: DEFAULT_BLOCK_LIMIT,
             read_only: false,
             hidden: false,
+            stable: false,
             created_at: None,
             updated_at: None,
         }
@@ -67,6 +72,8 @@ pub struct MemoryBlock {
     pub limit: usize,
     pub read_only: bool,
     pub hidden: bool,
+    #[serde(default)]
+    pub stable: bool,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -89,8 +96,30 @@ impl BlockManager {
             embedded_block("identity").unwrap(),
             embedded_meta("identity"),
         )?;
-        self.write_seed_if_missing("human", embedded_block("human").unwrap(), None)?;
+        self.write_seed_if_missing(
+            "human",
+            embedded_block("human").unwrap(),
+            embedded_meta("human"),
+        )?;
         self.write_seed_if_missing("project", embedded_block("project").unwrap(), None)?;
+        // Backfill: legacy installs may already have a `human` block without the
+        // `stable: true` marker. Patch its metadata in place so the system prompt
+        // continues to place it in the stable section.
+        self.mark_block_stable_if_missing("human")?;
+        Ok(())
+    }
+
+    fn mark_block_stable_if_missing(&self, label: &str) -> MemoryResult<()> {
+        let path = self.meta_path(label);
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut meta = self.load_meta(label)?;
+        if meta.stable {
+            return Ok(());
+        }
+        meta.stable = true;
+        self.save_meta(label, &meta)?;
         Ok(())
     }
 
@@ -120,6 +149,7 @@ impl BlockManager {
                 limit,
                 read_only,
                 hidden,
+                stable: false,
                 created_at: Some(now),
                 updated_at: Some(now),
             },
@@ -143,6 +173,7 @@ impl BlockManager {
             limit: meta.limit,
             read_only: meta.read_only,
             hidden: meta.hidden,
+            stable: meta.stable,
             created_at: meta.created_at,
             updated_at: meta.updated_at,
         }))
@@ -333,6 +364,7 @@ fn embedded_block(name: &str) -> Option<&'static str> {
 fn embedded_meta(name: &str) -> Option<&'static str> {
     match name {
         "identity" => Some(include_str!("../../config/blocks/identity.meta.json")),
+        "human" => Some(include_str!("../../config/blocks/human.meta.json")),
         _ => None,
     }
 }

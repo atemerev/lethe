@@ -80,16 +80,16 @@ impl TranscriptionProvider {
 pub fn choose_transcription_provider(
     settings: &Settings,
 ) -> TranscriptionResult<TranscriptionProvider> {
-    if let Some(provider) = TranscriptionProvider::parse(&settings.transcription_provider)? {
+    if let Some(provider) = TranscriptionProvider::parse(&settings.transcription.provider)? {
         return Ok(provider);
     }
-    if configured_api_key(&settings.openrouter_api_key) {
+    if configured_api_key(&settings.llm.openrouter_api_key) {
         return Ok(TranscriptionProvider::OpenRouter);
     }
-    if configured_api_key(&settings.openai_api_key) {
+    if configured_api_key(&settings.llm.openai_api_key) {
         return Ok(TranscriptionProvider::OpenAi);
     }
-    if local_whisper_available(&settings.transcription_local_command) {
+    if local_whisper_available(&settings.transcription.local_command) {
         return Ok(TranscriptionProvider::Local);
     }
     Err(TranscriptionError::NotConfigured)
@@ -162,12 +162,12 @@ pub fn transcribe_audio(
         return Err(TranscriptionError::EmptyAudio);
     }
     let provider = choose_transcription_provider(settings)?;
-    let model = if settings.transcription_model.trim().is_empty() {
+    let model = if settings.transcription.model.trim().is_empty() {
         default_model_for_provider(provider).to_string()
     } else {
-        settings.transcription_model.trim().to_string()
+        settings.transcription.model.trim().to_string()
     };
-    let language = settings.transcription_language.trim();
+    let language = settings.transcription.language.trim();
     let language = if language.is_empty() {
         None
     } else {
@@ -182,7 +182,7 @@ pub fn transcribe_audio(
             &audio_format,
             &model,
             language,
-            &settings.transcription_local_command,
+            &settings.transcription.local_command,
         ),
         TranscriptionProvider::OpenRouter => transcribe_openrouter(
             audio_bytes,
@@ -395,8 +395,8 @@ fn api_key_for_provider(
 ) -> TranscriptionResult<String> {
     match provider {
         TranscriptionProvider::OpenRouter => {
-            if configured_api_key(&settings.openrouter_api_key) {
-                Ok(settings.openrouter_api_key.clone())
+            if configured_api_key(&settings.llm.openrouter_api_key) {
+                Ok(settings.llm.openrouter_api_key.clone())
             } else {
                 Err(TranscriptionError::MissingApiKey(
                     "OPENROUTER_API_KEY",
@@ -405,8 +405,8 @@ fn api_key_for_provider(
             }
         }
         TranscriptionProvider::OpenAi => {
-            if configured_api_key(&settings.openai_api_key) {
-                Ok(settings.openai_api_key.clone())
+            if configured_api_key(&settings.llm.openai_api_key) {
+                Ok(settings.llm.openai_api_key.clone())
             } else {
                 Err(TranscriptionError::MissingApiKey(
                     "OPENAI_API_KEY",
@@ -482,66 +482,30 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::RuntimeMode;
 
     fn settings() -> Settings {
-        Settings {
-            agent_name: "lethe".to_string(),
-            mode: RuntimeMode::Cli,
-            telegram_bot_token: String::new(),
-            telegram_allowed_user_ids: vec![],
-            telegram_transcription_enabled: true,
-            lethe_api_token: String::new(),
-            lethe_api_host: "127.0.0.1".to_string(),
-            lethe_api_port: 8080,
-            openrouter_api_key: String::new(),
-            openai_api_key: String::new(),
-            llm_model: String::new(),
-            llm_model_aux: String::new(),
-            llm_provider: String::new(),
-            llm_api_base: String::new(),
-            llm_context_limit: 100_000,
-            lethe_home: PathBuf::from("/tmp/lethe"),
-            config_dir: PathBuf::from("config"),
-            workspace_dir: PathBuf::from("/tmp/lethe/workspace"),
-            memory_dir: PathBuf::from("/tmp/lethe/data/memory"),
-            db_path: PathBuf::from("/tmp/lethe/data/lethe.db"),
-            credentials_dir: PathBuf::from("/tmp/lethe/credentials"),
-            cache_dir: PathBuf::from("/tmp/lethe/cache"),
-            logs_dir: PathBuf::from("/tmp/lethe/logs"),
-            notes_dir: PathBuf::from("/tmp/lethe/workspace/notes"),
-            transcription_provider: String::new(),
-            transcription_model: String::new(),
-            transcription_language: String::new(),
-            transcription_local_command: "whisper".to_string(),
-            actors_enabled: true,
-            hippocampus_enabled: true,
-            curator_enabled: true,
-            heartbeat_enabled: true,
-            heartbeat_interval_seconds: 3600,
-            debounce_seconds: 5.0,
-            proactive_max_per_day: 4,
-            proactive_cooldown_minutes: 60,
-        }
+        let mut settings = crate::config::test_settings(&PathBuf::from("/tmp/lethe"));
+        settings.llm.llm_model.clear();
+        settings
     }
 
     #[test]
     fn choose_provider_prefers_configured_keys_and_explicit_provider() {
         let mut settings = settings();
-        settings.openrouter_api_key = "or-key".to_string();
-        settings.openai_api_key = "oa-key".to_string();
+        settings.llm.openrouter_api_key = "or-key".to_string();
+        settings.llm.openai_api_key = "oa-key".to_string();
         assert_eq!(
             choose_transcription_provider(&settings).unwrap(),
             TranscriptionProvider::OpenRouter
         );
 
-        settings.transcription_provider = "openai".to_string();
+        settings.transcription.provider = "openai".to_string();
         assert_eq!(
             choose_transcription_provider(&settings).unwrap(),
             TranscriptionProvider::OpenAi
         );
 
-        settings.transcription_provider = "local".to_string();
+        settings.transcription.provider = "local".to_string();
         assert_eq!(
             choose_transcription_provider(&settings).unwrap(),
             TranscriptionProvider::Local
@@ -551,16 +515,16 @@ mod tests {
     #[test]
     fn choose_provider_rejects_unknown_provider_and_placeholder_keys() {
         let mut settings = settings();
-        settings.transcription_provider = "anthropic".to_string();
+        settings.transcription.provider = "anthropic".to_string();
         assert!(matches!(
             choose_transcription_provider(&settings),
             Err(TranscriptionError::UnsupportedProvider(_))
         ));
 
-        settings.transcription_provider.clear();
-        settings.openai_api_key = "local".to_string();
-        settings.openrouter_api_key = String::new();
-        settings.transcription_local_command = "/definitely/not/a/whisper".to_string();
+        settings.transcription.provider.clear();
+        settings.llm.openai_api_key = "local".to_string();
+        settings.llm.openrouter_api_key = String::new();
+        settings.transcription.local_command = "/definitely/not/a/whisper".to_string();
         assert!(matches!(
             choose_transcription_provider(&settings),
             Err(TranscriptionError::NotConfigured)

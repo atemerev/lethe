@@ -11,7 +11,7 @@ use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::{
     BinarySource, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatRole, ContentPart,
-    MessageContent, PromptTokensDetails, ToolCall, Usage,
+    MessageContent, PromptTokensDetails, ToolCall, ToolResponse, Usage,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{ModelIden, ServiceTarget};
@@ -43,12 +43,52 @@ pub enum LlmRole {
     Assistant,
 }
 
+/// Cache hint that survives the LlmMessage abstraction. Mirrors the subset of
+/// genai's CacheControl we actually use (currently just an ephemeral marker
+/// for Anthropic). Mapped at the boundary in `into_chat_message`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHint {
+    /// Mark this message as a cache breakpoint. Anthropic caches the prefix
+    /// up to and including this message; other providers ignore it.
+    Ephemeral,
+}
+
+/// A tool call recorded earlier (either in this turn's iterations or in a
+/// previous turn loaded from history). Carries the id we use to pair with
+/// the matching tool response when sending the next request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HistoricalToolCall {
+    pub call_id: String,
+    pub fn_name: String,
+    pub fn_arguments: serde_json::Value,
+}
+
+/// Tool result associated with a previously emitted tool_use_id.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HistoricalToolResponse {
+    pub call_id: String,
+    pub content: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LlmMessage {
     pub role: LlmRole,
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<LlmAttachment>,
+    /// Tool calls emitted by an assistant message. Empty for plain replies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<HistoricalToolCall>,
+    /// Tool results returned to the model. Carried on a user-role message so
+    /// the wire format (Anthropic `tool_result` blocks / OpenAI `tool` role)
+    /// pairs correctly with the preceding assistant message's tool_use blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_responses: Vec<HistoricalToolResponse>,
+    /// Per-message cache hint. Set on system messages we want to mark as a
+    /// cache breakpoint; ignored by providers that don't support caching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheHint>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -64,6 +104,9 @@ impl LlmMessage {
             role: LlmRole::System,
             content: content.into(),
             attachments: vec![],
+            tool_calls: vec![],
+            tool_responses: vec![],
+            cache_control: None,
         }
     }
 
@@ -72,6 +115,9 @@ impl LlmMessage {
             role: LlmRole::User,
             content: content.into(),
             attachments: vec![],
+            tool_calls: vec![],
+            tool_responses: vec![],
+            cache_control: None,
         }
     }
 
@@ -80,6 +126,9 @@ impl LlmMessage {
             role: LlmRole::Assistant,
             content: content.into(),
             attachments: vec![],
+            tool_calls: vec![],
+            tool_responses: vec![],
+            cache_control: None,
         }
     }
 
@@ -91,7 +140,45 @@ impl LlmMessage {
             role: LlmRole::User,
             content: content.into(),
             attachments,
+            tool_calls: vec![],
+            tool_responses: vec![],
+            cache_control: None,
         }
+    }
+
+    /// Assistant message that emitted tool calls. `content` is the
+    /// accompanying text (often empty when the model went straight to tools).
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<HistoricalToolCall>,
+    ) -> Self {
+        Self {
+            role: LlmRole::Assistant,
+            content: content.into(),
+            attachments: vec![],
+            tool_calls,
+            tool_responses: vec![],
+            cache_control: None,
+        }
+    }
+
+    /// User-role message carrying tool results that follow an
+    /// `assistant_with_tool_calls`. Anthropic and OpenAI both expect tool
+    /// results paired with their tool_use_id; the user role is the wrapper.
+    pub fn tool_results(tool_responses: Vec<HistoricalToolResponse>) -> Self {
+        Self {
+            role: LlmRole::User,
+            content: String::new(),
+            attachments: vec![],
+            tool_calls: vec![],
+            tool_responses,
+            cache_control: None,
+        }
+    }
+
+    pub fn with_cache_control(mut self, hint: CacheHint) -> Self {
+        self.cache_control = Some(hint);
+        self
     }
 }
 
@@ -108,10 +195,10 @@ pub struct LlmRouterConfig {
 impl LlmRouterConfig {
     pub fn from_settings(settings: &Settings) -> Self {
         Self {
-            model: settings.llm_model.clone(),
+            model: settings.llm.llm_model.clone(),
             aux_model: settings.effective_aux_model().to_string(),
-            provider: settings.llm_provider.clone(),
-            api_base: settings.llm_api_base.clone(),
+            provider: settings.llm.llm_provider.clone(),
+            api_base: settings.llm.llm_api_base.clone(),
             max_output_tokens: 8000,
             temperature_millidegrees: 700,
         }
@@ -1477,11 +1564,73 @@ pub fn build_chat_request(messages: Vec<LlmMessage>) -> ChatRequest {
 }
 
 fn into_chat_message(message: LlmMessage) -> ChatMessage {
-    let content = into_message_content(message.content, message.attachments);
-    match message.role {
+    use genai::chat::MessageOptions;
+    let LlmMessage {
+        role,
+        content,
+        attachments,
+        tool_calls,
+        tool_responses,
+        cache_control,
+    } = message;
+
+    // Tool-result-only user message → genai expects a content with ToolResponse
+    // parts. Mirrors what the in-turn tool loop emits via ToolResponse::new.
+    if role == LlmRole::User && !tool_responses.is_empty() {
+        let mut parts = Vec::new();
+        for response in tool_responses {
+            parts.push(ContentPart::ToolResponse(ToolResponse::new(
+                response.call_id,
+                response.content,
+            )));
+        }
+        let mut chat = ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::from_parts(parts),
+            options: None,
+        };
+        if let Some(hint) = cache_control {
+            chat.options = Some(MessageOptions::from(cache_hint_to_genai(hint)));
+        }
+        return chat;
+    }
+
+    // Assistant message that includes tool calls → text part(s) + ToolCall parts.
+    if role == LlmRole::Assistant && !tool_calls.is_empty() {
+        let mut parts = Vec::new();
+        if !content.trim().is_empty() {
+            parts.push(ContentPart::Text(content));
+        }
+        for call in tool_calls {
+            parts.push(ContentPart::ToolCall(ToolCall {
+                call_id: call.call_id,
+                fn_name: call.fn_name,
+                fn_arguments: call.fn_arguments,
+                thought_signatures: None,
+            }));
+        }
+        let mut chat = ChatMessage::assistant(MessageContent::from_parts(parts));
+        if let Some(hint) = cache_control {
+            chat.options = Some(MessageOptions::from(cache_hint_to_genai(hint)));
+        }
+        return chat;
+    }
+
+    let content = into_message_content(content, attachments);
+    let mut chat = match role {
         LlmRole::System => ChatMessage::system(content),
         LlmRole::User => ChatMessage::user(content),
         LlmRole::Assistant => ChatMessage::assistant(content),
+    };
+    if let Some(hint) = cache_control {
+        chat.options = Some(MessageOptions::from(cache_hint_to_genai(hint)));
+    }
+    chat
+}
+
+fn cache_hint_to_genai(hint: CacheHint) -> genai::chat::CacheControl {
+    match hint {
+        CacheHint::Ephemeral => genai::chat::CacheControl::Ephemeral,
     }
 }
 

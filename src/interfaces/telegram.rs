@@ -6,8 +6,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::llm::response_format::message_envelope_segments;
 use crate::memory::message_metadata::{MessageKind, MessageVisibility, annotate_value};
+
+mod formatting;
+pub use formatting::{
+    image_mime_type_from_path, is_emoji_only_reply, split_telegram_messages, telegram_parse_mode,
+};
+use formatting::{
+    error_payload, expand_tilde, filename_from_url, image_extension_for_mime,
+    is_invalid_reaction_error, safe_file_name,
+};
 
 #[derive(Debug, Error)]
 pub enum TelegramError {
@@ -672,31 +680,6 @@ impl IncomingTelegramSticker {
     }
 }
 
-pub fn image_mime_type_from_path(file_path: &str) -> &'static str {
-    match file_path
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "jpg" | "jpeg" => "image/jpeg",
-        _ => "image/jpeg",
-    }
-}
-
-fn image_extension_for_mime(content_type: &str) -> Option<&'static str> {
-    match content_type.trim().to_ascii_lowercase().as_str() {
-        "image/png" => Some("png"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        "image/jpeg" | "image/jpg" => Some("jpg"),
-        _ => None,
-    }
-}
 
 impl IncomingTelegramReaction {
     pub fn content(&self) -> String {
@@ -861,6 +844,60 @@ impl Default for TelegramTurnGuard {
 
 pub type SharedTelegramTurnGuard = Arc<Mutex<TelegramTurnGuard>>;
 
+const TELEGRAM_TOOL_TYPING_REFRESH_SECONDS: u64 = 3;
+
+/// [`crate::tools::registry::TurnObserver`] that keeps the Telegram "typing"
+/// indicator alive for the duration of every tool call.
+#[derive(Clone, Debug)]
+pub struct TelegramTypingObserver {
+    token: String,
+    chat_id: i64,
+}
+
+impl TelegramTypingObserver {
+    pub fn new(token: impl Into<String>, chat_id: i64) -> Self {
+        Self {
+            token: token.into(),
+            chat_id,
+        }
+    }
+}
+
+impl crate::tools::registry::TurnObserver for TelegramTypingObserver {
+    fn wrap_tool_call<'a>(
+        &'a self,
+        _name: &'a str,
+        inner: crate::tools::registry::BoxToolFuture<'a>,
+    ) -> crate::tools::registry::BoxToolFuture<'a> {
+        let token = self.token.clone();
+        let chat_id = self.chat_id;
+        Box::pin(async move {
+            let Ok(client) = TelegramClient::new(token, Vec::new()) else {
+                return inner.await;
+            };
+            let _ = client.send_chat_action(chat_id, "typing").await;
+            let typing_task = tokio::spawn(typing_refresh_loop(client, chat_id));
+            let output = inner.await;
+            typing_task.abort();
+            let _ = typing_task.await;
+            output
+        })
+    }
+}
+
+async fn typing_refresh_loop(client: TelegramClient, chat_id: i64) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            TELEGRAM_TOOL_TYPING_REFRESH_SECONDS,
+        ))
+        .await;
+        if let Err(error) = client.send_chat_action(chat_id, "typing").await {
+            tracing::debug!(chat_id, error = %error, "telegram tool typing action failed");
+            return;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TelegramToolContext {
     pub token: String,
@@ -868,6 +905,18 @@ pub struct TelegramToolContext {
     pub last_message_id: Option<i64>,
     pub guard: Option<SharedTelegramTurnGuard>,
     pub dry_run: bool,
+}
+
+impl crate::tools::registry::MessageEgress for TelegramToolContext {
+    fn send_message(&self, text: &str, parse_mode: &str) -> String {
+        Self::send_message(self, text, parse_mode)
+    }
+    fn send_file(&self, file_path_or_url: &str, caption: &str, as_document: bool) -> String {
+        Self::send_file(self, file_path_or_url, caption, as_document)
+    }
+    fn react(&self, emoji: &str, message_id: i64) -> String {
+        Self::react(self, emoji, message_id)
+    }
 }
 
 impl TelegramToolContext {
@@ -1180,163 +1229,6 @@ pub fn set_message_reaction_blocking(
     }
 }
 
-pub fn is_emoji_only_reply(text: &str) -> bool {
-    let stripped = text.trim();
-    if stripped.is_empty() {
-        return false;
-    }
-    let mut saw_emoji = false;
-    for ch in stripped.chars() {
-        if ch.is_whitespace() || ch == '\u{200d}' || ch == '\u{fe0f}' {
-            continue;
-        }
-        let code = ch as u32;
-        if (0x1F3FB..=0x1F3FF).contains(&code) {
-            continue;
-        }
-        if is_emoji_base_char(code) {
-            saw_emoji = true;
-            continue;
-        }
-        return false;
-    }
-    saw_emoji
-}
-
-fn is_emoji_base_char(code: u32) -> bool {
-    (0x1F1E6..=0x1F1FF).contains(&code)
-        || (0x1F300..=0x1FAFF).contains(&code)
-        || (0x2600..=0x27BF).contains(&code)
-}
-
-fn is_invalid_reaction_error(message: &str) -> bool {
-    message.to_ascii_uppercase().contains("REACTION_INVALID")
-}
-
-pub fn telegram_parse_mode(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "markdown" | "markdownv2" => Some("MarkdownV2"),
-        "html" => Some("HTML"),
-        _ => None,
-    }
-}
-
-fn filename_from_url(url: &str) -> String {
-    let without_query = url.split('?').next().unwrap_or(url);
-    without_query
-        .rsplit('/')
-        .next()
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or("file")
-        .to_string()
-}
-
-fn safe_file_name(raw: &str) -> String {
-    Path::new(raw)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::trim)
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .unwrap_or("telegram_document")
-        .to_string()
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(path)
-}
-
-fn error_payload(message: &str) -> String {
-    serde_json::to_string_pretty(&json!({
-        "success": false,
-        "error": message,
-    }))
-    .unwrap()
-}
-
-pub fn split_telegram_messages(text: &str) -> Vec<String> {
-    const LIMIT: usize = 4096;
-    let mut chunks = Vec::new();
-    for segment in telegram_message_segments(text) {
-        let mut current = String::new();
-        for line in segment.lines() {
-            let additional = if current.is_empty() {
-                line.len()
-            } else {
-                line.len() + 1
-            };
-            if !current.is_empty() && current.len() + additional > LIMIT {
-                chunks.push(current);
-                current = String::new();
-            }
-            if line.len() > LIMIT {
-                if !current.is_empty() {
-                    chunks.push(std::mem::take(&mut current));
-                }
-                let mut part = String::new();
-                for ch in line.chars() {
-                    if part.len() + ch.len_utf8() > LIMIT {
-                        chunks.push(part);
-                        part = String::new();
-                    }
-                    part.push(ch);
-                }
-                if !part.is_empty() {
-                    chunks.push(part);
-                }
-            } else {
-                if !current.is_empty() {
-                    current.push('\n');
-                }
-                current.push_str(line);
-            }
-        }
-        if !current.trim().is_empty() {
-            chunks.push(current);
-        }
-    }
-    if chunks.is_empty() {
-        Vec::new()
-    } else {
-        chunks
-    }
-}
-
-fn telegram_message_segments(text: &str) -> Vec<String> {
-    message_envelope_segments(text).unwrap_or_else(|| split_paragraph_segments(text))
-}
-
-fn split_paragraph_segments(text: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = Vec::new();
-    let mut in_code_block = false;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code_block = !in_code_block;
-        }
-        if !in_code_block && line.trim().is_empty() {
-            let segment = current.join("\n").trim().to_string();
-            if !segment.is_empty() {
-                segments.push(segment);
-            }
-            current.clear();
-        } else {
-            current.push(line);
-        }
-    }
-    let segment = current.join("\n").trim().to_string();
-    if !segment.is_empty() {
-        segments.push(segment);
-    }
-    if segments.is_empty() && !text.trim().is_empty() {
-        segments.push(text.trim().to_string());
-    }
-    segments
-}
 
 #[cfg(test)]
 mod tests {

@@ -6,6 +6,15 @@ use serde_json::{Value, json};
 
 use super::helpers::*;
 use super::*;
+use crate::tools::registry::{ToolContextShape, requestable_tools_directory_for_shape};
+
+fn requestable_directory_for_actor(actor: &Actor) -> String {
+    requestable_tools_directory_for_shape(ToolContextShape {
+        has_actor: true,
+        is_subagent: !actor.is_principal,
+        has_transport: false,
+    })
+}
 
 #[derive(Debug)]
 pub struct ActorRegistry {
@@ -285,7 +294,12 @@ impl ActorRegistry {
         ))
     }
 
-    pub fn terminate(&mut self, actor_id: &str, result: impl Into<String>) -> ActorResult<bool> {
+    pub fn terminate(
+        &mut self,
+        actor_id: &str,
+        outcome: Outcome,
+        result: impl Into<String>,
+    ) -> ActorResult<bool> {
         let result = result.into();
         let actor = self
             .actors
@@ -307,6 +321,7 @@ impl ActorRegistry {
                 .get_mut(actor_id)
                 .ok_or_else(|| ActorError::NotFound(actor_id.to_string()))?;
             actor.result = Some(result_text.clone());
+            actor.outcome = Some(outcome);
             actor.task_state = TaskState::Done;
             actor.state = ActorState::Terminated;
             actor.terminated_at = Some(Utc::now());
@@ -324,6 +339,7 @@ impl ActorRegistry {
             json!({
                 "name": actor.config.name,
                 "result": actor.result.clone().unwrap_or_default(),
+                "outcome": outcome.as_str(),
                 "turns": actor.turn_count,
             }),
         );
@@ -333,6 +349,7 @@ impl ActorRegistry {
     pub fn finish_turn_or_terminate(
         &mut self,
         actor_id: &str,
+        outcome: Outcome,
         result: impl Into<String>,
     ) -> ActorResult<bool> {
         let actor = self
@@ -341,7 +358,7 @@ impl ActorRegistry {
             .ok_or_else(|| ActorError::NotFound(actor_id.to_string()))?
             .clone();
         if !actor.config.persistent {
-            return self.terminate(actor_id, result);
+            return self.terminate(actor_id, outcome, result);
         }
         if actor.state == ActorState::Terminated {
             return Ok(false);
@@ -393,7 +410,11 @@ impl ActorRegistry {
         if child.spawned_by != parent_id || child.state == ActorState::Terminated {
             return Ok(false);
         }
-        self.terminate(child_id, format!("Killed by parent {}", parent.config.name))
+        self.terminate(
+            child_id,
+            Outcome::Killed,
+            format!("Killed by parent {}", parent.config.name),
+        )
     }
 
     pub fn cleanup_terminated(&mut self, force: bool) -> usize {
@@ -442,6 +463,7 @@ impl ActorRegistry {
         if actor.turn_count >= actor.config.max_turns.max(1) {
             self.terminate(
                 actor_id,
+                Outcome::MaxTurns,
                 format!(
                     "Max turns reached ({}) before completing task.",
                     actor.config.max_turns.max(1)
@@ -450,7 +472,12 @@ impl ActorRegistry {
             return Ok(None);
         }
 
-        let system_prompt = self.build_system_prompt(actor_id)?;
+        let mut system_prompt = self.build_system_prompt(actor_id)?;
+        let directory = self.build_requestable_directory(actor_id)?;
+        if !directory.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&directory);
+        }
         let updated = self
             .actors
             .get_mut(actor_id)
@@ -520,34 +547,38 @@ impl ActorRegistry {
     }
 
     pub fn build_system_prompt(&self, actor_id: &str) -> ActorResult<String> {
+        use crate::llm::PromptBuilder;
+
         let actor = self
             .actors
             .get(actor_id)
             .ok_or_else(|| ActorError::NotFound(actor_id.to_string()))?;
-        let mut parts = Vec::new();
-        if actor.is_principal {
-            parts.push(
-                "You are the cortex - the conscious executive layer. Handle quick tasks directly and spawn subagents for longer work. Use request_tool for extended tools. Actor tools include spawn_actor, spawn_chain, send_message, discover_actors, discover_recently_finished, ping_actor, kill_actor, and update_task_state."
-                    .to_string(),
-            );
+
+        let mut builder = PromptBuilder::new();
+        let header = if actor.is_principal {
+            "Your runtime role: cortex (the conscious executive layer). Handle quick tasks directly and spawn subagents for longer work. Use request_tool to enable extended tools listed in <available_on_request>.".to_string()
         } else {
             let parent_name = self
                 .actors
                 .get(&actor.spawned_by)
                 .map(|parent| parent.config.name.as_str())
                 .unwrap_or(actor.spawned_by.as_str());
-            parts.push(format!(
-                "You are a subagent actor named '{}'. You were spawned by '{}' (id={}) and cannot talk to the user directly.",
+            format!(
+                "Your runtime role: subagent '{}'. Spawned by '{}' (id={}); you cannot talk to the user directly.",
                 actor.config.name, parent_name, actor.spawned_by
-            ));
+            )
+        };
+        builder.raw(header);
+        // Subagents carry a task-specific goal; the principal's mission is
+        // already in the identity_block, so we skip the redundant <goals>.
+        if !actor.is_principal {
+            builder.block("goals", actor.config.goals.clone());
         }
-        parts.push(format!("\n<goals>\n{}\n</goals>", actor.config.goals));
 
         let mut visible = self.discover_active(&actor.config.group);
         visible.retain(|info| info.id != actor.id);
         visible.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
-        let children = self.get_children(&actor.id);
-        for child in children {
+        for child in self.get_children(&actor.id) {
             if child.state != ActorState::Terminated
                 && !visible.iter().any(|info| info.id == child.id)
             {
@@ -555,31 +586,34 @@ impl ActorRegistry {
             }
         }
         if !visible.is_empty() {
-            parts.push("\n<visible_actors>".to_string());
-            for info in visible
+            let limit = if actor.is_principal { 10 } else { 6 };
+            let truncate_to = if actor.is_principal { 320 } else { 240 };
+            let lines = visible
                 .into_iter()
-                .take(if actor.is_principal { 10 } else { 6 })
-            {
-                let relationship = if info.spawned_by == actor.id {
-                    " [child]"
-                } else if info.id == actor.spawned_by {
-                    " [parent]"
-                } else if !actor.spawned_by.is_empty() && info.spawned_by == actor.spawned_by {
-                    " [sibling]"
-                } else {
-                    ""
-                };
-                parts.push(format!(
-                    "- {} (id={}, state={}, task={}){}: {}",
-                    info.name,
-                    info.id,
-                    actor_state_name(info.state),
-                    state_name(info.task_state),
-                    relationship,
-                    truncate_chars(&info.goals, if actor.is_principal { 180 } else { 160 }),
-                ));
-            }
-            parts.push("</visible_actors>".to_string());
+                .take(limit)
+                .map(|info| {
+                    let relationship = if info.spawned_by == actor.id {
+                        " [child]"
+                    } else if info.id == actor.spawned_by {
+                        " [parent]"
+                    } else if !actor.spawned_by.is_empty() && info.spawned_by == actor.spawned_by {
+                        " [sibling]"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "- {} (id={}, state={}, task={}){}: {}",
+                        info.name,
+                        info.id,
+                        actor_state_name(info.state),
+                        state_name(info.task_state),
+                        relationship,
+                        truncate_chars(&info.goals, truncate_to),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            builder.block("visible_actors", lines);
         }
 
         let inbox_messages = actor
@@ -594,29 +628,56 @@ impl ActorRegistry {
             .rev()
             .collect::<Vec<_>>();
         if !inbox_messages.is_empty() {
-            parts.push("\n<inbox_block>".to_string());
-            for message in inbox_messages {
-                let sender_name = self
-                    .actors
-                    .get(&message.sender)
-                    .map(|sender| sender.config.name.as_str())
-                    .unwrap_or(message.sender.as_str());
-                parts.push(format!(
-                    "<actor_message_block from=\"{}\" timestamp=\"{}\">{}</actor_message_block>",
-                    sender_name,
-                    message.created_at.format("%a %Y-%m-%d %H:%M:%S UTC"),
-                    truncate_chars(&message.content, if actor.is_principal { 280 } else { 220 })
-                ));
-            }
-            parts.push("</inbox_block>".to_string());
+            let truncate_to = if actor.is_principal { 600 } else { 400 };
+            let lines = inbox_messages
+                .into_iter()
+                .map(|message| {
+                    let sender_name = self
+                        .actors
+                        .get(&message.sender)
+                        .map(|sender| sender.config.name.as_str())
+                        .unwrap_or(message.sender.as_str())
+                        .to_string();
+                    format!(
+                        "<actor_message_block from=\"{}\" timestamp=\"{}\">{}</actor_message_block>",
+                        sender_name,
+                        message.created_at.format("%a %Y-%m-%d %H:%M:%S UTC"),
+                        truncate_chars(&message.content, truncate_to)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            builder.block("inbox_block", lines);
         }
 
-        if actor.is_principal {
-            parts.push("\n<rules>\nHandle quick tasks directly. Spawn subagents for long or isolated work. Use discover_actors before spawning duplicates.\n</rules>".to_string());
-        } else {
-            parts.push("\n<rules>\nReport results to your parent before terminating. Use update_task_state for meaningful progress.\n</rules>".to_string());
+        // Principal's behavior advice lives in the cortex header above; only
+        // subagents get a separate <rules> block since their header is purely
+        // identification.
+        if !actor.is_principal {
+            builder.block(
+                "rules",
+                "Report results to your parent before terminating. Use update_task_state for meaningful progress.",
+            );
         }
-        Ok(parts.join("\n"))
+
+        Ok(builder.render())
+    }
+
+    /// The `<available_on_request>` directory, emitted as a sibling of the
+    /// actor system prompt (not nested inside it). Returns an empty string
+    /// when nothing is requestable in the current context.
+    pub fn build_requestable_directory(&self, actor_id: &str) -> ActorResult<String> {
+        let actor = self
+            .actors
+            .get(actor_id)
+            .ok_or_else(|| ActorError::NotFound(actor_id.to_string()))?;
+        let directory = requestable_directory_for_actor(actor);
+        if directory.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!(
+            "<available_on_request>\nTools below are NOT loaded. Call request_tool(name=...) to enable one for this turn.\n{directory}\n</available_on_request>"
+        ))
     }
 
     pub fn send_message_tool(
@@ -697,21 +758,27 @@ impl ActorRegistry {
         for info in actors {
             let marker = if info.id == actor.id { " (you)" } else { "" };
             let relationship = relationship_label(actor, &info);
+            let outcome_label = info
+                .outcome
+                .filter(|_| info.state == ActorState::Terminated)
+                .map(|outcome| format!(" [outcome: {}]", outcome.as_str()))
+                .unwrap_or_default();
             let result_info = if info.state == ActorState::Terminated {
                 self.actors
                     .get(&info.id)
                     .and_then(|actor| actor.result())
-                    .map(|result| format!(" result: {}", truncate_chars(result, 100)))
+                    .map(|result| format!(" result: {}", truncate_chars(result, 400)))
                     .unwrap_or_default()
             } else {
                 String::new()
             };
             lines.push(format!(
-                "  {} (id={}, state={}, task={}){}{}: {}{}",
+                "  {} (id={}, state={}, task={}){}{}{}: {}{}",
                 info.name,
                 info.id,
                 actor_state_name(info.state),
                 state_name(info.task_state),
+                outcome_label,
                 marker,
                 relationship,
                 info.goals,
@@ -721,50 +788,11 @@ impl ActorRegistry {
         Ok(lines.join("\n"))
     }
 
-    pub fn discover_recently_finished_for_actor(
-        &self,
-        actor_id: &str,
-        group: Option<&str>,
-        limit: usize,
-    ) -> ActorResult<String> {
-        let actor = self
-            .actors
-            .get(actor_id)
-            .ok_or_else(|| ActorError::NotFound(actor_id.to_string()))?;
-        let search_group = group
-            .map(str::trim)
-            .filter(|group| !group.is_empty())
-            .unwrap_or(&actor.config.group);
-        let finished = self.discover_recently_finished(search_group, limit);
-        if finished.is_empty() {
-            return Ok(format!(
-                "No recently finished actors in group '{search_group}'."
-            ));
-        }
-        let mut lines = vec![format!("Recently finished in '{search_group}':")];
-        for actor in finished {
-            let result = truncate_chars(actor.result.as_deref().unwrap_or("no result").trim(), 160);
-            let when = actor
-                .terminated_at
-                .map(|value| value.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            lines.push(format!(
-                "  {} (id={}, task={}, at={}): {}",
-                actor.config.name,
-                actor.id,
-                state_name(actor.task_state),
-                when,
-                result
-            ));
-        }
-        Ok(lines.join("\n"))
-    }
-
     pub fn spawn_child_for_actor(
         &mut self,
         actor_id: &str,
         request: ActorSpawnRequest<'_>,
-    ) -> ActorResult<String> {
+    ) -> ActorResult<SpawnReport> {
         let actor = self
             .actors
             .get(actor_id)
@@ -797,22 +825,26 @@ impl ActorRegistry {
         if let Some(existing) = self.find_by_name(&name, Some(&target_group))
             && existing.state != ActorState::Terminated
         {
-            return Ok(format!(
-                "DUPLICATE BLOCKED: Actor '{name}' already exists (id={}, state={}).\nGoals: {}\nUse send_message({}, ...) to communicate with it, or kill_actor({}) first.{}",
-                existing.id,
-                actor_state_name(existing.state),
-                existing.config.goals,
-                existing.id,
-                existing.id,
-                format_active_children(&active_children)
-            ));
+            return Ok(SpawnReport::Rejected {
+                message: format!(
+                    "DUPLICATE BLOCKED: Actor '{name}' already exists (id={}, state={}).\nGoals: {}\nUse send_message({}, ...) to communicate with it, or kill_actor({}) first.{}",
+                    existing.id,
+                    actor_state_name(existing.state),
+                    existing.config.goals,
+                    existing.id,
+                    existing.id,
+                    format_active_children(&active_children)
+                ),
+            });
         }
         if active_children.len() >= 5 {
-            return Ok(format!(
-                "TOO MANY CHILDREN: {} active (max 5).\nKill or wait for existing actors before spawning new ones.{}",
-                active_children.len(),
-                format_active_children(&active_children)
-            ));
+            return Ok(SpawnReport::Rejected {
+                message: format!(
+                    "TOO MANY CHILDREN: {} active (max 5).\nKill or wait for existing actors before spawning new ones.{}",
+                    active_children.len(),
+                    format_active_children(&active_children)
+                ),
+            });
         }
         if !actor.spawned_by.is_empty()
             && self
@@ -820,10 +852,11 @@ impl ActorRegistry {
                 .get(&actor.spawned_by)
                 .is_some_and(|parent| !parent.spawned_by.is_empty() && !parent.is_principal)
         {
-            return Ok(
-                "NESTING LIMIT: You are already a grandchild actor (2 levels deep). Cannot spawn further children."
-                    .to_string(),
-            );
+            return Ok(SpawnReport::Rejected {
+                message:
+                    "NESTING LIMIT: You are already a grandchild actor (2 levels deep). Cannot spawn further children."
+                        .to_string(),
+            });
         }
 
         let model_tier = parse_model_tier(request.model).unwrap_or(ModelTier::Aux);
@@ -849,12 +882,15 @@ impl ActorRegistry {
         } else {
             format!(" + {}", tool_list.join(", "))
         };
-        Ok(format!(
-            "Spawned actor '{name}' (id={child_id}, group={target_group}, model={}).\nGoals: {}\nTools: default (bash, file I/O, grep, view_image){tools_text} + actor tools\nIt will work autonomously and message you when done.{}",
-            intent_model_name(model_tier),
-            truncate_chars(request.goals.trim(), 200),
-            format_active_children(&active_children)
-        ))
+        Ok(SpawnReport::Spawned {
+            actor_id: child_id.clone(),
+            message: format!(
+                "Spawned actor '{name}' (id={child_id}, group={target_group}, model={}).\nGoals: {}\nTools: default (bash, file I/O, grep, view_image){tools_text} + actor tools\nIt will work autonomously and message you when done.{}",
+                intent_model_name(model_tier),
+                truncate_chars(request.goals.trim(), 400),
+                format_active_children(&active_children)
+            ),
+        })
     }
 
     pub fn kill_actor_tool(&mut self, actor_id: &str, target_id: &str) -> String {
@@ -892,10 +928,8 @@ impl ActorRegistry {
         files_touched: &str,
         follow_up: &str,
     ) -> String {
+        let outcome = Outcome::parse_terminate_arg(outcome);
         let mut parts = Vec::new();
-        if !outcome.trim().is_empty() && outcome.trim() != "success" {
-            parts.push(format!("[outcome: {}]", outcome.trim()));
-        }
         parts.push(if result.trim().is_empty() {
             "Done".to_string()
         } else {
@@ -907,7 +941,7 @@ impl ActorRegistry {
         if !follow_up.trim().is_empty() {
             parts.push(format!("[follow-up: {}]", follow_up.trim()));
         }
-        match self.finish_turn_or_terminate(actor_id, parts.join("\n")) {
+        match self.finish_turn_or_terminate(actor_id, outcome, parts.join("\n")) {
             Ok(true) => "Terminated. Result sent to parent.".to_string(),
             Ok(false) => "Cycle finished. Persistent actor remains alive.".to_string(),
             Err(error) => format!("Error: {error}"),
@@ -916,7 +950,7 @@ impl ActorRegistry {
 
     pub fn restart_self(&mut self, actor_id: &str, new_goals: &str) -> String {
         let result = format!("Restart requested with new goals:\n{}", new_goals.trim());
-        match self.terminate(actor_id, result) {
+        match self.terminate(actor_id, Outcome::Restarted, result) {
             Ok(_) => "Restart requested. Parent can spawn a replacement with the revised goals."
                 .to_string(),
             Err(error) => format!("Error: {error}"),
@@ -947,8 +981,7 @@ impl ActorRegistry {
         }
 
         let result = actor.result.as_deref().unwrap_or("no result").trim();
-        let failed = is_failed_result(result);
-        let intent = if failed {
+        let intent = if actor.outcome.is_some_and(Outcome::is_failed) {
             MessageIntent::Failed
         } else {
             MessageIntent::Done

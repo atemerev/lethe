@@ -1,6 +1,6 @@
 mod codec;
+mod db;
 mod search;
-mod store;
 
 pub mod archival;
 pub mod blocks;
@@ -10,7 +10,7 @@ pub mod notes;
 pub mod recall;
 pub mod semantic;
 
-pub use store::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow, ScoredRow};
+pub use db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow, ScoredRow};
 
 pub use archival::{ArchivalEntry, ArchivalError, ArchivalMemory, ArchivalResult};
 pub use blocks::{
@@ -20,7 +20,9 @@ pub use message_metadata::{
     MESSAGE_KIND_KEY, MessageKind, MessageMetadata, MessageVisibility, SOURCE_KEY, VISIBILITY_KEY,
     annotate_map, annotate_value, metadata_value,
 };
-pub use messages::{MessageHistory, MessageHistoryError, MessageHistoryResult, StoredMessage};
+pub use messages::{
+    MessageHistory, MessageHistoryError, MessageHistoryResult, MessageRole, StoredMessage,
+};
 pub use notes::{
     NoteError, NoteMetadata, NoteResult, NoteSearchResult, NoteStore, NoteSummary, normalize_tags,
     parse_frontmatter, render_frontmatter, slugify,

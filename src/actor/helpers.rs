@@ -126,25 +126,12 @@ pub(super) fn format_active_children(children: &[Actor]) -> String {
             child.config.name,
             child.id,
             actor_state_name(child.state),
-            truncate_chars(&child.config.goals, 80)
+            truncate_chars(&child.config.goals, 300)
         ));
     }
     lines.join("\n")
 }
 
-pub(super) fn is_failed_result(result: &str) -> bool {
-    let lowered = result.to_ascii_lowercase();
-    lowered.starts_with("error:")
-        || lowered.starts_with("runner error:")
-        || lowered.starts_with("max turns reached")
-        || lowered.contains("killed by parent")
-        || lowered.starts_with("system shutdown")
-}
-
 pub(super) fn truncate_chars(value: &str, limit: usize) -> String {
-    let mut truncated = value.chars().take(limit).collect::<String>();
-    if value.chars().count() > limit {
-        truncated.push_str("...[truncated]");
-    }
-    truncated
+    crate::llm::truncate::truncate_with_ellipsis(value, limit)
 }

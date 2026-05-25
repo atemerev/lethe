@@ -64,6 +64,7 @@ impl MessageKind {
 pub struct MessageMetadata {
     pub visibility: MessageVisibility,
     pub kind: Option<MessageKind>,
+    pub has_tool_calls: bool,
 }
 
 impl MessageMetadata {
@@ -84,11 +85,24 @@ impl MessageMetadata {
             .and_then(|value| MessageVisibility::parse(&value))
             .unwrap_or_else(|| legacy_visibility(map, kind));
 
-        Self { visibility, kind }
+        let has_tool_calls = map
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+
+        Self {
+            visibility,
+            kind,
+            has_tool_calls,
+        }
     }
 
     pub fn is_internal(self) -> bool {
         self.visibility == MessageVisibility::Internal
+    }
+
+    pub fn has_tool_calls(self) -> bool {
+        self.has_tool_calls
     }
 }
 
@@ -97,6 +111,7 @@ impl Default for MessageMetadata {
         Self {
             visibility: MessageVisibility::UserVisible,
             kind: None,
+            has_tool_calls: false,
         }
     }
 }

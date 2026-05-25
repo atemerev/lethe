@@ -11,7 +11,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use super::search::{clean_tags, query_terms};
-use super::store::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
+use super::db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
 
 #[derive(Debug, Error)]
 pub enum NoteError {
@@ -312,7 +312,7 @@ impl NoteStore {
             return Ok(());
         };
         let row = build_note_row(path, db)?;
-        db.delete_by_file_path(&row.file_path.as_deref().unwrap_or_default())?;
+        db.delete_by_file_path(row.file_path.as_deref().unwrap_or_default())?;
         db.insert(row)?;
         Ok(())
     }

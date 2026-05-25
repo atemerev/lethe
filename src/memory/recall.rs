@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::llm::truncate::truncate_with_ellipsis;
 use crate::memory::archival::{ArchivalEntry, ArchivalError};
 use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, StoredMessage};
@@ -150,12 +151,12 @@ impl Hippocampus {
     }
 
     fn conversation_entry_allowed(&self, mut message: StoredMessage) -> Option<StoredMessage> {
-        if MessageMetadata::from_value(Some(&message.metadata)).is_internal() {
+        let metadata = MessageMetadata::from_value(Some(&message.metadata));
+        if metadata.is_internal() {
             return None;
         }
 
-        let role = message.role.trim().to_ascii_lowercase();
-        if role == "tool" {
+        if message.role.is_tool() {
             let tool_name = message
                 .metadata
                 .get("name")
@@ -174,9 +175,9 @@ impl Hippocampus {
             return None;
         }
 
-        if role == "assistant" && message.metadata.get("tool_calls").is_some() {
+        if message.role.is_assistant() && metadata.has_tool_calls() {
             message.content = condense_tool_calls(&message.content, &message.metadata);
-            message.content = message.content.chars().take(1_500).collect();
+            message.content = truncate_with_ellipsis(&message.content, 1_500);
             return Some(message);
         }
 
@@ -211,17 +212,23 @@ impl Hippocampus {
                     .map(|raw| parse_frontmatter(&raw).1)
                     .filter(|body| !body.trim().is_empty())
                     .unwrap_or_else(|| note.preview.clone());
-                if full_content.len() > 2_000 {
+                if full_content.chars().count() > 2_000 {
                     full_content = format!(
                         "{}\n[...truncated, see full note]",
-                        full_content.chars().take(2_000).collect::<String>()
+                        truncate_with_ellipsis(&full_content, 2_000)
                     );
                 }
 
+                let created = if note.created.is_empty() {
+                    String::from("unknown-time")
+                } else {
+                    format_created_at(&note.created)
+                };
                 let entry = format!(
-                    "- **{}** [{}]:\n{}\n  File: {}",
+                    "- **{}** [{}] (created {}):\n{}\n  File: {}",
                     note.title,
                     note.tags.join(", "),
+                    created,
                     full_content,
                     note.file_path.display()
                 );
@@ -251,13 +258,18 @@ impl Hippocampus {
                     break;
                 }
                 let text = trim_entry(&entry.text, 50);
-                let line = format!("- [{}] {}", format_created_at(&entry.created_at), text);
+                let line = format!(
+                    "- [{}] id={} {}",
+                    format_created_at(&entry.created_at),
+                    entry.id,
+                    text
+                );
                 total_lines += line.lines().count();
                 archival_lines.push(line);
             }
             if !archival_lines.is_empty() {
                 sections.push(format!(
-                    "{}\n{}",
+                    "{}\n{}\n(Use archival_get(memory_id) for the full text.)",
                     ARCHIVAL_HEADER.trim(),
                     archival_lines.join("\n")
                 ));
@@ -272,8 +284,9 @@ impl Hippocampus {
                 }
                 let content = trim_entry(&message.content, 50);
                 let line = format!(
-                    "- [{}] {}: {}",
+                    "- [{}] id={} {}: {}",
                     format_created_at(&message.created_at),
+                    message.id,
                     message.role,
                     content
                 );
@@ -282,7 +295,7 @@ impl Hippocampus {
             }
             if !conversation_lines.is_empty() {
                 sections.push(format!(
-                    "{}\n{}",
+                    "{}\n{}\n(Use conversation_get(message_id) for the full text.)",
                     CONVERSATION_HEADER.trim(),
                     conversation_lines.join("\n")
                 ));
@@ -297,28 +310,52 @@ impl Hippocampus {
     }
 }
 
+/// Char budget reserved for prior user-message context after the new message.
+/// The new message itself is never truncated — losing intent would defeat the
+/// purpose of building a search query from it. The prior-context budget is
+/// generous enough for a few short turns but small enough to stay inside the
+/// embedding model's input limit.
+const PRIOR_CONTEXT_BUDGET_CHARS: usize = 800;
+
 pub fn build_query(message: &str, recent_messages: &[StoredMessage]) -> String {
-    let mut parts = vec![message.trim().to_string()];
+    let primary = message.trim().to_string();
+    let mut prior = Vec::new();
+    let mut prior_chars = 0;
     for recent in recent_messages
         .iter()
         .rev()
-        .filter(|message| message.role == "user")
+        .filter(|message| message.role.is_user())
         .take(5)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
     {
         let content = recent.content.trim();
-        if !content.is_empty() {
-            parts.push(content.to_string());
+        if content.is_empty() {
+            continue;
+        }
+        let candidate = if prior_chars + content.chars().count() > PRIOR_CONTEXT_BUDGET_CHARS {
+            truncate_with_ellipsis(
+                content,
+                PRIOR_CONTEXT_BUDGET_CHARS.saturating_sub(prior_chars),
+            )
+        } else {
+            content.to_string()
+        };
+        if candidate.is_empty() {
+            break;
+        }
+        prior_chars += candidate.chars().count();
+        prior.push(candidate);
+        if prior_chars >= PRIOR_CONTEXT_BUDGET_CHARS {
+            break;
         }
     }
-    let query = parts
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    query.chars().take(200).collect()
+    prior.reverse();
+    if prior.is_empty() {
+        primary
+    } else if primary.is_empty() {
+        prior.join(" ")
+    } else {
+        format!("{} {}", prior.join(" "), primary)
+    }
 }
 
 fn condense_tool_calls(content: &str, metadata: &Value) -> String {
@@ -337,8 +374,8 @@ fn condense_tool_calls(content: &str, metadata: &Value) -> String {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    if args.len() > 100 {
-                        args = format!("{}...", args.chars().take(100).collect::<String>());
+                    if args.chars().count() > 300 {
+                        args = truncate_with_ellipsis(&args, 300);
                     }
                     format!("{name}({args})")
                 })
@@ -367,7 +404,7 @@ fn trim_entry(text: &str, max_lines: usize) -> String {
             "[large entry: {} lines, {} chars - {}]",
             lines.len(),
             text.len(),
-            first_line.chars().take(200).collect::<String>()
+            truncate_with_ellipsis(first_line, 200)
         );
     }
     trimmed
@@ -390,13 +427,17 @@ fn format_created_at(value: &str) -> String {
 }
 
 fn cap_recall_payload(value: &str, max_chars: usize) -> String {
-    if value.len() <= max_chars {
+    const CLOSING_TAG: &str = "</associative_memory_recall>";
+    if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    let keep = max_chars.saturating_sub(80);
+    // Reserve room for the truncation marker + closing tag so the final string
+    // stays roughly within `max_chars`.
+    let suffix_chars = CLOSING_TAG.chars().count() + 48;
+    let body_budget = max_chars.saturating_sub(suffix_chars).max(1);
     format!(
-        "{}\n[...recall truncated to {} chars]\n</associative_memory_recall>",
-        value.chars().take(keep).collect::<String>(),
+        "{}\n[...recall truncated to {} chars]\n{CLOSING_TAG}",
+        truncate_with_ellipsis(value, body_budget),
         max_chars
     )
 }
@@ -407,6 +448,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::memory::messages::MessageRole;
     use crate::store::MemoryStore;
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
@@ -450,7 +492,7 @@ mod tests {
         for index in 0..6 {
             store
                 .messages
-                .add("user", &format!("graph email old message {index}"), None)
+                .add(MessageRole::User, &format!("graph email old message {index}"), None)
                 .unwrap();
         }
 
@@ -477,7 +519,7 @@ mod tests {
         let messages = vec![
             StoredMessage {
                 id: "1".to_string(),
-                role: "user".to_string(),
+                role: MessageRole::User,
                 content: "previous question".to_string(),
                 metadata: json!({}),
                 created_at: String::new(),
@@ -485,7 +527,7 @@ mod tests {
             },
             StoredMessage {
                 id: "2".to_string(),
-                role: "assistant".to_string(),
+                role: MessageRole::Assistant,
                 content: "answer".to_string(),
                 metadata: json!({}),
                 created_at: String::new(),
@@ -493,7 +535,7 @@ mod tests {
             },
             StoredMessage {
                 id: "3".to_string(),
-                role: "user".to_string(),
+                role: MessageRole::User,
                 content: "follow up".to_string(),
                 metadata: json!({}),
                 created_at: String::new(),
@@ -513,7 +555,7 @@ mod tests {
         store
             .messages
             .add(
-                "assistant",
+                MessageRole::Assistant,
                 "",
                 Some(json!({
                     "tool_calls": [
@@ -525,14 +567,14 @@ mod tests {
         store
             .messages
             .add(
-                "tool",
+                MessageRole::Tool,
                 "recursive graph results",
                 Some(json!({"name": "conversation_search"})),
             )
             .unwrap();
         store
             .messages
-            .add("tool", "bash graph output", Some(json!({"name": "bash"})))
+            .add(MessageRole::Tool, "bash graph output", Some(json!({"name": "bash"})))
             .unwrap();
 
         let hippo = Hippocampus::new(HippocampusConfig {

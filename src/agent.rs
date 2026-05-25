@@ -1,47 +1,43 @@
-use std::collections::{HashMap, HashSet};
-use std::future::Future;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::anyhow;
 use chrono::Local;
-use genai::chat::{ChatMessage, ContentPart, MessageContent, ToolCall, ToolResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::actor::{
-    ActorConfig, ActorError, ActorRegistry, ActorRunSpec, ActorRuntime, ActorTurnExecutor,
-    ModelTier,
+mod tool_context;
+mod tool_loop;
+use tool_context::recent_tool_context_for_turn;
+use tool_loop::{
+    TurnExecutionContext, actor_turn_executor, complete_turn_with_tools_config_shared,
 };
+#[cfg(test)]
+use tool_loop::{actor_turn_instruction, extract_image_views, image_view_message};
+
+use crate::actor::background::{
+    BackgroundResult, collect_user_notifications_from_events, queue_dmn_heartbeat,
+};
+use crate::actor::notification::NotificationGate;
+use crate::actor::{ActorConfig, ActorRegistry, ActorRuntime};
 use crate::config::Settings;
-use crate::conversation::notification::NotificationGate;
-use crate::interfaces::telegram::TelegramClient;
 use crate::llm::prompts::PromptStore;
 use crate::llm::response_format::normalize_message_envelope;
 use crate::llm::{
-    LlmAttachment, LlmMessage, LlmRole, LlmRouter, LlmRouterConfig, build_chat_request,
+    HistoricalToolCall, HistoricalToolResponse, LlmAttachment, LlmMessage, LlmRole, LlmRouter,
+    LlmRouterConfig, PromptBuilder, dialect_for_model,
 };
 use crate::memory::message_metadata::MessageMetadata;
-use crate::memory::messages::{MessageHistoryError, StoredMessage};
+use crate::memory::messages::{MessageHistoryError, MessageRole, StoredMessage};
 use crate::memory::recall::{Hippocampus, HippocampusConfig, HippocampusError};
-use crate::scheduler::background::{
-    BackgroundResult, collect_user_notifications_from_events, queue_dmn_heartbeat,
-};
 use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::store::{MemoryStore, MemoryStoreError};
-use crate::tools::registry::{ActorToolContext, SharedActorRegistry, ToolRegistry, ToolRuntime};
+use crate::tools::registry::{
+    ActorToolContext, SharedActorRegistry, ToolRuntime, requestable_tools_directory_for,
+};
 use crate::tools::shell::ShellTools;
 
-const MAX_TOOL_ITERATIONS: usize = 8;
-const TELEGRAM_TOOL_TYPING_REFRESH_SECONDS: u64 = 3;
-const RECENT_TOOL_CONTEXT_GROUPS: usize = 2;
-const OLD_TOOL_RESULT_PREVIEW_LINES: usize = 5;
-const OLD_TOOL_RESULT_PREVIEW_CHARS: usize = 2_000;
-const TOOL_CONTEXT_MIN_CHARS: usize = 64 * 1024;
-const TOOL_CONTEXT_MAX_CHARS: usize = 400_000;
-const TOOL_CONTEXT_SHARE_NUMERATOR: usize = 3;
-const TOOL_CONTEXT_SHARE_DENOMINATOR: usize = 10;
-const SEARCH_RESULT_SKIP_TOOLS: &[&str] = &["conversation_search", "archival_search"];
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -82,6 +78,46 @@ impl Default for AgentOptions {
     }
 }
 
+/// A single agent turn input. Build via [`TurnRequest::new`] and the
+/// `with_*` setters; pass to [`Agent::chat_once`] or [`Agent::prepare_turn`].
+#[derive(Clone, Debug, Default)]
+pub struct TurnRequest {
+    pub message: String,
+    pub attachments: Vec<LlmAttachment>,
+    pub metadata: Option<Value>,
+    pub runtime: crate::tools::registry::ToolRuntime,
+    pub options: AgentOptions,
+}
+
+impl TurnRequest {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_attachments(mut self, attachments: Vec<LlmAttachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: crate::tools::registry::ToolRuntime) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    pub fn with_options(mut self, options: AgentOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
 pub struct Agent {
     settings: Settings,
     memory: Arc<MemoryStore>,
@@ -94,30 +130,18 @@ pub struct Agent {
     processed_notification_events: Mutex<HashSet<String>>,
 }
 
-#[derive(Clone)]
-struct TurnExecutionContext {
-    settings: Settings,
-    memory: Arc<MemoryStore>,
-    router: Arc<RwLock<LlmRouter>>,
-    shell: ShellTools,
-}
-
 impl Agent {
     pub fn from_settings(settings: Settings) -> AgentResult<Self> {
         let memory = Arc::new(MemoryStore::from_settings(&settings)?);
-        let prompts = PromptStore::new(&settings.workspace_dir, &settings.config_dir);
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
         let router = Arc::new(RwLock::new(LlmRouter::new(LlmRouterConfig::from_settings(
             &settings,
         ))));
-        let shell = ShellTools::new(&settings.workspace_dir);
-        let (actor_registry, principal_actor_id) = if settings.actors_enabled {
+        let shell = ShellTools::new(&settings.paths.workspace_dir);
+        let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
             let principal_id = registry.spawn(
-                ActorConfig::new(
-                    "cortex",
-                    "Serve the user. Handle quick tasks directly. Delegate long or complex tasks to subagents.",
-                )
-                .in_group("main"),
+                ActorConfig::new("cortex", "Serve the user.").in_group("main"),
                 None,
                 true,
             );
@@ -196,156 +220,76 @@ impl Agent {
         Ok(serde_json::Value::Object(changed))
     }
 
-    pub fn prepare_turn(&self, message: &str, options: &AgentOptions) -> AgentResult<AgentTurn> {
-        self.prepare_turn_with_attachments(message, Vec::new(), options)
-    }
-
-    pub async fn prepare_turn_async(
-        &self,
-        message: &str,
-        options: &AgentOptions,
-    ) -> AgentResult<AgentTurn> {
-        self.prepare_turn_with_attachments_async(message, Vec::new(), options)
-            .await
-    }
-
-    pub fn prepare_turn_with_attachments(
-        &self,
-        message: &str,
-        attachments: Vec<LlmAttachment>,
-        options: &AgentOptions,
-    ) -> AgentResult<AgentTurn> {
-        self.prepare_turn_with_attachments_metadata(message, attachments, None, options)
-    }
-
-    pub fn prepare_turn_with_attachments_metadata(
-        &self,
-        message: &str,
-        attachments: Vec<LlmAttachment>,
-        metadata: Option<&Value>,
-        options: &AgentOptions,
-    ) -> AgentResult<AgentTurn> {
+    /// Assemble the LLM messages for a single turn without calling the model.
+    pub async fn prepare_turn(&self, req: &TurnRequest) -> AgentResult<AgentTurn> {
         let mut turn = prepare_turn(
             &self.settings,
             self.memory.as_ref(),
             &self.prompts,
-            message,
-            attachments,
-            metadata,
-            options,
+            &req.message,
+            req.attachments.clone(),
+            req.metadata.as_ref(),
+            &req.options,
         )?;
-        if let Some(actor_context) = self.actor_context_for_prompt()?
-            && let Some(system) = turn.messages.first_mut()
+        let actor_context = self.actor_context_for_prompt_async().await?;
+        // Actor context and the requestable directory are per-turn volatile —
+        // they belong on the volatile system message so they don't invalidate
+        // the stable cache prefix.
+        if let Some(context) = actor_context
+            && let Some(system) = volatile_system_message_mut(&mut turn.messages)
         {
             system.content.push_str("\n\n<actor_context>\n");
-            system.content.push_str(&actor_context);
+            system.content.push_str(&context);
             system.content.push_str("\n</actor_context>");
+        }
+        let directory = self.requestable_tools_directory_async(req).await?;
+        if !directory.is_empty()
+            && let Some(system) = volatile_system_message_mut(&mut turn.messages)
+        {
+            system.content.push_str("\n\n");
+            system.content.push_str(&directory);
         }
         Ok(turn)
     }
 
-    pub async fn prepare_turn_with_attachments_async(
+    async fn requestable_tools_directory_async(
         &self,
-        message: &str,
-        attachments: Vec<LlmAttachment>,
-        options: &AgentOptions,
-    ) -> AgentResult<AgentTurn> {
-        self.prepare_turn_with_attachments_metadata_async(message, attachments, None, options)
-            .await
-    }
-
-    pub async fn prepare_turn_with_attachments_metadata_async(
-        &self,
-        message: &str,
-        attachments: Vec<LlmAttachment>,
-        metadata: Option<&Value>,
-        options: &AgentOptions,
-    ) -> AgentResult<AgentTurn> {
-        let mut turn = prepare_turn(
-            &self.settings,
-            self.memory.as_ref(),
-            &self.prompts,
-            message,
-            attachments,
-            metadata,
-            options,
-        )?;
-        if let Some(actor_context) = self.actor_context_for_prompt_async().await?
-            && let Some(system) = turn.messages.first_mut()
+        req: &TurnRequest,
+    ) -> AgentResult<String> {
+        if let (Some(registry), Some(actor_id)) =
+            (&self.actor_registry, &self.principal_actor_id)
         {
-            system.content.push_str("\n\n<actor_context>\n");
-            system.content.push_str(&actor_context);
-            system.content.push_str("\n</actor_context>");
+            return registry
+                .build_requestable_directory(actor_id)
+                .await
+                .map_err(|error| {
+                    AgentError::Llm(anyhow!("requestable directory failed: {error}"))
+                });
         }
-        Ok(turn)
+        let runtime = self.with_actor_runtime(req.runtime.clone());
+        let body = requestable_tools_directory_for(&runtime);
+        if body.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!(
+            "<available_on_request>\nTools below are NOT loaded. Call request_tool(name=...) to enable one for this turn.\n{body}\n</available_on_request>"
+        ))
     }
 
-    pub async fn chat_once(&self, message: &str, options: &AgentOptions) -> AgentResult<String> {
-        self.chat_once_with_runtime(message, options, ToolRuntime::default())
-            .await
-    }
-
-    pub async fn chat_once_with_metadata(
-        &self,
-        message: &str,
-        metadata: Value,
-        options: &AgentOptions,
-    ) -> AgentResult<String> {
-        self.chat_once_with_attachments_metadata_runtime(
+    /// Run one full turn: prepare messages, call the model with tool support,
+    /// persist user/assistant history, and return the final assistant response.
+    pub async fn chat_once(&self, req: TurnRequest) -> AgentResult<String> {
+        let turn = self.prepare_turn(&req).await?;
+        let TurnRequest {
             message,
-            Vec::new(),
-            Some(metadata),
-            options,
-            ToolRuntime::default(),
-        )
-        .await
-    }
-
-    pub async fn chat_once_with_runtime(
-        &self,
-        message: &str,
-        options: &AgentOptions,
-        runtime: ToolRuntime,
-    ) -> AgentResult<String> {
-        self.chat_once_with_attachments_runtime(message, Vec::new(), options, runtime)
-            .await
-    }
-
-    pub async fn chat_once_with_attachments_runtime(
-        &self,
-        message: &str,
-        attachments: Vec<LlmAttachment>,
-        options: &AgentOptions,
-        runtime: ToolRuntime,
-    ) -> AgentResult<String> {
-        self.chat_once_with_attachments_metadata_runtime(
-            message,
-            attachments,
-            None,
-            options,
+            metadata,
             runtime,
-        )
-        .await
-    }
-
-    pub async fn chat_once_with_attachments_metadata_runtime(
-        &self,
-        message: &str,
-        attachments: Vec<LlmAttachment>,
-        metadata: Option<Value>,
-        options: &AgentOptions,
-        runtime: ToolRuntime,
-    ) -> AgentResult<String> {
-        let turn = self
-            .prepare_turn_with_attachments_metadata_async(
-                message,
-                attachments,
-                metadata.as_ref(),
-                options,
-            )
-            .await?;
+            ..
+        } = req;
         if !turn.synthetic {
-            self.memory.messages.add("user", message, metadata)?;
+            self.memory
+                .messages
+                .add(MessageRole::User, &message, metadata)?;
         }
         let runtime = self.with_actor_runtime(runtime);
         let response = self
@@ -355,9 +299,9 @@ impl Agent {
             let history_content = assistant_history_content(&response);
             self.memory
                 .messages
-                .add("assistant", &history_content, None)?;
+                .add(MessageRole::Assistant, &history_content, None)?;
         }
-        if self.settings.curator_enabled {
+        if self.settings.background.curator_enabled {
             let _ = self.run_curator_once(false);
         }
         Ok(response)
@@ -372,7 +316,7 @@ impl Agent {
     }
 
     pub fn run_curator_once(&self, force: bool) -> AgentResult<CuratorRunStats> {
-        let curator = MemoryCurator::new(self.settings.memory_dir.join("curator_state.json"));
+        let curator = MemoryCurator::new(self.settings.paths.memory_dir.join("curator_state.json"));
         Ok(curator.run(self.memory.as_ref(), force)?)
     }
 
@@ -429,7 +373,7 @@ impl Agent {
             result.dmn_actor_id = Some(dmn_actor_id);
         }
 
-        if self.settings.curator_enabled {
+        if self.settings.background.curator_enabled {
             result.curator = Some(self.run_curator_once(false)?);
         }
         Ok(result)
@@ -447,17 +391,6 @@ impl Agent {
             });
         }
         runtime
-    }
-
-    fn actor_context_for_prompt(&self) -> AgentResult<Option<String>> {
-        let (Some(registry), Some(actor_id)) = (&self.actor_registry, &self.principal_actor_id)
-        else {
-            return Ok(None);
-        };
-        let context = registry
-            .build_system_prompt_blocking(actor_id)
-            .map_err(|error| AgentError::Llm(anyhow!("actor context failed: {error}")))?;
-        Ok(Some(context))
     }
 
     async fn actor_context_for_prompt_async(&self) -> AgentResult<Option<String>> {
@@ -505,366 +438,6 @@ impl Agent {
     }
 }
 
-fn actor_turn_executor(
-    settings: Settings,
-    memory: Arc<MemoryStore>,
-    router: Arc<RwLock<LlmRouter>>,
-    shell: ShellTools,
-) -> ActorTurnExecutor {
-    let context = TurnExecutionContext {
-        settings,
-        memory,
-        router,
-        shell,
-    };
-    Arc::new(move |spec: ActorRunSpec, runtime: ActorRuntime| {
-        let context = context.clone();
-        Box::pin(async move {
-            let tool_runtime = ToolRuntime {
-                actor: Some(ActorToolContext {
-                    runtime: runtime.clone(),
-                    actor_id: spec.actor_id.clone(),
-                    is_subagent: true,
-                }),
-                requested_tools: spec.requested_tools.clone(),
-                ..ToolRuntime::default()
-            };
-            let messages = vec![
-                LlmMessage::system(spec.system_prompt.clone()),
-                LlmMessage::user(actor_turn_instruction(&spec)),
-            ];
-            complete_turn_with_tools_config_shared(
-                context,
-                messages,
-                tool_runtime,
-                spec.model == ModelTier::Aux,
-                false,
-            )
-            .await
-            .map_err(|error| ActorError::Runtime(error.to_string()))
-        })
-    })
-}
-
-async fn complete_turn_with_tools_config_shared(
-    context: TurnExecutionContext,
-    messages: Vec<LlmMessage>,
-    runtime: ToolRuntime,
-    use_aux: bool,
-    record_tool_messages: bool,
-) -> AgentResult<String> {
-    let mut active_tools = runtime
-        .requested_tools
-        .iter()
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .collect::<HashSet<_>>();
-    let registry = ToolRegistry::with_runtime(
-        context.memory.as_ref(),
-        context.settings.workspace_dir.clone(),
-        context.settings.cache_dir.clone(),
-        &context.shell,
-        runtime,
-    );
-    let mut request = build_chat_request(messages);
-    let mut last_text = String::new();
-
-    for iteration in 0..MAX_TOOL_ITERATIONS {
-        request.tools = Some(registry.tools_for_active(&active_tools));
-        tracing::debug!(
-            iteration,
-            messages = request.messages.len(),
-            tools = request.tools.as_ref().map_or(0, Vec::len),
-            active_tools = ?active_tools,
-            "llm tool loop iteration"
-        );
-        let router = context
-            .router
-            .read()
-            .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
-            .clone();
-        let response = router.exec_chat_request(request.clone(), use_aux).await?;
-        let text = response.first_text().unwrap_or_default().to_string();
-        let tool_calls = response
-            .tool_calls()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        tracing::info!(
-            iteration,
-            text_chars = text.chars().count(),
-            tool_calls = tool_calls.len(),
-            "llm response received"
-        );
-
-        if tool_calls.is_empty() {
-            return Ok(text);
-        }
-
-        if !text.trim().is_empty() {
-            last_text = text.clone();
-        }
-        if record_tool_messages {
-            context.memory.messages.add(
-                "assistant",
-                &text,
-                Some(json!({ "tool_calls": tool_calls_metadata(&tool_calls) })),
-            )?;
-        }
-        request
-            .messages
-            .push(assistant_tool_message(text, tool_calls.clone()));
-
-        let mut image_views = Vec::new();
-        for call in tool_calls {
-            let call_id = call.call_id.clone();
-            let tool_name = call.fn_name.clone();
-            tracing::info!(
-                iteration,
-                tool = %tool_name,
-                call_id = %call_id,
-                args = %truncate_log_text(&call.fn_arguments.to_string(), 1200),
-                "tool call started"
-            );
-            let should_stop_after_tool =
-                matches!(call.fn_name.as_str(), "terminate" | "restart_self");
-            let raw_result = if call.fn_name == "request_tool" {
-                request_tool_for_turn(&registry, &mut active_tools, &call.fn_arguments)
-            } else if registry.tool_is_active(&call.fn_name, &active_tools) {
-                match registry.telegram_typing_context() {
-                    Some((token, chat_id)) => {
-                        with_telegram_tool_typing(
-                            token,
-                            chat_id,
-                            registry.execute_async(&call.fn_name, &call.fn_arguments),
-                        )
-                        .await
-                    }
-                    None => {
-                        registry
-                            .execute_async(&call.fn_name, &call.fn_arguments)
-                            .await
-                    }
-                }
-            } else if registry.tool_is_available(&call.fn_name) {
-                format!(
-                    "Tool '{}' is available but not loaded. Call request_tool(name=\"{}\") first.",
-                    call.fn_name, call.fn_name
-                )
-            } else {
-                format!("Unknown tool: {}", call.fn_name)
-            };
-            let (result, views) = extract_image_views(raw_result);
-            tracing::info!(
-                iteration,
-                tool = %tool_name,
-                call_id = %call_id,
-                result_chars = result.chars().count(),
-                result = %truncate_log_text(&result, 1200),
-                "tool call completed"
-            );
-            image_views.extend(views);
-            if record_tool_messages {
-                context.memory.messages.add(
-                    "tool",
-                    &result,
-                    Some(json!({
-                        "tool_call_id": call.call_id.clone(),
-                        "name": call.fn_name.clone(),
-                    })),
-                )?;
-            }
-            let stop_result = result.clone();
-            request
-                .messages
-                .push(ChatMessage::from(ToolResponse::new(call.call_id, result)));
-            if should_stop_after_tool {
-                return Ok(stop_result);
-            }
-        }
-        for image_view in image_views {
-            request.messages.push(image_view_message(image_view));
-        }
-    }
-
-    if last_text.trim().is_empty() {
-        Ok("Tool iteration limit reached before a final response.".to_string())
-    } else {
-        Ok(last_text)
-    }
-}
-
-fn actor_turn_instruction(spec: &ActorRunSpec) -> String {
-    let inbox = if spec.has_pending_messages {
-        "You have pending inbox messages in the actor context. Account for them before acting."
-    } else {
-        "No pending inbox messages are visible beyond the actor context."
-    };
-    if spec.turn_number == 1 {
-        format!(
-            "Begin your actor task now. {inbox}\nUse tools as needed. If you finish, call terminate(result=..., outcome=\"success\"). This is turn {}/{}.",
-            spec.turn_number, spec.max_turns
-        )
-    } else {
-        format!(
-            "Continue your actor task. {inbox}\nReport progress with send_message(..., channel=\"task_update\", kind=\"progress\") when useful, and call terminate(...) when done. This is turn {}/{}.",
-            spec.turn_number, spec.max_turns
-        )
-    }
-}
-
-fn request_tool_for_turn(
-    registry: &ToolRegistry<'_>,
-    active_tools: &mut HashSet<String>,
-    args: &Value,
-) -> String {
-    let name = args
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if name.is_empty() {
-        return "Error: tool name is required.".to_string();
-    }
-    if !registry.tool_is_available(name) {
-        let available = registry.requestable_tool_names().join(", ");
-        return format!("Unknown tool: {name}. Available extended tools: {available}");
-    }
-    if registry.tool_is_active(name, active_tools) {
-        return format!("Tool '{name}' is already available. You can use it now.");
-    }
-    active_tools.insert(name.to_string());
-    format!("Tool '{name}' is now available. You can use it in the next tool call.")
-}
-
-async fn with_telegram_tool_typing<F, T>(token: String, chat_id: i64, future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    let Ok(client) = TelegramClient::new(token, Vec::new()) else {
-        return future.await;
-    };
-
-    let _ = client.send_chat_action(chat_id, "typing").await;
-    let typing_task = tokio::spawn(telegram_tool_typing_loop(client, chat_id));
-    let output = future.await;
-    typing_task.abort();
-    let _ = typing_task.await;
-    output
-}
-
-async fn telegram_tool_typing_loop(client: TelegramClient, chat_id: i64) {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(
-            TELEGRAM_TOOL_TYPING_REFRESH_SECONDS,
-        ))
-        .await;
-        if let Err(error) = client.send_chat_action(chat_id, "typing").await {
-            tracing::debug!(chat_id, error = %error, "telegram tool typing action failed");
-            return;
-        }
-    }
-}
-
-fn truncate_log_text(value: &str, limit: usize) -> String {
-    let mut truncated = value.chars().take(limit).collect::<String>();
-    if value.chars().count() > limit {
-        truncated.push_str("...[truncated]");
-    }
-    truncated
-}
-
-fn assistant_tool_message(text: String, tool_calls: Vec<ToolCall>) -> ChatMessage {
-    let mut parts = Vec::new();
-    if !text.trim().is_empty() {
-        parts.push(ContentPart::Text(text));
-    }
-    parts.extend(tool_calls.into_iter().map(ContentPart::ToolCall));
-    ChatMessage::assistant(MessageContent::from_parts(parts))
-}
-
-fn tool_calls_metadata(tool_calls: &[ToolCall]) -> Vec<Value> {
-    tool_calls
-        .iter()
-        .map(|call| {
-            json!({
-                "id": call.call_id,
-                "type": "function",
-                "function": {
-                    "name": call.fn_name,
-                    "arguments": call.fn_arguments.to_string(),
-                },
-                "call_id": call.call_id,
-                "fn_name": call.fn_name,
-                "fn_arguments": call.fn_arguments,
-            })
-        })
-        .collect()
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ImageView {
-    path: String,
-    attachment: LlmAttachment,
-}
-
-fn extract_image_views(result: String) -> (String, Vec<ImageView>) {
-    let Ok(mut value) = serde_json::from_str::<Value>(&result) else {
-        return (result, vec![]);
-    };
-    let Some(object) = value.as_object_mut() else {
-        return (result, vec![]);
-    };
-    let Some(image) = object.remove("_image_view") else {
-        return (result, vec![]);
-    };
-
-    let Some(data) = image.get("data").and_then(Value::as_str) else {
-        return (json_without_image_view(value, result), vec![]);
-    };
-    let Some(mime_type) = image.get("mime_type").and_then(Value::as_str) else {
-        return (json_without_image_view(value, result), vec![]);
-    };
-    let path = image
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or("image")
-        .to_string();
-    let name = image
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            std::path::Path::new(&path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        });
-    let attachment = LlmAttachment {
-        content_type: mime_type.to_string(),
-        base64_content: data.to_string(),
-        name,
-    };
-    (
-        json_without_image_view(value, result),
-        vec![ImageView { path, attachment }],
-    )
-}
-
-fn json_without_image_view(value: Value, fallback: String) -> String {
-    serde_json::to_string(&value).unwrap_or(fallback)
-}
-
-fn image_view_message(image: ImageView) -> ChatMessage {
-    ChatMessage::user(MessageContent::from_parts(vec![
-        ContentPart::Text(format!("[Image from {}]", image.path)),
-        ContentPart::from_binary_base64(
-            image.attachment.content_type,
-            image.attachment.base64_content,
-            image.attachment.name,
-        ),
-    ]))
-}
 
 pub fn prepare_turn(
     settings: &Settings,
@@ -880,7 +453,7 @@ pub fn prepare_turn(
     let recent = history_records_for_turn(raw_recent.clone(), options.history_limit);
     let recall = if options.use_hippocampus && !synthetic {
         Hippocampus::new(HippocampusConfig {
-            enabled: settings.hippocampus_enabled,
+            enabled: settings.background.hippocampus_enabled,
             ..Default::default()
         })
         .recall(memory, message, &recent)?
@@ -889,9 +462,12 @@ pub fn prepare_turn(
     };
 
     let tool_context = recent_tool_context_for_turn(&raw_recent, settings);
-    let system = build_system_prompt(memory, prompts, recall.as_deref(), tool_context.as_deref())?;
-    let mut messages = vec![LlmMessage::system(system)];
-    messages.extend(recent.into_iter().filter_map(history_to_llm_message));
+    let parts =
+        build_system_prompt(memory, prompts, recall.as_deref(), tool_context.as_deref())?;
+    let dialect = dialect_for_model(&settings.llm.llm_model);
+    let mut messages = parts.into_messages();
+    apply_cache_markers(&mut messages, dialect.as_ref());
+    messages.extend(history_to_llm_messages(recent));
     let user_message = if attachments.is_empty() {
         LlmMessage::user(message.to_string())
     } else {
@@ -906,12 +482,46 @@ pub fn prepare_turn(
     })
 }
 
+/// System prompt split into a long-stable head (identity, persona,
+/// instructions, stable memory blocks) and a per-turn-volatile tail (volatile
+/// blocks, clock, recall, tool history). Letting them be separate system
+/// messages lets Anthropic's prompt cache land a breakpoint between them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SystemParts {
+    pub stable: String,
+    pub volatile: String,
+}
+
+impl SystemParts {
+    pub fn into_messages(self) -> Vec<LlmMessage> {
+        let mut out = Vec::new();
+        if !self.stable.trim().is_empty() {
+            out.push(LlmMessage::system(self.stable));
+        }
+        if !self.volatile.trim().is_empty() {
+            out.push(LlmMessage::system(self.volatile));
+        }
+        out
+    }
+
+    /// Flatten back to a single string. Used by tests that still assert on the
+    /// monolithic prompt shape.
+    pub fn render_joined(&self) -> String {
+        match (self.stable.trim().is_empty(), self.volatile.trim().is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => self.stable.clone(),
+            (true, false) => self.volatile.clone(),
+            (false, false) => format!("{}\n\n{}", self.stable, self.volatile),
+        }
+    }
+}
+
 fn build_system_prompt(
     memory: &MemoryStore,
     prompts: &PromptStore,
     recall: Option<&str>,
     tool_context: Option<&str>,
-) -> AgentResult<String> {
+) -> AgentResult<SystemParts> {
     let identity = memory
         .blocks
         .get("identity")
@@ -919,39 +529,42 @@ fn build_system_prompt(
         .map(|block| block.value)
         .unwrap_or_default();
     let instructions = prompts.load("agent_instructions", "You are Lethe.").text;
-    let tools_doc = prompts.load("agent_tools", "").text;
-    let memory_context = memory.get_context_for_prompt()?;
-    let mut parts = Vec::new();
-    if !identity.trim().is_empty() {
-        parts.push(format!(
-            "<identity_block>\n{}\n</identity_block>",
-            identity.trim()
-        ));
-    }
-    parts.push(instructions);
-    if !tools_doc.trim().is_empty() {
-        parts.push(format!(
-            "<tool_reference_block>\n{}\n</tool_reference_block>",
-            tools_doc.trim()
-        ));
-    }
-    parts.push(memory_context);
-    if let Some(tool_context) = tool_context.filter(|value| !value.trim().is_empty()) {
-        parts.push(format!(
-            "<runtime_context source=\"recent_tool_history\">\n{tool_context}\n</runtime_context>"
-        ));
+    let (memory_stable, memory_volatile) = memory.get_context_split()?;
+    let clock_block = crate::store::format_clock_block();
+
+    let mut stable_builder = PromptBuilder::new();
+    stable_builder
+        .block("identity_block", identity)
+        .raw(instructions)
+        .raw(memory_stable);
+
+    let mut volatile_builder = PromptBuilder::new();
+    volatile_builder.raw(memory_volatile).raw(clock_block);
+
+    if let Some(tool_context) = tool_context {
+        volatile_builder.block_with(
+            "runtime_context",
+            [("source", "recent_tool_history")],
+            tool_context,
+        );
     }
     if let Some(recall) = recall.filter(|value| !value.trim().is_empty()) {
-        let timestamp = Local::now().format("%a %Y-%m-%d %H:%M:%S %Z");
-        parts.push(format!(
-            "<runtime_context source=\"hippocampus\" timestamp=\"{timestamp}\">\n<recall_block source=\"hippocampus\">\n{recall}\n</recall_block>\n</runtime_context>"
-        ));
+        let timestamp = Local::now().format("%a %Y-%m-%d %H:%M:%S %Z").to_string();
+        let body = format!(
+            "<recall_block source=\"hippocampus\">\n{}\n</recall_block>",
+            recall.trim()
+        );
+        volatile_builder.block_with(
+            "runtime_context",
+            [("source", "hippocampus"), ("timestamp", timestamp.as_str())],
+            body,
+        );
     }
-    Ok(parts
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+
+    Ok(SystemParts {
+        stable: stable_builder.render(),
+        volatile: volatile_builder.render(),
+    })
 }
 
 fn history_fetch_limit(options: &AgentOptions) -> usize {
@@ -968,7 +581,7 @@ fn history_records_for_turn(recent: Vec<StoredMessage>, limit: usize) -> Vec<Sto
     let mut inside_internal_turn = false;
     for message in recent {
         let internal = MessageMetadata::from_value(Some(&message.metadata)).is_internal();
-        if message.role.as_str() == "user" {
+        if message.role.is_user() {
             inside_internal_turn = internal;
             if inside_internal_turn {
                 continue;
@@ -998,361 +611,27 @@ fn history_records_for_turn(recent: Vec<StoredMessage>, limit: usize) -> Vec<Sto
     history
 }
 
-#[derive(Clone, Debug)]
-struct ToolCallRecord {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-#[derive(Clone, Debug)]
-struct ToolResultRecord {
-    call_id: String,
-    name: String,
-    content: String,
-}
-
-#[derive(Clone, Debug)]
-struct ToolHistoryGroup {
-    created_at: String,
-    assistant_text: String,
-    calls: Vec<ToolCallRecord>,
-    results: Vec<ToolResultRecord>,
-}
-
-fn recent_tool_context_for_turn(recent: &[StoredMessage], settings: &Settings) -> Option<String> {
-    let mut groups = Vec::new();
-    let mut current: Option<ToolHistoryGroup> = None;
-    let mut inside_internal_turn = false;
-
-    for message in recent {
-        let internal = MessageMetadata::from_value(Some(&message.metadata)).is_internal();
-        if message.role.as_str() == "user" {
-            inside_internal_turn = internal;
-            if let Some(group) = current.take() {
-                groups.push(group);
-            }
-            continue;
-        }
-        if inside_internal_turn || internal {
-            continue;
-        }
-
-        match message.role.as_str() {
-            "assistant" => {
-                let calls = tool_calls_from_metadata(&message.metadata);
-                if calls.is_empty() {
-                    if let Some(group) = current.take() {
-                        groups.push(group);
-                    }
-                } else {
-                    if let Some(group) = current.take() {
-                        groups.push(group);
-                    }
-                    current = Some(ToolHistoryGroup {
-                        created_at: message.created_at.clone(),
-                        assistant_text: message.content.clone(),
-                        calls,
-                        results: Vec::new(),
-                    });
-                }
-            }
-            "tool" => {
-                if let Some(group) = current.as_mut()
-                    && let Some(result) = tool_result_from_message(message)
-                    && !SEARCH_RESULT_SKIP_TOOLS.contains(&result.name.as_str())
-                {
-                    group.results.push(result);
-                }
-            }
-            _ => {
-                if let Some(group) = current.take() {
-                    groups.push(group);
-                }
-            }
-        }
-    }
-    if let Some(group) = current {
-        groups.push(group);
-    }
-
-    groups.retain(|group| {
-        group
-            .calls
-            .iter()
-            .any(|call| !SEARCH_RESULT_SKIP_TOOLS.contains(&call.name.as_str()))
-            && !group.results.is_empty()
-    });
-    if groups.is_empty() {
-        return None;
-    }
-
-    let start = groups.len().saturating_sub(RECENT_TOOL_CONTEXT_GROUPS);
-    let selected = &groups[start..];
-    let latest_index = selected.len().saturating_sub(1);
-    let mut parts = vec![format!(
-        "<recent_tool_context groups=\"{}\">",
-        selected.len()
-    )];
-    for (index, group) in selected.iter().enumerate() {
-        parts.push(format_tool_history_group(group, index == latest_index));
-    }
-    parts.push("</recent_tool_context>".to_string());
-
-    Some(cap_context_text(
-        &parts.join("\n"),
-        tool_context_budget_chars(settings),
-        "recent tool context",
-    ))
-}
-
-fn tool_calls_from_metadata(metadata: &Value) -> Vec<ToolCallRecord> {
-    metadata
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| {
-            calls
-                .iter()
-                .filter_map(|call| {
-                    let id = call
-                        .get("id")
-                        .or_else(|| call.get("call_id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let name = call
-                        .get("function")
-                        .and_then(|function| function.get("name"))
-                        .or_else(|| call.get("fn_name"))
-                        .or_else(|| call.get("name"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string();
-                    if name.is_empty() {
-                        return None;
-                    }
-                    let arguments = call
-                        .get("function")
-                        .and_then(|function| function.get("arguments"))
-                        .or_else(|| call.get("fn_arguments"))
-                        .or_else(|| call.get("arguments"))
-                        .map(format_jsonish)
-                        .unwrap_or_default();
-                    Some(ToolCallRecord {
-                        id,
-                        name,
-                        arguments,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn tool_result_from_message(message: &StoredMessage) -> Option<ToolResultRecord> {
-    let name = message
-        .metadata
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("tool")
-        .trim()
-        .to_string();
-    if name.is_empty() {
-        return None;
-    }
-    Some(ToolResultRecord {
-        call_id: message
-            .metadata
-            .get("tool_call_id")
-            .or_else(|| message.metadata.get("call_id"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        name,
-        content: message.content.clone(),
-    })
-}
-
-fn format_tool_history_group(group: &ToolHistoryGroup, full_latest: bool) -> String {
-    let mut results_by_id = HashMap::<&str, Vec<&ToolResultRecord>>::new();
-    let mut unmatched_results = Vec::new();
-    for result in &group.results {
-        if result.call_id.trim().is_empty() {
-            unmatched_results.push(result);
-        } else {
-            results_by_id
-                .entry(result.call_id.as_str())
-                .or_default()
-                .push(result);
-        }
-    }
-
-    let mut parts = vec![format!("<tool_turn timestamp=\"{}\">", group.created_at)];
-    if !group.assistant_text.trim().is_empty() {
-        parts.push(format!(
-            "<assistant_tool_prelude>\n{}\n</assistant_tool_prelude>",
-            group.assistant_text.trim()
-        ));
-    }
-
-    for call in &group.calls {
-        if SEARCH_RESULT_SKIP_TOOLS.contains(&call.name.as_str()) {
-            continue;
-        }
-        parts.push(format!(
-            "<tool_call name=\"{}\" id=\"{}\">",
-            call.name, call.id
-        ));
-        if !call.arguments.trim().is_empty() {
-            parts.push(format!("<arguments>\n{}\n</arguments>", call.arguments));
-        }
-        let mut attached = results_by_id
-            .remove(call.id.as_str())
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        if attached.is_empty() && group.calls.len() == 1 {
-            attached.append(&mut unmatched_results);
-        } else {
-            let mut index = 0;
-            while index < unmatched_results.len() {
-                if unmatched_results[index].name == call.name {
-                    attached.push(unmatched_results.remove(index));
-                } else {
-                    index += 1;
-                }
-            }
-        }
-        for result in attached {
-            parts.push(format_tool_result(result, full_latest));
-        }
-        parts.push("</tool_call>".to_string());
-    }
-
-    for results in results_by_id.into_values() {
-        for result in results {
-            parts.push(format_tool_result(result, full_latest));
-        }
-    }
-    for result in unmatched_results {
-        parts.push(format_tool_result(result, full_latest));
-    }
-
-    parts.push("</tool_turn>".to_string());
-    parts.join("\n")
-}
-
-fn format_tool_result(result: &ToolResultRecord, full_latest: bool) -> String {
-    let original_chars = result.content.chars().count();
-    let original_lines = result.content.lines().count().max(1);
-    let (content, mode) = if full_latest {
-        (result.content.clone(), "full")
-    } else {
-        (preview_tool_result(&result.content), "preview")
-    };
-    format!(
-        "<tool_result name=\"{}\" mode=\"{}\" chars=\"{}\" lines=\"{}\">\n{}\n</tool_result>",
-        result.name, mode, original_chars, original_lines, content
-    )
-}
-
-fn preview_tool_result(content: &str) -> String {
-    let lines = content.lines().collect::<Vec<_>>();
-    let mut preview = if lines.len() > OLD_TOOL_RESULT_PREVIEW_LINES {
-        format!(
-            "{}\n[... {} more lines skipped]",
-            lines[..OLD_TOOL_RESULT_PREVIEW_LINES].join("\n"),
-            lines.len() - OLD_TOOL_RESULT_PREVIEW_LINES
-        )
-    } else {
-        content.to_string()
-    };
-    if preview.chars().count() > OLD_TOOL_RESULT_PREVIEW_CHARS {
-        preview = format!(
-            "{}\n[... {} chars skipped]",
-            take_chars(&preview, OLD_TOOL_RESULT_PREVIEW_CHARS),
-            preview.chars().count() - OLD_TOOL_RESULT_PREVIEW_CHARS
-        );
-    }
-    preview
-}
-
-fn tool_context_budget_chars(settings: &Settings) -> usize {
-    let proportional = settings
-        .llm_context_limit
-        .saturating_mul(4)
-        .saturating_mul(TOOL_CONTEXT_SHARE_NUMERATOR)
-        / TOOL_CONTEXT_SHARE_DENOMINATOR;
-    proportional.clamp(TOOL_CONTEXT_MIN_CHARS, TOOL_CONTEXT_MAX_CHARS)
-}
-
-fn cap_context_text(value: &str, max_chars: usize, label: &str) -> String {
-    let chars = value.chars().count();
-    if chars <= max_chars {
-        return value.to_string();
-    }
-    let keep = max_chars.saturating_sub(200).max(1);
-    let tail_probe = value
-        .chars()
-        .rev()
-        .take(2_000)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let has_error_tail = [
-        "error",
-        "exception",
-        "failed",
-        "fatal",
-        "traceback",
-        "panic",
-        "exit code",
-    ]
-    .iter()
-    .any(|needle| tail_probe.contains(needle));
-    let head_share = if has_error_tail { 60 } else { 70 };
-    let head_chars = keep.saturating_mul(head_share) / 100;
-    let tail_chars = keep.saturating_sub(head_chars);
-    format!(
-        "{}\n\n[... {} chars truncated from {label} ...]\n\n{}",
-        take_chars(value, head_chars),
-        chars.saturating_sub(keep),
-        take_last_chars(value, tail_chars)
-    )
-}
-
-fn take_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
-}
-
-fn take_last_chars(value: &str, limit: usize) -> String {
-    let mut chars = value.chars().rev().take(limit).collect::<Vec<_>>();
-    chars.reverse();
-    chars.into_iter().collect()
-}
-
-fn format_jsonish(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
 
 fn is_visible_history_record(message: &StoredMessage) -> bool {
-    !message.content.trim().is_empty()
-        && matches!(message.role.as_str(), "user" | "assistant")
-        && message.metadata.get("tool_calls").is_none()
-        && !MessageMetadata::from_value(Some(&message.metadata)).is_internal()
+    if MessageMetadata::from_value(Some(&message.metadata)).is_internal() {
+        return false;
+    }
+    match message.role {
+        MessageRole::User | MessageRole::Assistant | MessageRole::Tool => {
+            // Tool results legitimately carry a tool_call_id in metadata
+            // instead of inline text; assistant messages with tool_calls may
+            // also have empty content. Both stay; the pairing pass filters
+            // orphans later.
+            !message.content.trim().is_empty()
+                || MessageMetadata::from_value(Some(&message.metadata)).has_tool_calls()
+                || message.metadata.get("tool_call_id").is_some()
+        }
+        _ => false,
+    }
 }
 
 fn drop_history_before_first_user(history: &mut Vec<StoredMessage>) {
-    let Some(first_user) = history
-        .iter()
-        .position(|message| message.role.as_str() == "user")
-    else {
+    let Some(first_user) = history.iter().position(|message| message.role.is_user()) else {
         history.clear();
         return;
     };
@@ -1361,82 +640,206 @@ fn drop_history_before_first_user(history: &mut Vec<StoredMessage>) {
     }
 }
 
-fn history_to_llm_message(message: StoredMessage) -> Option<LlmMessage> {
-    let content = message.content;
-    if content.trim().is_empty() {
-        return None;
+/// Convert a slice of stored messages into the LLM message stream, preserving
+/// assistant_tool_calls ↔ tool_response pairing so the wire format stays
+/// valid (Anthropic enforces this; OpenAI is more lenient but still expects
+/// matching ids). Orphans on either side are dropped.
+fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
+    let mut out = Vec::new();
+    let mut iter = history.into_iter().peekable();
+
+    while let Some(message) = iter.next() {
+        match message.role {
+            MessageRole::User if !message.content.trim().is_empty() => {
+                out.push(LlmMessage::user(history_content_with_timestamp(&message)));
+            }
+            MessageRole::Assistant => {
+                let calls = extract_historical_tool_calls(&message.metadata);
+                let intended_tool_calls =
+                    MessageMetadata::from_value(Some(&message.metadata)).has_tool_calls();
+                if calls.is_empty() {
+                    // The model was reported to have made tool calls but the
+                    // payload is missing call_ids — we can't reconstruct a
+                    // valid pair, so drop the chatter entirely instead of
+                    // surfacing it as plain narration.
+                    if intended_tool_calls {
+                        continue;
+                    }
+                    let content = history_content_with_timestamp(&message);
+                    if !content.trim().is_empty() {
+                        out.push(LlmMessage::assistant(content));
+                    }
+                    continue;
+                }
+
+                // Collect the tool results that should follow this assistant
+                // message. Anthropic requires every tool_use_id to have a
+                // matching tool_result in the very next user message; we
+                // greedily consume Tool-role messages while they match a
+                // pending call_id.
+                let expected: std::collections::HashSet<String> =
+                    calls.iter().map(|call| call.call_id.clone()).collect();
+                let mut responses: Vec<HistoricalToolResponse> = Vec::new();
+                let mut seen: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                while let Some(next) = iter.peek() {
+                    if !matches!(next.role, MessageRole::Tool) {
+                        break;
+                    }
+                    let Some(call_id) =
+                        next.metadata.get("tool_call_id").and_then(Value::as_str)
+                    else {
+                        // Tool message without a tool_call_id — orphan, skip.
+                        iter.next();
+                        continue;
+                    };
+                    if !expected.contains(call_id) {
+                        // Belongs to a different call group; stop consuming.
+                        break;
+                    }
+                    let call_id = call_id.to_string();
+                    let tool_msg = iter.next().expect("peeked tool message");
+                    if seen.insert(call_id.clone()) {
+                        responses.push(HistoricalToolResponse {
+                            call_id,
+                            content: tool_msg.content,
+                        });
+                    }
+                }
+
+                // Drop the whole pair if any tool_use_id is missing its
+                // response — Anthropic 400s on a mismatched id list.
+                if seen.len() != expected.len() {
+                    continue;
+                }
+                let text = history_content_with_timestamp(&message);
+                out.push(LlmMessage::assistant_with_tool_calls(text, calls));
+                out.push(LlmMessage::tool_results(responses));
+            }
+            // Orphaned tool result (no preceding assistant tool_call). Skip.
+            MessageRole::Tool => continue,
+            _ => continue,
+        }
     }
-    if message.metadata.get("tool_calls").is_some() {
-        return None;
-    }
-    match message.role.as_str() {
-        "user" => Some(LlmMessage {
-            role: LlmRole::User,
-            content,
-            attachments: vec![],
-        }),
-        "assistant" => Some(LlmMessage {
-            role: LlmRole::Assistant,
-            content,
-            attachments: vec![],
-        }),
-        _ => None,
-    }
+
+    out
+}
+
+fn extract_historical_tool_calls(metadata: &Value) -> Vec<HistoricalToolCall> {
+    metadata
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let call_id = call.get("call_id").or_else(|| call.get("id"))?.as_str()?;
+                    let fn_name = call
+                        .get("fn_name")
+                        .or_else(|| call.get("function").and_then(|f| f.get("name")))?
+                        .as_str()?;
+                    let fn_arguments = call
+                        .get("fn_arguments")
+                        .cloned()
+                        .or_else(|| {
+                            call.get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|args| args.as_str())
+                                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                        })
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                    Some(HistoricalToolCall {
+                        call_id: call_id.to_string(),
+                        fn_name: fn_name.to_string(),
+                        fn_arguments,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn assistant_history_content(response: &str) -> String {
     normalize_message_envelope(response).unwrap_or_else(|| response.to_string())
 }
 
+/// Return the last system message (the volatile half of the split prompt) so
+/// per-turn additions (actor_context, directory) don't bust the stable cache.
+fn volatile_system_message_mut(messages: &mut [LlmMessage]) -> Option<&mut LlmMessage> {
+    messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == LlmRole::System)
+}
+
+/// Attach the dialect's cache hints to the system messages: the first system
+/// message is the stable head, the last is the volatile tail. With two
+/// messages this lands two cache breakpoints; with one (e.g. when only the
+/// stable half exists) it lands one.
+fn apply_cache_markers(messages: &mut [LlmMessage], dialect: &dyn crate::llm::PromptDialect) {
+    let system_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == LlmRole::System)
+        .map(|(index, _)| index)
+        .collect();
+    if let Some(&first) = system_indices.first()
+        && let Some(hint) = dialect.cache_marker_for_stable()
+    {
+        messages[first].cache_control = Some(hint);
+    }
+    if let Some(&last) = system_indices.last()
+        && system_indices.len() > 1
+        && let Some(hint) = dialect.cache_marker_for_volatile()
+    {
+        messages[last].cache_control = Some(hint);
+    }
+}
+
+/// Threshold above which a history message is prefixed with its timestamp.
+/// Short bursty exchanges (sub-5-minute gaps) stay timestamp-free so the
+/// model sees clean dialogue; longer gaps surface the time so the model can
+/// reason about staleness without calling conversation_search.
+const HISTORY_TIMESTAMP_THRESHOLD_SECONDS: i64 = 300;
+
+fn history_content_with_timestamp(message: &StoredMessage) -> String {
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(&message.created_at) else {
+        return message.content.clone();
+    };
+    let created = created.with_timezone(&chrono::Utc);
+    let age = chrono::Utc::now().signed_duration_since(created).num_seconds();
+    if age < HISTORY_TIMESTAMP_THRESHOLD_SECONDS {
+        return message.content.clone();
+    }
+    let local = created.with_timezone(&Local);
+    let stamp = local.format("%a %Y-%m-%d %H:%M %Z").to_string();
+    format!("[{stamp}] {}", message.content)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use tempfile::tempdir;
 
     use super::*;
-    use crate::config::{RuntimeMode, Settings};
+    use crate::actor::{ActorRunSpec, ModelTier};
+    use crate::config::Settings;
+    use crate::llm::LlmRole;
     use crate::memory::message_metadata::{MessageKind, MessageVisibility, metadata_value};
 
     fn settings(root: &std::path::Path) -> Settings {
-        Settings {
-            agent_name: "lethe".to_string(),
-            mode: RuntimeMode::Cli,
-            telegram_bot_token: String::new(),
-            telegram_allowed_user_ids: vec![],
-            telegram_transcription_enabled: true,
-            lethe_api_token: String::new(),
-            lethe_api_host: "127.0.0.1".to_string(),
-            lethe_api_port: 8080,
-            openrouter_api_key: String::new(),
-            openai_api_key: String::new(),
-            llm_model: "test-model".to_string(),
-            llm_model_aux: String::new(),
-            llm_provider: String::new(),
-            llm_api_base: String::new(),
-            llm_context_limit: 100_000,
-            lethe_home: root.to_path_buf(),
-            config_dir: PathBuf::from("config"),
-            workspace_dir: root.join("workspace"),
-            memory_dir: root.join("data").join("memory"),
-            db_path: root.join("data/lethe.db"),
-            credentials_dir: root.join("credentials"),
-            cache_dir: root.join("cache"),
-            logs_dir: root.join("logs"),
-            notes_dir: root.join("workspace/notes"),
-            transcription_provider: String::new(),
-            transcription_model: String::new(),
-            transcription_language: String::new(),
-            transcription_local_command: "whisper".to_string(),
-            actors_enabled: true,
-            hippocampus_enabled: true,
-            curator_enabled: true,
-            heartbeat_enabled: true,
-            heartbeat_interval_seconds: 3600,
-            debounce_seconds: 5.0,
-            proactive_max_per_day: 4,
-            proactive_cooldown_minutes: 60,
-        }
+        crate::config::test_settings(root)
+    }
+
+    /// Concatenate every System-role message into one string. The prompt is
+    /// now split into (stable, volatile) parts, so tests checking individual
+    /// fragments shouldn't care which half they landed in.
+    fn system_content(messages: &[LlmMessage]) -> String {
+        messages
+            .iter()
+            .filter(|message| message.role == LlmRole::System)
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     #[test]
@@ -1444,7 +847,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let memory = MemoryStore::from_settings(&settings).unwrap();
-        let prompts = PromptStore::new(&settings.workspace_dir, &settings.config_dir);
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
 
         memory
             .notes
@@ -1457,7 +860,7 @@ mod tests {
             .unwrap();
         memory
             .messages
-            .add("user", "previous graph question", None)
+            .add(MessageRole::User, "previous graph question", None)
             .unwrap();
 
         let turn = prepare_turn(
@@ -1472,15 +875,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(turn.messages[0].role, LlmRole::System);
-        assert!(turn.messages[0].content.contains("<identity_block>"));
-        assert!(turn.messages[0].content.contains("<tool_reference_block>"));
-        assert!(turn.messages[0].content.contains("<memory_metadata>"));
-        assert!(
-            turn.messages[0]
-                .content
-                .contains("<runtime_context source=\"hippocampus\"")
-        );
-        assert!(turn.messages[0].content.contains("Graph Email"));
+        let system = system_content(&turn.messages);
+        assert!(system.contains("<identity_block>"));
+        assert!(system.contains("<memory_metadata>"));
+        assert!(system.contains("<runtime_context source=\"hippocampus\""));
+        assert!(system.contains("Graph Email"));
         assert!(
             turn.messages
                 .iter()
@@ -1497,27 +896,27 @@ mod tests {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let memory = MemoryStore::from_settings(&settings).unwrap();
-        let prompts = PromptStore::new(&settings.workspace_dir, &settings.config_dir);
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
 
         memory
             .messages
             .add(
-                "assistant",
+                MessageRole::Assistant,
                 "I will inspect that now.",
                 Some(json!({"tool_calls": [{"name": "bash"}]})),
             )
             .unwrap();
         memory
             .messages
-            .add("tool", "secret tool output", Some(json!({"name": "bash"})))
+            .add(MessageRole::Tool, "secret tool output", Some(json!({"name": "bash"})))
             .unwrap();
         memory
             .messages
-            .add("user", "previous visible user request", None)
+            .add(MessageRole::User, "previous visible user request", None)
             .unwrap();
         memory
             .messages
-            .add("assistant", "previous visible answer", None)
+            .add(MessageRole::Assistant, "previous visible answer", None)
             .unwrap();
 
         let turn = prepare_turn(
@@ -1543,48 +942,120 @@ mod tests {
         assert!(!contents.contains(&"secret tool output"));
         assert!(contents.contains(&"previous visible user request"));
         assert!(contents.contains(&"previous visible answer"));
-        assert!(
-            turn.messages[0]
-                .content
-                .contains("<runtime_context source=\"recent_tool_history\">")
-        );
-        assert!(
-            turn.messages[0]
-                .content
-                .contains("<tool_call name=\"bash\"")
-        );
-        assert!(turn.messages[0].content.contains("secret tool output"));
+        let system = system_content(&turn.messages);
+        assert!(system.contains("<runtime_context source=\"recent_tool_history\">"));
+        assert!(system.contains("<tool_call name=\"bash\""));
+        assert!(system.contains("secret tool output"));
     }
 
     #[test]
-    fn prepare_turn_fetches_enough_raw_history_to_survive_tool_spam() {
+    fn prepare_turn_preserves_paired_tool_calls_and_responses() {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let memory = MemoryStore::from_settings(&settings).unwrap();
-        let prompts = PromptStore::new(&settings.workspace_dir, &settings.config_dir);
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
 
         memory
             .messages
-            .add("user", "original thing to inspect", None)
+            .add(MessageRole::User, "what's in foo.txt?", None)
             .unwrap();
-        for index in 0..30 {
-            memory
-                .messages
-                .add(
-                    "assistant",
-                    &format!("tool prelude {index}"),
-                    Some(json!({"tool_calls": [{"name": "bash"}]})),
-                )
-                .unwrap();
-            memory
-                .messages
-                .add("tool", &format!("tool output {index}"), None)
-                .unwrap();
-        }
         memory
             .messages
-            .add("user", "did you inspect it?", None)
+            .add(
+                MessageRole::Assistant,
+                "reading it",
+                Some(json!({
+                    "tool_calls": [{
+                        "call_id": "call-abc",
+                        "fn_name": "read_file",
+                        "fn_arguments": {"file_path": "foo.txt"},
+                    }]
+                })),
+            )
             .unwrap();
+        memory
+            .messages
+            .add(
+                MessageRole::Tool,
+                "file contents: hello",
+                Some(json!({"tool_call_id": "call-abc", "name": "read_file"})),
+            )
+            .unwrap();
+        memory
+            .messages
+            .add(MessageRole::Assistant, "it says hello", None)
+            .unwrap();
+
+        let turn = prepare_turn(
+            &settings,
+            &memory,
+            &prompts,
+            "ok thanks",
+            Vec::new(),
+            None,
+            &AgentOptions {
+                history_limit: 20,
+                use_hippocampus: false,
+            },
+        )
+        .unwrap();
+
+        // 2 system (stable + volatile) + user + assistant_with_tool_calls
+        // + tool_results + assistant + new user = 7.
+        assert_eq!(turn.messages.len(), 7);
+        let call_msg = turn
+            .messages
+            .iter()
+            .find(|m| !m.tool_calls.is_empty())
+            .expect("assistant with tool_calls");
+        assert_eq!(call_msg.tool_calls.len(), 1);
+        assert_eq!(call_msg.tool_calls[0].call_id, "call-abc");
+        assert_eq!(call_msg.tool_calls[0].fn_name, "read_file");
+        let result_msg = turn
+            .messages
+            .iter()
+            .find(|m| !m.tool_responses.is_empty())
+            .expect("tool results");
+        assert_eq!(result_msg.tool_responses.len(), 1);
+        assert_eq!(result_msg.tool_responses[0].call_id, "call-abc");
+        assert_eq!(result_msg.tool_responses[0].content, "file contents: hello");
+    }
+
+    #[test]
+    fn prepare_turn_drops_orphan_tool_call_pairs() {
+        let tmp = tempdir().unwrap();
+        let settings = settings(tmp.path());
+        let memory = MemoryStore::from_settings(&settings).unwrap();
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
+
+        memory
+            .messages
+            .add(MessageRole::User, "do two things", None)
+            .unwrap();
+        // Assistant emitted two tool calls but only one matching result is
+        // persisted — the whole pair must be dropped to avoid Anthropic 400s.
+        memory
+            .messages
+            .add(
+                MessageRole::Assistant,
+                "running both",
+                Some(json!({
+                    "tool_calls": [
+                        {"call_id": "c1", "fn_name": "read_file", "fn_arguments": {}},
+                        {"call_id": "c2", "fn_name": "read_file", "fn_arguments": {}},
+                    ]
+                })),
+            )
+            .unwrap();
+        memory
+            .messages
+            .add(
+                MessageRole::Tool,
+                "first result",
+                Some(json!({"tool_call_id": "c1"})),
+            )
+            .unwrap();
+        // No tool_result for c2 — orphan.
 
         let turn = prepare_turn(
             &settings,
@@ -1601,16 +1072,16 @@ mod tests {
         .unwrap();
 
         assert!(
-            turn.messages
-                .iter()
-                .any(|message| message.content == "original thing to inspect")
-        );
-        assert!(
             !turn
                 .messages
                 .iter()
-                .skip(1)
-                .any(|message| message.content.starts_with("tool prelude"))
+                .any(|m| !m.tool_calls.is_empty() || !m.tool_responses.is_empty()),
+            "orphan pair must be dropped entirely"
+        );
+        assert!(
+            turn.messages
+                .iter()
+                .any(|m| m.content == "do two things")
         );
     }
 
@@ -1619,7 +1090,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let memory = MemoryStore::from_settings(&settings).unwrap();
-        let prompts = PromptStore::new(&settings.workspace_dir, &settings.config_dir);
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
         let internal = metadata_value(
             MessageVisibility::Internal,
             MessageKind::Heartbeat,
@@ -1628,15 +1099,15 @@ mod tests {
 
         memory
             .messages
-            .add("user", "internal heartbeat prompt", Some(internal.clone()))
+            .add(MessageRole::User, "internal heartbeat prompt", Some(internal.clone()))
             .unwrap();
         memory
             .messages
-            .add("assistant", "internal heartbeat answer", None)
+            .add(MessageRole::Assistant, "internal heartbeat answer", None)
             .unwrap();
         memory
             .messages
-            .add("user", "visible question", None)
+            .add(MessageRole::User, "visible question", None)
             .unwrap();
 
         let turn = prepare_turn(
@@ -1680,7 +1151,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let memory = MemoryStore::from_settings(&settings).unwrap();
-        let prompts = PromptStore::new(&settings.workspace_dir, &settings.config_dir);
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
         let metadata = metadata_value(
             MessageVisibility::Internal,
             MessageKind::Heartbeat,
@@ -1700,39 +1171,47 @@ mod tests {
 
         assert!(turn.synthetic);
         assert!(turn.recall.is_none());
+        // The recall block has both an outer <runtime_context source="hippocampus"...>
+        // attribute and an inner <recall_block source="hippocampus"> tag. The
+        // outer attribute name can now appear in static instruction prose, so
+        // we look for the inner tag which only appears when recall actually
+        // renders.
         assert!(
             !turn.messages[0]
                 .content
-                .contains("<runtime_context source=\"hippocampus\"")
+                .contains("<recall_block source=\"hippocampus\">")
         );
     }
 
-    #[test]
-    fn agent_prepare_turn_includes_principal_actor_context_when_enabled() {
+    #[tokio::test]
+    async fn agent_prepare_turn_includes_principal_actor_context_when_enabled() {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let agent = Agent::from_settings(settings).unwrap();
 
         let turn = agent
-            .prepare_turn("Please research this in parallel", &AgentOptions::default())
+            .prepare_turn(&TurnRequest::new("Please research this in parallel"))
+            .await
             .unwrap();
 
         assert!(agent.actor_registry().is_some());
         assert!(agent.principal_actor_id().is_some());
-        assert!(turn.messages[0].content.contains("<actor_context>"));
-        assert!(turn.messages[0].content.contains("You are the cortex"));
-        assert!(turn.messages[0].content.contains("spawn_actor"));
+        let system = system_content(&turn.messages);
+        assert!(system.contains("<actor_context>"));
+        assert!(system.contains("runtime role: cortex"));
+        assert!(system.contains("<available_on_request>"));
     }
 
-    #[test]
-    fn agent_prepare_turn_omits_actor_context_when_disabled() {
+    #[tokio::test]
+    async fn agent_prepare_turn_omits_actor_context_when_disabled() {
         let tmp = tempdir().unwrap();
         let mut settings = settings(tmp.path());
-        settings.actors_enabled = false;
+        settings.background.actors_enabled = false;
         let agent = Agent::from_settings(settings).unwrap();
 
         let turn = agent
-            .prepare_turn("Handle this directly", &AgentOptions::default())
+            .prepare_turn(&TurnRequest::new("Handle this directly"))
+            .await
             .unwrap();
 
         assert!(agent.actor_registry().is_none());

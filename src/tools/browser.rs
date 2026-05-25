@@ -217,6 +217,72 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
+use serde_json::Value;
+
+use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::args::{bool_arg, string_arg};
+use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_bool, p_str_req};
+
+fn exec_browser_open(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.browser.open(&string_arg(args, "url"))
+}
+
+fn exec_browser_snapshot(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry.browser.snapshot(
+        bool_arg(args, "interactive_only", true),
+        bool_arg(args, "compact", true),
+    )
+}
+
+fn exec_browser_click(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .browser
+        .click(&string_arg(args, "ref_or_selector"))
+}
+
+fn exec_browser_fill(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    registry
+        .browser
+        .fill(&string_arg(args, "ref_or_selector"), &string_arg(args, "text"))
+}
+
+pub const TOOL_DEFS: &[ToolDef] = &[
+    ToolDef {
+        name: "browser_open",
+        description: "Open a URL in the persistent browser.",
+        params: &[p_str_req("url", "URL.")],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_browser_open),
+    },
+    ToolDef {
+        name: "browser_snapshot",
+        description: "Accessibility snapshot of the page with element refs.",
+        params: &[
+            p_bool("interactive_only", "Only interactive elements."),
+            p_bool("compact", "Omit empty structural elements."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_browser_snapshot),
+    },
+    ToolDef {
+        name: "browser_click",
+        description: "Click an element by snapshot ref or selector.",
+        params: &[p_str_req("ref_or_selector", "Element ref (@e1) or selector.")],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_browser_click),
+    },
+    ToolDef {
+        name: "browser_fill",
+        description: "Fill a text input by snapshot ref or selector.",
+        params: &[
+            p_str_req("ref_or_selector", "Element ref (@e1) or selector."),
+            p_str_req("text", "Text."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_browser_fill),
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

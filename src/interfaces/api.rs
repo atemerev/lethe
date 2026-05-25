@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentOptions};
+use crate::agent::{Agent, TurnRequest};
 use crate::config::Settings;
 use crate::conversation::{ConversationManager, ProcessCallback, ProcessContext};
 use crate::llm::models::{available_providers, provider_for_model};
@@ -27,7 +27,7 @@ use crate::memory::message_metadata::{
 };
 use crate::scheduler::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig};
 use crate::scheduler::proactive::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
-use crate::todos::{TodoFilter, TodoManager};
+use crate::todos::TodoFilter;
 use crate::tools::registry::{ClientToolContext, ToolRuntime};
 
 const SESSION_QUEUE_DEPTH: usize = 32;
@@ -123,7 +123,7 @@ impl ApiState {
         let (proactive_tx, _) = broadcast::channel(PROACTIVE_QUEUE_DEPTH);
         Self {
             conversations: ConversationManager::new(Duration::from_secs_f64(
-                settings.debounce_seconds,
+                settings.background.debounce_seconds,
             )),
             settings,
             agent: Arc::new(agent),
@@ -264,17 +264,17 @@ pub fn router(state: ApiState) -> Router {
 }
 
 pub async fn serve(settings: Settings, port: u16) -> Result<()> {
-    if settings.lethe_api_token.trim().is_empty() {
+    if settings.api.token.trim().is_empty() {
         bail!("LETHE_API_TOKEN must be set in API mode");
     }
 
     let state = ApiState::from_settings(settings.clone())?;
     let app = router(state.clone());
-    let bind = format!("{}:{port}", settings.lethe_api_host);
+    let bind = format!("{}:{port}", settings.api.host);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("Lethe Rust API listening on http://{bind}");
 
-    let heartbeat_task = if settings.heartbeat_enabled {
+    let heartbeat_task = if settings.background.heartbeat_enabled {
         Some(tokio::spawn(api_heartbeat_loop(state.clone())))
     } else {
         None
@@ -394,7 +394,7 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
     };
     let response = state
         .agent
-        .chat_once_with_runtime(&context.message, &AgentOptions::default(), tool_runtime)
+        .chat_once(TurnRequest::new(&context.message).with_runtime(tool_runtime))
         .await;
 
     match response {
@@ -517,7 +517,7 @@ async fn model_get(State(state): State<ApiState>, headers: HeaderMap) -> Respons
     Json(json!({
         "model": config.model,
         "model_aux": config.aux_model,
-        "provider": model_provider(&config.model, &state.settings.llm_provider),
+        "provider": model_provider(&config.model, &state.settings.llm.llm_provider),
         "current_auth": "API",
         "available_providers": available_provider_ids(),
         "provider_info": available_providers(),
@@ -554,7 +554,7 @@ async fn model_post(
         "status": "updated",
         "model": config.model,
         "model_aux": config.aux_model,
-        "provider": model_provider(&config.model, &state.settings.llm_provider),
+        "provider": model_provider(&config.model, &state.settings.llm.llm_provider),
         "changed": changed,
     }))
     .into_response()
@@ -592,7 +592,7 @@ async fn serve_file(
     if let Some(response) = require_auth(&state, &headers) {
         return response;
     }
-    let Some(path) = resolve_workspace_path(&state.settings.workspace_dir, &query.path) else {
+    let Some(path) = resolve_workspace_path(&state.settings.paths.workspace_dir, &query.path) else {
         return json_error(StatusCode::FORBIDDEN, "path outside workspace");
     };
     if !path.is_file() {
@@ -612,7 +612,7 @@ async fn serve_file(
 }
 
 fn require_auth(state: &ApiState, headers: &HeaderMap) -> Option<Response> {
-    let expected = state.settings.lethe_api_token.trim();
+    let expected = state.settings.api.token.trim();
     let presented = presented_api_token(headers);
     if expected.is_empty() {
         return Some(json_error(
@@ -700,20 +700,16 @@ async fn process_api_heartbeat_once(
     heartbeat: &mut Heartbeat,
     limiter: &mut ProactiveRateLimiter,
 ) -> Result<()> {
-    let prompts = PromptStore::new(&state.settings.workspace_dir, &state.settings.config_dir);
+    let prompts = PromptStore::new(&state.settings.paths.workspace_dir, &state.settings.paths.config_dir);
     let reminders = active_reminders(&state.settings)?;
     let prompt = heartbeat.trigger(&prompts, &reminders);
     let response = state
         .agent
-        .chat_once_with_metadata(
-            &prompt.message,
-            message_metadata_value(
-                MessageVisibility::Internal,
-                MessageKind::Heartbeat,
-                "api_heartbeat",
-            ),
-            &AgentOptions::default(),
-        )
+        .chat_once(TurnRequest::new(&prompt.message).with_metadata(message_metadata_value(
+            MessageVisibility::Internal,
+            MessageKind::Heartbeat,
+            "api_heartbeat",
+        )))
         .await?;
     let _background = state
         .agent
@@ -731,8 +727,8 @@ async fn process_api_heartbeat_once(
 }
 
 fn active_reminders(settings: &Settings) -> Result<String> {
-    let manager = TodoManager::open(settings.db_path.clone())?;
-    let todos = manager.list(TodoFilter {
+    let memory = crate::store::MemoryStore::from_settings(settings)?;
+    let todos = memory.todos.list(TodoFilter {
         include_completed: false,
         limit: 20,
         ..Default::default()
@@ -759,47 +755,13 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::*;
-    use crate::config::RuntimeMode;
 
     fn test_settings(root: &std::path::Path) -> Settings {
-        Settings {
-            agent_name: "lethe".to_string(),
-            mode: RuntimeMode::Cli,
-            telegram_bot_token: String::new(),
-            telegram_allowed_user_ids: vec![],
-            telegram_transcription_enabled: true,
-            lethe_api_token: "secret".to_string(),
-            lethe_api_host: "127.0.0.1".to_string(),
-            lethe_api_port: 8080,
-            openrouter_api_key: String::new(),
-            openai_api_key: String::new(),
-            llm_model: "openai/gpt-5".to_string(),
-            llm_model_aux: "openai/gpt-5-mini".to_string(),
-            llm_provider: String::new(),
-            llm_api_base: String::new(),
-            llm_context_limit: 100_000,
-            lethe_home: root.to_path_buf(),
-            config_dir: root.join("config"),
-            workspace_dir: root.join("workspace"),
-            memory_dir: root.join("data").join("memory"),
-            db_path: root.join("data").join("lethe.db"),
-            credentials_dir: root.join("credentials"),
-            cache_dir: root.join("cache"),
-            logs_dir: root.join("logs"),
-            notes_dir: root.join("workspace").join("notes"),
-            transcription_provider: String::new(),
-            transcription_model: String::new(),
-            transcription_language: String::new(),
-            transcription_local_command: "whisper".to_string(),
-            actors_enabled: true,
-            hippocampus_enabled: true,
-            curator_enabled: true,
-            heartbeat_enabled: true,
-            heartbeat_interval_seconds: 3600,
-            debounce_seconds: 5.0,
-            proactive_max_per_day: 4,
-            proactive_cooldown_minutes: 60,
-        }
+        let mut settings = crate::config::test_settings(root);
+        settings.api.token = "secret".to_string();
+        settings.llm.llm_model = "openai/gpt-5".to_string();
+        settings.llm.llm_model_aux = "openai/gpt-5-mini".to_string();
+        settings
     }
 
     #[test]

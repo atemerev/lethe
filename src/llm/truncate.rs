@@ -189,6 +189,31 @@ pub fn truncate_line(line: &str, max_chars: usize) -> (String, bool) {
     (format!("{prefix}... [truncated]"), true)
 }
 
+/// UTF-8 safe truncation that breaks on the last whitespace within the budget
+/// and appends an ellipsis when the input is shortened. The returned string is
+/// at most `max_chars` characters long (including the ellipsis itself).
+pub fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    const ELLIPSIS: &str = "…";
+    if max_chars == 0 {
+        return String::new();
+    }
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+    let ellipsis_chars = ELLIPSIS.chars().count();
+    if max_chars <= ellipsis_chars {
+        return ELLIPSIS.chars().take(max_chars).collect();
+    }
+    let budget = max_chars - ellipsis_chars;
+    let prefix: String = value.chars().take(budget).collect();
+    let trimmed = match prefix.rfind(char::is_whitespace) {
+        Some(idx) if idx >= prefix.len() / 2 => prefix[..idx].trim_end().to_string(),
+        _ => prefix,
+    };
+    format!("{trimmed}{ELLIPSIS}")
+}
+
 pub fn format_truncation_notice(
     result: &TruncationResult,
     start_line: usize,

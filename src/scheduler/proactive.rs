@@ -25,8 +25,8 @@ impl ProactiveRateLimiter {
 
     pub fn from_settings(settings: &Settings) -> Self {
         Self::new(
-            settings.proactive_max_per_day,
-            u64::from(settings.proactive_cooldown_minutes) * 60,
+            settings.background.proactive_max_per_day,
+            u64::from(settings.background.proactive_cooldown_minutes) * 60,
         )
     }
 
