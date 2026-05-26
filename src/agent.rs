@@ -384,7 +384,7 @@ impl Agent {
             .queue_background_heartbeat(heartbeat_message, reminders)
             .await?;
         if let Some(registry) = self.actor_registry.clone() {
-            result.notifications = {
+            let candidates = {
                 let events = registry
                     .user_notification_events(50)
                     .await
@@ -399,8 +399,62 @@ impl Agent {
                 })?;
                 collect_user_notifications_from_events(events, &mut gate, &mut processed)
             };
+            // Run the aux-LLM content gate. This catches leaks the heuristic
+            // gate misses — internal reflection, meta commentary about DMN/
+            // cortex, redundant pings — and rewrites borderline content. On
+            // failure the gate drops the candidate (fail-closed).
+            result.notifications = if candidates.is_empty() {
+                Vec::new()
+            } else {
+                let recent_context = self.recent_user_context_for_review(5);
+                let router = self
+                    .router
+                    .read()
+                    .map_err(|error| {
+                        AgentError::Llm(anyhow!("router lock poisoned: {error}"))
+                    })?
+                    .clone();
+                crate::actor::background::review_notifications_with_llm(
+                    candidates,
+                    &recent_context,
+                    &self.prompts,
+                    &router,
+                )
+                .await
+            };
         }
         Ok(result)
+    }
+
+    /// Compact recent user-side context for the notification review gate so
+    /// it can spot redundant pings (e.g. "I already asked them this 10 min
+    /// ago and they haven't replied"). Cheap — just last N user messages.
+    fn recent_user_context_for_review(&self, count: usize) -> String {
+        let Ok(recent) = self.memory.messages.get_recent(count.saturating_mul(2)) else {
+            return String::new();
+        };
+        let mut lines = Vec::new();
+        for message in recent.iter().rev() {
+            if !message.role.is_user() && !message.role.is_assistant() {
+                continue;
+            }
+            let role = if message.role.is_user() { "user" } else { "assistant" };
+            let content = message.content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let snippet = if content.chars().count() > 400 {
+                content.chars().take(400).collect::<String>() + "…"
+            } else {
+                content.to_string()
+            };
+            lines.push(format!("[{role}] {snippet}"));
+            if lines.len() >= count {
+                break;
+            }
+        }
+        lines.reverse();
+        lines.join("\n")
     }
 
     pub async fn process_background_heartbeat_quiet(

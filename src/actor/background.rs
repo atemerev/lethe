@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use kameo::message::{Context, Message};
 use serde::{Deserialize, Serialize};
@@ -165,6 +165,104 @@ fn format_dmn_heartbeat_message(heartbeat_message: &str, reminders: &str) -> Str
         ));
     }
     parts.join("\n\n")
+}
+
+/// Aux-LLM content gate that catches the class of leaks the heuristic gate
+/// can't: internal reflection, meta commentary about DMN/cortex, redundant
+/// pings the model already made. Renders `notification_review.md`, parses
+/// the `{send, text}` decision, and either drops or rewrites the candidate.
+/// Failures are treated as "drop" so a broken LLM call never leaks raw
+/// reflection content to the user.
+pub async fn review_notifications_with_llm(
+    candidates: Vec<BackgroundNotification>,
+    recent_context: &str,
+    prompts: &crate::llm::prompts::PromptStore,
+    router: &crate::llm::client::LlmRouter,
+) -> Vec<BackgroundNotification> {
+    let mut kept = Vec::new();
+    for mut candidate in candidates {
+        match review_one(&candidate, recent_context, prompts, router).await {
+            ReviewOutcome::Send(text) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    candidate.signal.content = trimmed.to_string();
+                }
+                kept.push(candidate);
+            }
+            ReviewOutcome::Drop(reason) => {
+                tracing::info!(
+                    actor = %candidate.signal.source_name,
+                    event = %candidate.signal.event_id,
+                    "notification dropped by review gate: {reason}"
+                );
+            }
+        }
+    }
+    kept
+}
+
+enum ReviewOutcome {
+    Send(String),
+    Drop(String),
+}
+
+async fn review_one(
+    candidate: &BackgroundNotification,
+    recent_context: &str,
+    prompts: &crate::llm::prompts::PromptStore,
+    router: &crate::llm::client::LlmRouter,
+) -> ReviewOutcome {
+    let mut variables = HashMap::new();
+    variables.insert("signal".to_string(), candidate.signal.content.clone());
+    variables.insert(
+        "context".to_string(),
+        if recent_context.trim().is_empty() {
+            "(no recent context)".to_string()
+        } else {
+            recent_context.to_string()
+        },
+    );
+    let prompt = prompts
+        .render(
+            "notification_review",
+            &variables,
+            "Review the SIGNAL. Reply JSON only: {\"send\":bool,\"text\":string}.\n\nSIGNAL:\n{signal}\n\nRECENT CONTEXT:\n{context}",
+        )
+        .text;
+    let messages = vec![crate::llm::client::LlmMessage::user(prompt)];
+    let raw = match router.complete(messages, true).await {
+        Ok(text) => text,
+        Err(error) => {
+            return ReviewOutcome::Drop(format!("llm review failed: {error}"));
+        }
+    };
+    parse_review(&raw)
+}
+
+fn parse_review(raw: &str) -> ReviewOutcome {
+    let trimmed = raw.trim();
+    let json_str = match (trimmed.find('{'), trimmed.rfind('}')) {
+        (Some(start), Some(end)) if end >= start => &trimmed[start..=end],
+        _ => return ReviewOutcome::Drop(format!("non-JSON review response: {trimmed}")),
+    };
+    let value: Value = match serde_json::from_str(json_str) {
+        Ok(value) => value,
+        Err(error) => return ReviewOutcome::Drop(format!("review JSON parse error: {error}")),
+    };
+    let send = value.get("send").and_then(Value::as_bool).unwrap_or(false);
+    if !send {
+        return ReviewOutcome::Drop("review gate said send=false".to_string());
+    }
+    let text = value
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return ReviewOutcome::Drop("review gate returned empty text".to_string());
+    }
+    ReviewOutcome::Send(text)
 }
 
 pub fn collect_user_notifications_from_events(
