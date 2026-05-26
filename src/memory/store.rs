@@ -236,6 +236,72 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
+    /// Mark a memory row (archival or note) as completed. Accepts a row id or a
+    /// note file path. Returns the resolved id on success, or None if nothing
+    /// matched.
+    pub fn complete_memory(&self, identifier: &str) -> MemoryStoreResult<Option<String>> {
+        self.set_memory_completion(identifier, Some(Utc::now().to_rfc3339()))
+    }
+
+    /// Clear the completed_at flag on a memory row. Inverse of `complete_memory`.
+    pub fn reopen_memory(&self, identifier: &str) -> MemoryStoreResult<Option<String>> {
+        self.set_memory_completion(identifier, None)
+    }
+
+    /// Write or clear the curator-generated one-line summary for a completed
+    /// memory. Returns the resolved id when a row matched.
+    pub fn set_completion_summary(
+        &self,
+        identifier: &str,
+        summary: &str,
+    ) -> MemoryStoreResult<Option<String>> {
+        let identifier = identifier.trim();
+        if identifier.is_empty() {
+            return Ok(None);
+        }
+        let value = if summary.trim().is_empty() {
+            None
+        } else {
+            Some(summary.trim())
+        };
+        if self
+            .archival
+            .set_completion_summary(identifier, value)?
+        {
+            return Ok(Some(identifier.to_string()));
+        }
+        if let Some(row) = self.notes.find_row_by_path(Path::new(identifier))? {
+            self.archival.set_completion_summary(&row.id, value)?;
+            return Ok(Some(row.id));
+        }
+        Ok(None)
+    }
+
+    fn set_memory_completion(
+        &self,
+        identifier: &str,
+        value: Option<String>,
+    ) -> MemoryStoreResult<Option<String>> {
+        let identifier = identifier.trim();
+        if identifier.is_empty() {
+            return Ok(None);
+        }
+        // Try as a row id first — archival uses `mem-...` ids, notes also have
+        // ids in the DB.
+        if self
+            .archival
+            .set_completed_at(identifier, value.as_deref())?
+        {
+            return Ok(Some(identifier.to_string()));
+        }
+        // Fall back to resolving as a note file path.
+        if let Some(row) = self.notes.find_row_by_path(Path::new(identifier))? {
+            self.archival.set_completed_at(&row.id, value.as_deref())?;
+            return Ok(Some(row.id));
+        }
+        Ok(None)
+    }
+
     fn format_memory_metadata(&self, blocks: &[MemoryBlock]) -> MemoryStoreResult<String> {
         let now = Utc::now();
         let last_modified = blocks

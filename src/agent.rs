@@ -348,7 +348,9 @@ impl Agent {
             }
         }
         if self.settings.background.curator_enabled {
-            let _ = self.run_curator_once(false);
+            if let Err(error) = self.run_curator_pass(false).await {
+                tracing::warn!(error = %error, "curator pass failed");
+            }
         }
         Ok(response)
     }
@@ -361,9 +363,16 @@ impl Agent {
         self.principal_actor_id.as_deref()
     }
 
-    pub fn run_curator_once(&self, force: bool) -> AgentResult<CuratorRunStats> {
+    pub async fn run_curator_pass(&self, force: bool) -> AgentResult<CuratorRunStats> {
         let curator = MemoryCurator::new(self.settings.paths.memory_dir.join("curator_state.json"));
-        Ok(curator.run(self.memory.as_ref(), force)?)
+        let router = self
+            .router
+            .read()
+            .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
+            .clone();
+        Ok(curator
+            .run_pass(self.memory.as_ref(), &router, force)
+            .await?)
     }
 
     pub async fn process_background_heartbeat(
@@ -420,7 +429,7 @@ impl Agent {
         }
 
         if self.settings.background.curator_enabled {
-            result.curator = Some(self.run_curator_once(false)?);
+            result.curator = Some(self.run_curator_pass(false).await?);
         }
         Ok(result)
     }

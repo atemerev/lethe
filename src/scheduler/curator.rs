@@ -7,10 +7,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::llm::client::{LlmMessage, LlmRouter};
 use crate::memory::archival::ArchivalError;
 use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, StoredMessage};
 use crate::memory::{MemoryStore, MemoryStoreError};
+
+const COMPLETION_SUMMARY_PROMPT: &str =
+    include_str!("../../config/prompts/curator_summarize_completed.md");
+const COMPLETION_SUMMARY_BATCH: usize = 20;
+const COMPLETION_SUMMARY_MAX_CHARS: usize = 200;
 
 pub const CURATOR_CADENCE_SECONDS: i64 = 6 * 60 * 60;
 const HARVEST_RECENT_LIMIT: usize = 200;
@@ -47,6 +53,7 @@ pub struct CuratorRunStats {
     pub skipped: bool,
     pub harvested: usize,
     pub deleted: usize,
+    pub summarized: usize,
     pub total_runs: usize,
 }
 
@@ -101,8 +108,69 @@ impl MemoryCurator {
             skipped: false,
             harvested,
             deleted,
+            summarized: 0,
             total_runs: state.total_runs,
         })
+    }
+
+    /// Full pass: sync harvest + dedupe (cadence-gated), then summarise any
+    /// completed archival entries that don't yet have a one-line summary.
+    /// Summarisation runs even when the main pass is skipped — it's cheap
+    /// when nothing's pending and decouples from the 6h harvest cadence.
+    pub async fn run_pass(
+        &self,
+        store: &MemoryStore,
+        router: &LlmRouter,
+        force: bool,
+    ) -> CuratorResult<CuratorRunStats> {
+        let mut stats = self.run(store, force)?;
+        stats.summarized = self.summarize_completed_entries(store, router).await?;
+        Ok(stats)
+    }
+
+    /// Summarise archival entries that have been marked done but don't yet
+    /// have a one-line summary. Uses the aux LLM and writes results back.
+    /// Returns the number of entries successfully summarised. Safe to call
+    /// alongside `run`; it has no shared state with harvest/dedupe.
+    pub async fn summarize_completed_entries(
+        &self,
+        store: &MemoryStore,
+        router: &LlmRouter,
+    ) -> CuratorResult<usize> {
+        let pending = store
+            .archival
+            .list_completed_without_summary(COMPLETION_SUMMARY_BATCH)?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let mut done = 0;
+        for entry in pending {
+            let prompt = COMPLETION_SUMMARY_PROMPT.replace("{text}", entry.text.trim());
+            let messages = vec![LlmMessage::user(prompt)];
+            match router.complete(messages, true).await {
+                Ok(raw) => {
+                    let summary = sanitize_summary(&raw);
+                    if summary.is_empty() {
+                        tracing::warn!(
+                            id = %entry.id,
+                            "curator summariser returned empty text; leaving entry for next pass"
+                        );
+                        continue;
+                    }
+                    store
+                        .archival
+                        .set_completion_summary(&entry.id, Some(&summary))?;
+                    done += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        id = %entry.id,
+                        "curator summariser failed: {error}"
+                    );
+                }
+            }
+        }
+        Ok(done)
     }
 
     fn harvest_recent_messages(
@@ -179,6 +247,27 @@ impl MemoryCurator {
         }
         fs::write(&self.state_path, serde_json::to_string_pretty(state)?)?;
         Ok(())
+    }
+}
+
+fn sanitize_summary(raw: &str) -> String {
+    let mut text = raw.trim();
+    // Strip a single leading "Summary:" / "summary:" if the model ignored the
+    // prompt's "no preamble" rule.
+    for prefix in ["Summary:", "summary:", "SUMMARY:"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim_start();
+            break;
+        }
+    }
+    let collapsed = text.lines().next().unwrap_or("").trim();
+    if collapsed.chars().count() > COMPLETION_SUMMARY_MAX_CHARS {
+        collapsed
+            .chars()
+            .take(COMPLETION_SUMMARY_MAX_CHARS)
+            .collect::<String>()
+    } else {
+        collapsed.to_string()
     }
 }
 

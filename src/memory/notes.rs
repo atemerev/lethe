@@ -57,6 +57,14 @@ pub struct NoteSearchResult {
     pub preview: String,
     pub score: f64,
     pub created: String,
+    pub completed_at: Option<String>,
+    pub completion_summary: Option<String>,
+}
+
+impl NoteSearchResult {
+    pub fn is_completed(&self) -> bool {
+        self.completed_at.is_some()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +205,8 @@ impl NoteStore {
                 preview: preview(&body),
                 score,
                 created: meta.created,
+                completed_at: None,
+                completion_summary: None,
             });
         }
 
@@ -211,8 +221,29 @@ impl NoteStore {
                     .find(|existing| existing.file_path == result.file_path)
                 {
                     existing.score += result.score;
+                    if existing.completed_at.is_none() {
+                        existing.completed_at = result.completed_at;
+                    }
                 } else {
                     results.push(result);
+                }
+            }
+        }
+
+        if let Some(db) = self.db.as_ref() {
+            for result in results.iter_mut() {
+                if result.completed_at.is_some() && result.completion_summary.is_some() {
+                    continue;
+                }
+                if let Some(path_str) = result.file_path.to_str()
+                    && let Ok(Some(row)) = db.get_by_file_path(path_str)
+                {
+                    if result.completed_at.is_none() {
+                        result.completed_at = row.completed_at;
+                    }
+                    if result.completion_summary.is_none() {
+                        result.completion_summary = row.completion_summary;
+                    }
                 }
             }
         }
@@ -220,6 +251,18 @@ impl NoteStore {
         results.sort_by(compare_search_results);
         results.truncate(if limit == 0 { 5 } else { limit });
         Ok(results)
+    }
+
+    /// Resolve a note's stored row by its on-disk path. Returns None if there
+    /// is no DB attached or the path isn't indexed yet.
+    pub fn find_row_by_path(&self, path: &Path) -> NoteResult<Option<MemoryRow>> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(None);
+        };
+        let Some(path_str) = path.to_str() else {
+            return Ok(None);
+        };
+        Ok(db.get_by_file_path(path_str)?)
     }
 
     pub fn all_tags(&self) -> NoteResult<Vec<String>> {
@@ -361,6 +404,8 @@ impl NoteStore {
                 preview: preview_text,
                 score: entry.score,
                 created: row.created_at,
+                completed_at: row.completed_at,
+                completion_summary: row.completion_summary,
             });
         }
         Ok(Some(notes))

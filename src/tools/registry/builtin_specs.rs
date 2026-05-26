@@ -104,6 +104,32 @@ fn exec_archival_insert(registry: &ToolRegistry<'_>, args: &Value) -> String {
     }
 }
 
+fn exec_memory_complete(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    let target = string_arg(args, "target");
+    if target.trim().is_empty() {
+        return "Error: target is required (memory id or note file path).".to_string();
+    }
+    match registry.memory.complete_memory(&target) {
+        Ok(Some(id)) => format!(
+            "Marked {id} as done. It stays searchable but appears compressed in recall."
+        ),
+        Ok(None) => format!("No memory found for target: {target}"),
+        Err(error) => format!("Error: {error}"),
+    }
+}
+
+fn exec_memory_reopen(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    let target = string_arg(args, "target");
+    if target.trim().is_empty() {
+        return "Error: target is required (memory id or note file path).".to_string();
+    }
+    match registry.memory.reopen_memory(&target) {
+        Ok(Some(id)) => format!("Reopened {id}. It will surface in recall again."),
+        Ok(None) => format!("No memory found for target: {target}"),
+        Err(error) => format!("Error: {error}"),
+    }
+}
+
 fn exec_conversation_search(registry: &ToolRegistry<'_>, args: &Value) -> String {
     use crate::memory::messages::MessageRole;
     let role_filter = nonempty_string(args, "role").map(|value| MessageRole::parse(&value));
@@ -335,6 +361,20 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         params: &[p_str_req("memory_id", "Memory id.")],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_archival_get),
+    },
+    ToolDef {
+        name: "memory_complete",
+        description: "Mark an archival entry or note as done. It stays searchable but is rendered as a one-line marker in recall (full text via archival_get / note_search). Use when a thread is resolved.",
+        params: &[p_str_req("target", "Memory id (mem-...) or note file path.")],
+        category: ToolCategory::CortexOnly,
+        execute: ToolExecutor::Sync(exec_memory_complete),
+    },
+    ToolDef {
+        name: "memory_reopen",
+        description: "Clear the done flag on an archival entry or note (inverse of memory_complete).",
+        params: &[p_str_req("target", "Memory id (mem-...) or note file path.")],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_memory_reopen),
     },
     ToolDef {
         name: "conversation_search",

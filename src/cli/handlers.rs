@@ -518,7 +518,7 @@ pub(crate) fn messages_command(command: MessageCommand) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn memory_command(command: MemoryCommand) -> Result<()> {
+pub(crate) async fn memory_command(command: MemoryCommand) -> Result<()> {
     let settings = Settings::from_env();
     let store = MemoryStore::from_settings(&settings)?;
     match command {
@@ -557,7 +557,9 @@ pub(crate) fn memory_command(command: MemoryCommand) -> Result<()> {
         }
         MemoryCommand::Curate { force } => {
             let curator = MemoryCurator::new(settings.paths.memory_dir.join("curator_state.json"));
-            let stats = curator.run(&store, force)?;
+            let router =
+                lethe::llm::client::LlmRouter::new(lethe::llm::client::LlmRouterConfig::from_settings(&settings));
+            let stats = curator.run_pass(&store, &router, force).await?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
         MemoryCommand::BlockList { include_hidden } => {

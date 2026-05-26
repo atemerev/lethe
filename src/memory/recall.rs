@@ -207,31 +207,63 @@ impl Hippocampus {
                 if total_lines >= max_lines {
                     break;
                 }
-                let mut full_content = std::fs::read_to_string(&note.file_path)
-                    .ok()
-                    .map(|raw| parse_frontmatter(&raw).1)
-                    .filter(|body| !body.trim().is_empty())
-                    .unwrap_or_else(|| note.preview.clone());
-                if full_content.chars().count() > 2_000 {
-                    full_content = format!(
-                        "{}\n[...truncated, see full note]",
-                        truncate_with_ellipsis(&full_content, 2_000)
-                    );
-                }
-
                 let created = if note.created.is_empty() {
                     String::from("unknown-time")
                 } else {
                     format_created_at(&note.created)
                 };
-                let entry = format!(
-                    "- **{}** [{}] (created {}):\n{}\n  File: {}",
-                    note.title,
-                    note.tags.join(", "),
-                    created,
-                    full_content,
-                    note.file_path.display()
-                );
+
+                let entry = if let Some(completed_at) = note.completed_at.as_deref() {
+                    if let Some(summary) = note.completion_summary.as_deref() {
+                        format!(
+                            "- **{}** [DONE {}]: {}  File: {}",
+                            note.title,
+                            format_created_at(completed_at),
+                            summary.trim(),
+                            note.file_path.display(),
+                        )
+                    } else {
+                        let mut full_content = std::fs::read_to_string(&note.file_path)
+                            .ok()
+                            .map(|raw| parse_frontmatter(&raw).1)
+                            .filter(|body| !body.trim().is_empty())
+                            .unwrap_or_else(|| note.preview.clone());
+                        if full_content.chars().count() > 2_000 {
+                            full_content = format!(
+                                "{}\n[...truncated, see full note]",
+                                truncate_with_ellipsis(&full_content, 2_000)
+                            );
+                        }
+                        format!(
+                            "- **{}** [DONE {}] [{}] (awaiting curator summary):\n{}\n  File: {}",
+                            note.title,
+                            format_created_at(completed_at),
+                            note.tags.join(", "),
+                            full_content,
+                            note.file_path.display(),
+                        )
+                    }
+                } else {
+                    let mut full_content = std::fs::read_to_string(&note.file_path)
+                        .ok()
+                        .map(|raw| parse_frontmatter(&raw).1)
+                        .filter(|body| !body.trim().is_empty())
+                        .unwrap_or_else(|| note.preview.clone());
+                    if full_content.chars().count() > 2_000 {
+                        full_content = format!(
+                            "{}\n[...truncated, see full note]",
+                            truncate_with_ellipsis(&full_content, 2_000)
+                        );
+                    }
+                    format!(
+                        "- **{}** [{}] (created {}):\n{}\n  File: {}",
+                        note.title,
+                        note.tags.join(", "),
+                        created,
+                        full_content,
+                        note.file_path.display()
+                    )
+                };
                 total_lines += entry.lines().count();
                 note_lines.push(entry);
             }
@@ -257,13 +289,37 @@ impl Hippocampus {
                 if total_lines >= max_lines {
                     break;
                 }
-                let text = trim_entry(&entry.text, 50);
-                let line = format!(
-                    "- [{}] id={} {}",
-                    format_created_at(&entry.created_at),
-                    entry.id,
-                    text
-                );
+                let line = if let Some(completed_at) = entry.completed_at.as_deref() {
+                    if let Some(summary) = entry.completion_summary.as_deref() {
+                        format!(
+                            "- [{}] id={} [DONE {}]: {}",
+                            format_created_at(&entry.created_at),
+                            entry.id,
+                            format_created_at(completed_at),
+                            summary.trim(),
+                        )
+                    } else {
+                        // Awaiting curator summary — show the full text (no
+                        // mid-sentence truncation) plus the DONE marker so the
+                        // model knows the thread is resolved.
+                        let text = trim_entry(&entry.text, 50);
+                        format!(
+                            "- [{}] id={} [DONE {}] (awaiting curator summary):\n{}",
+                            format_created_at(&entry.created_at),
+                            entry.id,
+                            format_created_at(completed_at),
+                            text,
+                        )
+                    }
+                } else {
+                    let text = trim_entry(&entry.text, 50);
+                    format!(
+                        "- [{}] id={} {}",
+                        format_created_at(&entry.created_at),
+                        entry.id,
+                        text
+                    )
+                };
                 total_lines += line.lines().count();
                 archival_lines.push(line);
             }
@@ -547,6 +603,48 @@ mod tests {
         assert!(query.contains("previous question"));
         assert!(query.contains("follow up"));
         assert!(!query.contains("answer"));
+    }
+
+    #[test]
+    fn completed_archival_without_summary_shows_full_text_with_done_marker() {
+        let (_tmp, store) = store();
+        let body = "Long resolved-and-shipped narrative about the thing.";
+        let id = store.archival.add(body, None, &[]).unwrap();
+        let resolved = store.complete_memory(&id).unwrap();
+        assert_eq!(resolved.as_deref(), Some(id.as_str()));
+
+        let hippo = Hippocampus::new(HippocampusConfig::default());
+        let recall = hippo
+            .recall(&store, "resolved shipped narrative", &[])
+            .unwrap()
+            .unwrap();
+
+        // Done marker present, full body still visible (curator hasn't run).
+        assert!(recall.contains("[DONE"));
+        assert!(recall.contains("awaiting curator summary"));
+        assert!(recall.contains(body));
+    }
+
+    #[test]
+    fn completed_archival_with_summary_renders_one_liner() {
+        let (_tmp, store) = store();
+        let body = "Long resolved-and-shipped narrative about the thing.".repeat(5);
+        let id = store.archival.add(&body, None, &[]).unwrap();
+        store.complete_memory(&id).unwrap();
+        store
+            .set_completion_summary(&id, "Shipped the thing; closed.")
+            .unwrap();
+
+        let hippo = Hippocampus::new(HippocampusConfig::default());
+        let recall = hippo
+            .recall(&store, "shipped narrative", &[])
+            .unwrap()
+            .unwrap();
+
+        assert!(recall.contains("[DONE"));
+        assert!(recall.contains("Shipped the thing; closed."));
+        // The summary replaces the body in compressed form.
+        assert!(!recall.contains(&body));
     }
 
     #[test]

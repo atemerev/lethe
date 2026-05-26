@@ -38,6 +38,8 @@ pub struct ArchivalEntry {
     pub metadata: Value,
     pub tags: Vec<String>,
     pub created_at: String,
+    pub completed_at: Option<String>,
+    pub completion_summary: Option<String>,
     pub score: f64,
 }
 
@@ -49,8 +51,14 @@ impl ArchivalEntry {
             metadata: row.metadata,
             tags: row.tags,
             created_at: row.created_at,
+            completed_at: row.completed_at,
+            completion_summary: row.completion_summary,
             score: 0.0,
         }
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.completed_at.is_some()
     }
 }
 
@@ -185,6 +193,35 @@ impl ArchivalMemory {
 
     pub fn update_tags(&self, memory_id: &str, tags: &[String]) -> ArchivalResult<bool> {
         Ok(self.db.update_tags(memory_id, tags)?)
+    }
+
+    /// Mark a memory row (archival or note — id is unique across kinds) as
+    /// completed. Pass `None` to reopen. Returns true when a row was updated.
+    pub fn set_completed_at(&self, memory_id: &str, value: Option<&str>) -> ArchivalResult<bool> {
+        Ok(self.db.set_completed_at(memory_id, value)?)
+    }
+
+    /// Write or clear the curator-generated one-line summary for a completed
+    /// memory. Recall renders the summary instead of the full text when set.
+    pub fn set_completion_summary(
+        &self,
+        memory_id: &str,
+        value: Option<&str>,
+    ) -> ArchivalResult<bool> {
+        Ok(self.db.set_completion_summary(memory_id, value)?)
+    }
+
+    /// Archival entries marked done but not yet summarised, oldest first.
+    pub fn list_completed_without_summary(
+        &self,
+        limit: usize,
+    ) -> ArchivalResult<Vec<ArchivalEntry>> {
+        Ok(self
+            .db
+            .list_completed_without_summary(MemoryKind::Archival, limit)?
+            .into_iter()
+            .map(ArchivalEntry::from_row)
+            .collect())
     }
 
     pub fn count(&self) -> ArchivalResult<usize> {

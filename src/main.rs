@@ -491,7 +491,7 @@ async fn main() -> Result<()> {
         Command::Check => h::check().await,
         Command::Prompt { name } => h::print_prompt(&name),
         Command::InitMemory => h::init_memory(),
-        Command::Memory { command } => h::memory_command(command),
+        Command::Memory { command } => h::memory_command(command).await,
         Command::Fs { command } => h::fs_command(command),
         Command::Sh { command } => h::sh_command(command),
         Command::Web { command } => h::web_command(command),

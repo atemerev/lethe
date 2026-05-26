@@ -149,18 +149,21 @@ fn apply_schema(conn: &Connection, dim: usize) -> Result<()> {
     conn.execute_batch(&format!(
         "
         CREATE TABLE IF NOT EXISTS memory (
-            id          TEXT PRIMARY KEY,
-            kind        TEXT NOT NULL,
-            title       TEXT,
-            text        TEXT NOT NULL,
-            metadata    TEXT NOT NULL DEFAULT '{{}}',
-            tags        TEXT NOT NULL DEFAULT '[]',
-            file_path   TEXT UNIQUE,
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT
+            id                 TEXT PRIMARY KEY,
+            kind               TEXT NOT NULL,
+            title              TEXT,
+            text               TEXT NOT NULL,
+            metadata           TEXT NOT NULL DEFAULT '{{}}',
+            tags               TEXT NOT NULL DEFAULT '[]',
+            file_path          TEXT UNIQUE,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT,
+            completed_at       TEXT,
+            completion_summary TEXT
         );
-        CREATE INDEX IF NOT EXISTS memory_kind_idx       ON memory (kind);
-        CREATE INDEX IF NOT EXISTS memory_created_at_idx ON memory (created_at);
+        CREATE INDEX IF NOT EXISTS memory_kind_idx          ON memory (kind);
+        CREATE INDEX IF NOT EXISTS memory_created_at_idx    ON memory (created_at);
+        CREATE INDEX IF NOT EXISTS memory_completed_at_idx  ON memory (completed_at);
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
             id        TEXT PRIMARY KEY,
             embedding float[{dim}]
