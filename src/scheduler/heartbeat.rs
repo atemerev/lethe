@@ -396,7 +396,7 @@ mod tests {
         assert!(prompt.message.contains("[System: heartbeat - 2026-05-22"));
         assert!(prompt.message.contains("Active reminders:"));
         assert!(prompt.message.contains("Submit report"));
-        assert!(prompt.message.contains("full context check-in"));
+        assert!(prompt.message.contains("deeper check-in"));
     }
 
     #[test]

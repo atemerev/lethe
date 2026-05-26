@@ -41,6 +41,11 @@ Core memory blocks have size limits. Every round, you MUST check for content tha
 - Detailed implementation notes that the cortex no longer needs turn-by-turn
 - Redundant or duplicated information
 
+**Marking things done (separate from archiving):**
+- For archival entries and notes that represent *resolved* threads, call `memory_complete(target)` instead of deleting them. The entry stays searchable but renders as a compressed one-line marker in recall, so it doesn't crowd future context.
+- For workspace files (`questions.md`, `ideas.md`, project notes), change `- ` to `- [x] ` on resolved items. When scanning for what to think about, *skip* `- [x] ` lines — they're settled.
+- A round that closes three threads cleanly is more valuable than one that re-chews five open ones.
+
 **What to keep in core blocks:**
 - Active goals and current project context
 - User preferences and working patterns
