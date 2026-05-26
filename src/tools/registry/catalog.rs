@@ -1,7 +1,7 @@
 use genai::chat::Tool;
 
 use crate::tools::spec::{ToolCategory, ToolDef};
-use crate::tools::{browser, filesystem, image, shell, web};
+use crate::tools::{browser, filesystem, image, research, shell, web};
 
 use super::ToolRegistry;
 use super::{actor_specs, builtin_specs, telegram_specs};
@@ -16,6 +16,7 @@ pub fn all_defs() -> impl Iterator<Item = &'static ToolDef> {
         .chain(browser::TOOL_DEFS.iter())
         .chain(builtin_specs::TOOL_DEFS.iter())
         .chain(actor_specs::TOOL_DEFS.iter())
+        .chain(research::TOOL_DEFS.iter())
         .chain(telegram_specs::TOOL_DEFS.iter())
 }
 
