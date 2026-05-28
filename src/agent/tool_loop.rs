@@ -259,7 +259,16 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             .read()
             .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
             .clone();
-        let response = router.exec_chat_request(request.clone(), use_aux).await?;
+        let observer_for_stream = registry.turn_observer().cloned();
+        let response = match observer_for_stream {
+            Some(observer) => {
+                let on_delta = move |chunk: &str| observer.on_assistant_delta(chunk);
+                router
+                    .exec_chat_request_stream(request.clone(), use_aux, &on_delta)
+                    .await?
+            }
+            None => router.exec_chat_request(request.clone(), use_aux).await?,
+        };
         if let Some(prompt_tokens) = response.usage.prompt_tokens {
             context
                 .last_prompt_tokens
@@ -345,6 +354,16 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 "tool call started"
             );
 
+            let observer_for_tool = registry.turn_observer().cloned();
+            if let Some(observer) = observer_for_tool.as_ref() {
+                observer.on_tool_start(
+                    &tool_name,
+                    &call_id,
+                    &truncate_chars(&args_string, 200),
+                );
+            }
+            let tool_started_at = std::time::Instant::now();
+
             let signature = format!("{tool_name}:{args_string}");
             if signature == last_tool_signature {
                 repeated_tool_call_streak += 1;
@@ -384,6 +403,15 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             image_views.extend(views);
 
             let is_error = is_error_result(&result);
+            if let Some(observer) = observer_for_tool.as_ref() {
+                observer.on_tool_end(
+                    &tool_name,
+                    &call_id,
+                    !is_error,
+                    &truncate_chars(&result, 200),
+                    tool_started_at.elapsed().as_millis(),
+                );
+            }
             if is_error {
                 total_tool_errors += 1;
             } else {

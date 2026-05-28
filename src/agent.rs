@@ -193,6 +193,15 @@ impl Agent {
         self.memory.as_ref()
     }
 
+    /// Most recent prompt-token count seen by the tool loop. Drives the
+    /// TUI footer's context usage indicator. `None` before the first turn.
+    pub fn last_prompt_tokens(&self) -> Option<u64> {
+        match self.last_prompt_tokens.load(Ordering::Relaxed) {
+            0 => None,
+            value => Some(value),
+        }
+    }
+
     pub fn router_config(&self) -> AgentResult<LlmRouterConfig> {
         let router = self
             .router

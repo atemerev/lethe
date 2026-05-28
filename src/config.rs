@@ -184,7 +184,7 @@ impl Settings {
             api: ApiServerConfig {
                 token: env_string("LETHE_API_TOKEN", ""),
                 host: env_string("LETHE_API_HOST", "127.0.0.1"),
-                port: env_u16("LETHE_API_PORT", 8080),
+                port: env_u16("LETHE_API_PORT", 1373),
             },
             llm: LlmConfig {
                 openrouter_api_key: env_string("OPENROUTER_API_KEY", ""),
@@ -325,7 +325,7 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
         api: ApiServerConfig {
             token: String::new(),
             host: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 1373,
         },
         transcription: TranscriptionConfig {
             provider: String::new(),

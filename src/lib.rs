@@ -9,3 +9,4 @@ pub mod scheduler;
 pub mod sqlite_ext;
 pub mod todos;
 pub mod tools;
+pub mod tui;

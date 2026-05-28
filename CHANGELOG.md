@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.0 - TUI client, streaming, Brainstem
+
+- **Terminal UI** (`lethe tui`). New ratatui-based client that talks to a local `lethe api` over HTTP+SSE: transcript pane with inline tool cards, right sidebar with the actors tree and todos, streaming assistant text with a visible thinking spinner, `@`-prefix workspace path autocomplete, and slash commands (`/help`, `/clear`, `/cancel`, `/todos`, `/actors`, `/model`, `/quit`). See `src/tui/`.
+- **Real LLM streaming on subscription OAuth**. Anthropic OAuth (`call_messages_stream`) parses Messages SSE incrementally (`content_block_delta`/`text_delta` for text, `input_json_delta` for tool args). OpenAI OAuth (`call_messages_stream`) consumes the Codex Responses SSE stream incrementally via a new `OpenAiStreamState`. Both surface chunks via a new `TurnObserver::on_assistant_delta` hook that the API translates to `assistant.delta` SSE events. The genai-native path falls back to non-streaming with a single replay delta.
+- **Brainstem** (`scheduler::brainstem`). Heartbeats, proactive emissions, and any future internally-triggered urges live in a single Brainstem task. Transports (Telegram, HTTP/SSE) subscribe to its `BrainstemHandle` broadcast and forward emissions to their own clients. Removed the duplicate heartbeat loops from `cli/telegram_loop.rs` and `interfaces/api.rs`.
+- **Combined api+telegram in one process**. `lethe api` now spawns the Telegram poller in-process when `TELEGRAM_BOT_TOKEN` is set, sharing one Agent, one ActorRegistry, and one Brainstem. The standalone `lethe telegram run` and `lethe api` subcommands still work for single-transport deployments.
+- **New SSE events**: `tool.start`, `tool.end`, `actor.spawned`, `actor.state`, `actor.task`, `actor.message`, `assistant.delta`, `usage`, `turn.start`. Backward-compatible — `text`/`typing_start`/`typing_stop`/`reaction`/`done` unchanged.
+- **New readback endpoints**: `GET /actors` (live tree), `GET /todos` (filterable), `GET /session/history?limit=N`. The TUI uses these for initial paint and on event-driven refresh.
+- **Default API port is `1373`** (was `8080`). Override with `LETHE_API_PORT`.
+- **TUI submessage handling matches Telegram's**. Both clients split assistant output on pure `---`/`-----` lines outside fenced code blocks (`interfaces/telegram/formatting.rs::telegram_message_segments`), rendering each segment as its own bubble with latency jitter preserved. No more visible horizontal dividers in the transcript.
+
 ## 0.20.6 - Subscription OAuth + OpenRouter prompt-cache fix
 
 - **OpenAI ChatGPT Plus/Pro OAuth** (`lethe login openai`). Device-code flow against `auth.openai.com`; tokens persist to `~/.lethe/credentials/openai_oauth_tokens.json` with auto-refresh ≥60s before expiry. Calls route to the Codex Responses API at `chatgpt.com/backend-api/codex/responses` with full tool-call parity (function_call / function_call_output items) and an SSE response translator. Override the token file with `LETHE_OPENAI_OAUTH_TOKENS`; supply a raw token with `OPENAI_AUTH_TOKEN`.

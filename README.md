@@ -114,25 +114,39 @@ CLI check is the default when `LETHE_MODE` is unset:
 target/release/lethe check
 ```
 
-Telegram long polling:
+Recommended deployment: a single `lethe api` process hosts the HTTP/SSE
+transport **and** the Telegram poller (when `TELEGRAM_BOT_TOKEN` is set)
+in the same address space, sharing one Agent, one actor registry, and
+one Brainstem (the sole source of heartbeats / proactive emissions —
+transports just subscribe and forward).
 
 ```bash
-scripts/lethe-telegram-foreground
-# or, without loading the foreground environment wrapper:
-LETHE_MODE=telegram target/release/lethe
-# or
-target/release/lethe telegram run
+LETHE_API_TOKEN=change-me target/release/lethe api
+# or override the port:
+target/release/lethe api --port 1373
 ```
 
-HTTP API mode:
+API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default) on
+`LETHE_API_PORT` (`1373`). Use a reverse proxy for remote access.
+
+The standalone subcommands still work when you want a single transport:
 
 ```bash
-LETHE_MODE=api LETHE_API_TOKEN=change-me target/release/lethe
-# or
-target/release/lethe api --port 8080
+target/release/lethe telegram run    # Telegram poller only
+target/release/lethe tui              # connect a TUI to a running api
 ```
 
-API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default). Use a reverse proxy for remote access.
+### Terminal UI
+
+```bash
+target/release/lethe tui                                # local API
+target/release/lethe tui --url http://host:1373 --token $LETHE_API_TOKEN
+```
+
+Inline tool cards, an actors/todos sidebar, streaming assistant text
+(Anthropic + OpenAI OAuth providers), `@`-prefix workspace path
+autocomplete, and slash commands (`/help`, `/clear`, `/cancel`,
+`/todos`, `/actors`, `/model`, `/quit`).
 
 ## LLM Providers
 
@@ -183,7 +197,7 @@ Configuration is read from process environment, a local `.env`, and `$LETHE_HOME
 | `TELEGRAM_TRANSCRIPTION_ENABLED` | Transcribe Telegram audio/voice | `true` |
 | `LETHE_API_TOKEN` | Bearer or `x-lethe-token` auth for API mode | required for API |
 | `LETHE_API_HOST` | API bind address | `127.0.0.1` |
-| `LETHE_API_PORT` | API port | `8080` |
+| `LETHE_API_PORT` | API port | `1373` |
 | `LLM_PROVIDER` | Optional provider hint | auto |
 | `LLM_MODEL` | Main model | required for chat |
 | `LLM_MODEL_AUX` | Auxiliary model | main model |
@@ -275,11 +289,28 @@ All API routes require `Authorization: Bearer <LETHE_API_TOKEN>` or `x-lethe-tok
 |-------|--------|---------|
 | `/health` | `GET` | Readiness check. |
 | `/chat` | `POST` | Send a user message and receive SSE response events. |
-| `/events` | `GET` | Subscribe to proactive SSE events. |
+| `/events` | `GET` | Subscribe to brainstem + actor SSE events. |
 | `/cancel` | `POST` | Cancel active work for a chat. |
 | `/configure` | `POST` | Store user metadata in memory. |
 | `/model` | `GET`/`POST` | Inspect or update main/aux model ids. |
 | `/file?path=...` | `GET` | Serve a workspace file. |
+| `/actors` | `GET` | Snapshot of active and recently terminated actors. |
+| `/todos` | `GET` | List todos (filters: `status`, `priority`, `include_completed`, `limit`). |
+| `/session/history` | `GET` | Last N persisted messages (`limit`). |
+
+SSE event vocabulary on `/chat` and `/events`:
+
+| Event | Payload | Meaning |
+|-------|---------|---------|
+| `turn.start` | `{chat_id}` | A new agent turn has begun. |
+| `assistant.delta` | `{content}` | Streamed assistant token chunk (Anthropic + OpenAI OAuth). |
+| `text` | `{content, parse_mode, message_id}` | Complete (sub-)message; submessage boundaries follow the `---` rule from `interfaces/telegram/formatting.rs`. |
+| `tool.start` | `{call_id, name, args_preview}` | Tool execution started. |
+| `tool.end` | `{call_id, name, success, output_preview, duration_ms}` | Tool execution finished. |
+| `actor.spawned` / `actor.state` / `actor.task` / `actor.message` | `{actor_id, payload}` | Actor lifecycle events fanned out from `ActorEventBus`. |
+| `usage` | `{prompt_tokens}` | Updated context window usage. |
+| `typing_start` / `typing_stop` | `{}` | Compatibility hints for chat clients. |
+| `done` | `{}` | Turn complete; safe to close the stream. |
 
 ## Local llama.cpp Example
 

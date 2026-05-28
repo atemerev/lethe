@@ -30,11 +30,10 @@ use lethe::memory::MessageRole;
 use lethe::memory::message_metadata::{
     MessageKind, MessageVisibility, annotate_map, metadata_value as message_metadata_value,
 };
-use lethe::scheduler::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig};
-use lethe::scheduler::proactive::ProactiveRateLimiter;
+use lethe::scheduler::brainstem::{self, BrainstemEmission, BrainstemHandle};
 use lethe::tools::registry::ToolRuntime;
 
-use super::handlers::{active_reminders_text, empty_marker, prompt_store};
+use super::handlers::empty_marker;
 
 const TELEGRAM_TYPING_REFRESH_SECONDS: u64 = 3;
 const TELEGRAM_ACTOR_UPDATE_POLL_SECONDS: u64 = 1;
@@ -143,100 +142,126 @@ pub async fn telegram_command(command: TelegramCommand) -> Result<()> {
                      re-run, or run `lethe init` for guided Telegram setup."
                 );
             }
-            let client = TelegramClient::new(
-                settings.telegram.bot_token.clone(),
-                settings.telegram.allowed_user_ids.clone(),
-            )?;
-            let agent = Agent::from_settings(settings.clone())?;
+            let agent = Arc::new(Agent::from_settings(settings.clone())?);
             let options = AgentOptions {
                 use_hippocampus: !no_recall,
                 ..Default::default()
             };
-            let agent = Arc::new(agent);
-            let conversation_manager = ConversationManager::new(
-                std::time::Duration::from_secs_f64(settings.background.debounce_seconds.max(0.0)),
-            );
-            let process_callback = telegram_process_callback(
-                client.clone(),
+            // Standalone telegram runs its own Brainstem; combined api+telegram
+            // mode in handlers::api_command shares a single Brainstem instead.
+            let brainstem = BrainstemHandle::new();
+            let brainstem_task = tokio::spawn(brainstem::run(
                 agent.clone(),
                 settings.clone(),
                 options.clone(),
-            );
-            let mut offset = None;
-            let mut target_chat_id = settings.telegram.allowed_user_ids.first().copied();
-            let target_chat_id_state = Arc::new(AtomicI64::new(target_chat_id.unwrap_or(0)));
-            let actor_update_monitor = spawn_telegram_actor_update_monitor(
-                client.clone(),
-                agent.clone(),
-                settings.clone(),
-                options.clone(),
-                target_chat_id_state.clone(),
-            );
-            let mut heartbeat = Heartbeat::new(HeartbeatConfig::from_settings(&settings));
-            let mut proactive_limiter = ProactiveRateLimiter::from_settings(&settings);
-            let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(
-                heartbeat.config().interval_seconds.max(1),
+                brainstem.clone(),
             ));
-            heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        println!("telegram_runner_stopped: interrupt");
-                        break;
-                    }
-                    _ = heartbeat_interval.tick(), if heartbeat.config().enabled => {
-                        if let Some(chat_id) = target_chat_id
-                            && let Err(error) = process_heartbeat_once(
-                                &client,
-                                &agent,
-                                &settings,
-                                &mut heartbeat,
-                                &mut proactive_limiter,
-                                chat_id,
-                                &options,
-                            ).await {
-                                tracing::warn!(error = %error, "heartbeat failed");
-                                eprintln!("heartbeat_error: {error}");
-                            }
-                    }
-                    result = process_telegram_once(
-                        TelegramPollContext {
-                            client: &client,
-                            agent: &agent,
-                            settings: &settings,
-                            options: &options,
-                            conversation_manager: Some(&conversation_manager),
-                            process_callback: Some(process_callback.clone()),
-                        },
-                        offset,
-                        timeout,
-                    ) => {
-                        let (next_offset, processed, last_chat_id) = match result {
-                            Ok(value) => value,
-                            Err(error) => {
-                                tracing::error!(error = %error, "telegram polling failed");
-                                return Err(error);
-                            }
-                        };
-                        offset = next_offset;
-                        if let Some(chat_id) = last_chat_id {
-                            target_chat_id = Some(chat_id);
-                            target_chat_id_state.store(chat_id, Ordering::SeqCst);
-                            heartbeat.reset_idle_timer();
-                        }
-                        if processed > 0 {
-                            println!("processed_updates: {processed}");
-                        }
-                    }
-                }
-            }
-            if let Some(task) = actor_update_monitor {
-                task.abort();
-                let _ = task.await;
-            }
-            Ok(())
+            let result = run_telegram_with_agent(agent, settings, options, timeout, &brainstem).await;
+            brainstem_task.abort();
+            let _ = brainstem_task.await;
+            result
         }
     }
+}
+
+/// Runs the telegram polling + actor-update loop against a shared
+/// agent. Extracted from `TelegramCommand::Run` so the API server can
+/// spawn it as a background task in the same process. Brainstem
+/// emissions (heartbeat-driven proactive messages) arrive via the
+/// supplied handle's broadcast and are forwarded to the
+/// last-interacted Telegram chat.
+pub async fn run_telegram_with_agent(
+    agent: Arc<Agent>,
+    settings: Settings,
+    options: AgentOptions,
+    timeout: u64,
+    brainstem: &BrainstemHandle,
+) -> Result<()> {
+    let client = TelegramClient::new(
+        settings.telegram.bot_token.clone(),
+        settings.telegram.allowed_user_ids.clone(),
+    )?;
+    let conversation_manager = ConversationManager::new(
+        std::time::Duration::from_secs_f64(settings.background.debounce_seconds.max(0.0)),
+    );
+    let process_callback = telegram_process_callback(
+        client.clone(),
+        agent.clone(),
+        settings.clone(),
+        options.clone(),
+    );
+    let mut offset = None;
+    let mut target_chat_id = settings.telegram.allowed_user_ids.first().copied();
+    let target_chat_id_state = Arc::new(AtomicI64::new(target_chat_id.unwrap_or(0)));
+    let actor_update_monitor = spawn_telegram_actor_update_monitor(
+        client.clone(),
+        agent.clone(),
+        settings.clone(),
+        options.clone(),
+        target_chat_id_state.clone(),
+    );
+
+    let mut brainstem_rx = brainstem.subscribe();
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("telegram_runner_stopped: interrupt");
+                break;
+            }
+            emission = brainstem_rx.recv() => {
+                match emission {
+                    Ok(BrainstemEmission { message, .. }) => {
+                        if let Some(chat_id) = target_chat_id {
+                            if let Err(error) = send_telegram_messages_with_delays(
+                                &client,
+                                chat_id,
+                                split_telegram_messages(&message),
+                            ).await {
+                                tracing::warn!(error = %error, "brainstem emission to telegram failed");
+                            }
+                        } else {
+                            tracing::debug!("brainstem emission dropped: no target chat yet");
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            result = process_telegram_once(
+                TelegramPollContext {
+                    client: &client,
+                    agent: &agent,
+                    settings: &settings,
+                    options: &options,
+                    conversation_manager: Some(&conversation_manager),
+                    process_callback: Some(process_callback.clone()),
+                },
+                offset,
+                timeout,
+            ) => {
+                let (next_offset, processed, last_chat_id) = match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!(error = %error, "telegram polling failed");
+                        return Err(error);
+                    }
+                };
+                offset = next_offset;
+                if let Some(chat_id) = last_chat_id {
+                    target_chat_id = Some(chat_id);
+                    target_chat_id_state.store(chat_id, Ordering::SeqCst);
+                }
+                if processed > 0 {
+                    println!("processed_updates: {processed}");
+                }
+            }
+        }
+    }
+    if let Some(task) = actor_update_monitor {
+        task.abort();
+        let _ = task.await;
+    }
+    Ok(())
 }
 
 pub fn parse_telegram_runtime_command(text: &str) -> Option<TelegramRuntimeCommand> {
@@ -510,25 +535,33 @@ async fn handle_telegram_runtime_command(
             client.send_message(incoming.chat_id, message).await?;
         }
         TelegramRuntimeCommand::Heartbeat => {
+            // Manual trigger flows through Brainstem so it stays the
+            // sole owner of beats. The configured Brainstem subscriber
+            // (this same telegram loop) will receive any proactive
+            // emission and forward it to the user — no special path
+            // needed here beyond firing the tick.
             client
-                .send_message(incoming.chat_id, "Triggering heartbeat...")
+                .send_message(incoming.chat_id, "Triggering brainstem tick...")
                 .await?;
-            let mut heartbeat = Heartbeat::new(HeartbeatConfig::from_settings(settings));
-            let mut proactive_limiter = ProactiveRateLimiter::from_settings(settings);
-            if let Err(error) = process_heartbeat_once(
-                client,
-                agent,
-                settings,
-                &mut heartbeat,
-                &mut proactive_limiter,
-                incoming.chat_id,
-                options,
-            )
-            .await
-            {
-                client
-                    .send_message(incoming.chat_id, &format!("Heartbeat failed: {error}"))
+            match brainstem::trigger_once(agent, settings, options).await {
+                Ok(Some(message)) => {
+                    send_telegram_messages_with_delays(
+                        client,
+                        incoming.chat_id,
+                        split_telegram_messages(&message),
+                    )
                     .await?;
+                }
+                Ok(None) => {
+                    client
+                        .send_message(incoming.chat_id, "Brainstem: nothing to say.")
+                        .await?;
+                }
+                Err(error) => {
+                    client
+                        .send_message(incoming.chat_id, &format!("Heartbeat failed: {error}"))
+                        .await?;
+                }
             }
         }
         TelegramRuntimeCommand::Model(model) => {
@@ -1160,58 +1193,6 @@ fn telegram_inter_message_delay(chunk: &str) -> std::time::Duration {
     std::time::Duration::from_secs_f64(seconds)
 }
 
-async fn process_heartbeat_once(
-    client: &TelegramClient,
-    agent: &Agent,
-    settings: &Settings,
-    heartbeat: &mut Heartbeat,
-    proactive_limiter: &mut ProactiveRateLimiter,
-    chat_id: i64,
-    options: &AgentOptions,
-) -> Result<()> {
-    let prompts = prompt_store(settings);
-    let reminders = active_reminders_text(settings)?;
-    let prompt = heartbeat.trigger(&prompts, &reminders);
-    // Idle gate: no due reminders, not the first tick, and not a periodic
-    // deeper review — the model would respond "idle" anyway, so don't
-    // spend two LLM turns (cortex + DMN) to learn that. First-tick,
-    // full-context, and reminder-bearing ticks always proceed.
-    if !prompt.first_tick && !prompt.use_full_context && reminders.trim().is_empty() {
-        let outcome =
-            heartbeat.finish_response(r#"{"action":"idle","message":""}"#, None);
-        tracing::debug!(
-            count = heartbeat.heartbeat_count(),
-            idle_minutes = ?outcome.idle_minutes,
-            "heartbeat skipped: nothing to do"
-        );
-        return Ok(());
-    }
-    let req = TurnRequest::new(&prompt.message)
-        .with_metadata(message_metadata_value(
-            MessageVisibility::Internal,
-            MessageKind::Heartbeat,
-            "heartbeat",
-        ))
-        .with_options(options.clone());
-    let response = agent.chat_once(req).await?;
-    let outcome = heartbeat.finish_response(&response, None);
-    let _background = agent
-        .process_background_heartbeat_quiet(&prompt.message, &reminders)
-        .await?;
-    let mut messages = Vec::new();
-    if outcome.action == HeartbeatAction::Send {
-        messages.push(outcome.message);
-    }
-    for message in messages {
-        if !proactive_limiter.allowed() {
-            break;
-        }
-        send_telegram_messages_with_delays(client, chat_id, split_telegram_messages(&message))
-            .await?;
-        proactive_limiter.record();
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

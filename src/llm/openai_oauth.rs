@@ -20,6 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
     ChatOptions, ChatRequest, ChatResponse, ChatRole, ContentPart, MessageContent,
@@ -33,6 +35,8 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
+
+use crate::llm::client::DeltaCallback;
 
 // --- Endpoints / constants ---------------------------------------------------
 
@@ -150,6 +154,32 @@ impl OpenAiOAuthClient {
         Err(last_error
             .map(anyhow::Error::from)
             .unwrap_or_else(|| anyhow!("OpenAI OAuth call failed")))
+    }
+
+    /// Streaming variant: forwards `response.output_text.delta` chunks to
+    /// `on_delta` as they arrive. On pre-stream errors falls back to the
+    /// non-streaming retry path so the user still gets a complete response.
+    pub async fn exec_chat_request_stream(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+        on_delta: DeltaCallback<'_>,
+    ) -> Result<ChatResponse> {
+        match self
+            .call_messages_stream(model, request.clone(), options, on_delta)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(OpenAiOAuthError::RateLimited { .. } | OpenAiOAuthError::Transient { .. }) => {
+                let response = self.exec_chat_request(model, request, options).await?;
+                if let Some(text) = response.first_text() {
+                    on_delta(text);
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn call_messages_once(
@@ -276,6 +306,111 @@ impl OpenAiOAuthClient {
             parse_streamed_response(&text).map_err(OpenAiOAuthError::Other)?
         };
 
+        openai_response_to_chat_response(data, model).map_err(Into::into)
+    }
+
+    /// Stream-and-aggregate: same endpoint as `call_messages_once`, but we
+    /// consume the SSE incrementally. Text deltas land in `on_delta`
+    /// immediately; tool_call deltas and item metadata are aggregated so
+    /// the eventual `ChatResponse` matches what the non-streaming path
+    /// produces.
+    async fn call_messages_stream(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+        on_delta: DeltaCallback<'_>,
+    ) -> Result<ChatResponse, OpenAiOAuthError> {
+        self.ensure_access().await?;
+
+        let (access_token, account_id) = {
+            let tokens = self.tokens.lock().await;
+            let access = tokens
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow!("OpenAI OAuth access token is missing"))?;
+            (access, tokens.account_id.clone())
+        };
+        let body = openai_responses_body(model, request, options);
+        let mut headers = openai_oauth_headers(&access_token, account_id.as_deref());
+        headers.insert(
+            "accept",
+            HeaderValue::from_static("text/event-stream"),
+        );
+
+        let _permit = self
+            .request_gate
+            .acquire()
+            .await
+            .map_err(|error| anyhow!("OpenAI OAuth request gate closed: {error}"))?;
+        self.wait_for_rate_limit().await;
+
+        let response = self
+            .http
+            .post(OPENAI_RESPONSES_URL)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| OpenAiOAuthError::Transient {
+                message: format!("OpenAI OAuth stream request failed: {error}"),
+                retry_after: Duration::from_secs(5),
+            })?;
+
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = retry_after_from_headers(response.headers());
+            self.set_rate_limit(retry_after).await;
+            let text = response.text().await.unwrap_or_default();
+            return Err(OpenAiOAuthError::RateLimited {
+                message: format!("OpenAI OAuth stream rate limited (429) - {}", truncate_err(&text)),
+                retry_after,
+            });
+        }
+        if status.as_u16() == 529 || status.as_u16() == 503 {
+            let text = response.text().await.unwrap_or_default();
+            return Err(OpenAiOAuthError::Transient {
+                message: format!(
+                    "OpenAI OAuth overloaded ({}) - {}",
+                    status.as_u16(),
+                    truncate_err(&text)
+                ),
+                retry_after: Duration::from_secs(5),
+            });
+        }
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "OpenAI OAuth stream error: {} - {}",
+                status.as_u16(),
+                truncate_err(&text)
+            )
+            .into());
+        }
+
+        let mut state = OpenAiStreamState::new();
+        let mut events = response.bytes_stream().eventsource();
+        while let Some(event) = events.next().await {
+            let event = event.map_err(|error| OpenAiOAuthError::Transient {
+                message: format!("OpenAI OAuth stream decode failed: {error}"),
+                retry_after: Duration::from_secs(2),
+            })?;
+            if event.data.is_empty() {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<Value>(&event.data) else {
+                continue;
+            };
+            state.apply(&event.event, &payload, on_delta);
+            if state.done {
+                break;
+            }
+        }
+        let data = state
+            .finalize()
+            .ok_or_else(|| OpenAiOAuthError::Other(anyhow!(
+                "OpenAI OAuth stream ended before any response payload"
+            )))?;
         openai_response_to_chat_response(data, model).map_err(Into::into)
     }
 
@@ -632,6 +767,141 @@ fn iter_sse_events(raw: &str) -> Vec<(String, String)> {
         events.push((name, data_lines.join("\n")));
     }
     events
+}
+
+/// Streaming counterpart to `parse_streamed_response`. Holds the same
+/// aggregator state (latest_response/output_items/output_text_deltas) but
+/// is fed one SSE event at a time so text deltas can be forwarded to the
+/// TUI without waiting for the whole response.
+struct OpenAiStreamState {
+    latest_response: Option<Map<String, Value>>,
+    output_items: Vec<(String, Map<String, Value>)>,
+    output_text_deltas: Vec<String>,
+    done: bool,
+}
+
+impl OpenAiStreamState {
+    fn new() -> Self {
+        Self {
+            latest_response: None,
+            output_items: Vec::new(),
+            output_text_deltas: Vec::new(),
+            done: false,
+        }
+    }
+
+    fn apply(&mut self, event_name: &str, payload: &Value, on_delta: DeltaCallback<'_>) {
+        let Some(payload_obj) = payload.as_object() else {
+            return;
+        };
+
+        if let Some(response) = payload_obj.get("response").and_then(Value::as_object) {
+            let target = self.latest_response.get_or_insert_with(Map::new);
+            for (key, value) in response {
+                if key == "output" {
+                    if value.as_array().is_some_and(|arr| !arr.is_empty()) {
+                        target.insert(key.clone(), value.clone());
+                    } else if !target.contains_key("output") {
+                        target.insert(key.clone(), value.clone());
+                    }
+                } else if !value.is_null() {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        if let Some(item) = payload_obj.get("item") {
+            self.record_item(item);
+        }
+        if let Some(item) = payload_obj.get("output_item") {
+            self.record_item(item);
+        }
+
+        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        match payload_type {
+            "response.output_text.delta" | "response.refusal.delta" => {
+                if let Some(delta) = payload_obj.get("delta").and_then(Value::as_str)
+                    && !delta.is_empty()
+                {
+                    self.output_text_deltas.push(delta.to_string());
+                    on_delta(delta);
+                }
+            }
+            _ => {}
+        }
+
+        if event_name == "response.completed" || payload_type == "response.completed" {
+            self.done = true;
+        }
+    }
+
+    fn record_item(&mut self, item: &Value) {
+        let Some(obj) = item.as_object() else {
+            return;
+        };
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("call_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("item_{}", self.output_items.len()));
+        if let Some((_, existing)) = self.output_items.iter_mut().find(|(key, _)| key == &id) {
+            for (key, value) in obj {
+                if key == "content" {
+                    if value.as_array().is_some_and(|arr| !arr.is_empty()) {
+                        existing.insert(key.clone(), value.clone());
+                    }
+                    continue;
+                }
+                if !value.is_null() {
+                    existing.insert(key.clone(), value.clone());
+                }
+            }
+        } else {
+            self.output_items.push((id, obj.clone()));
+        }
+    }
+
+    fn finalize(mut self) -> Option<Value> {
+        if !self.output_items.is_empty() {
+            let assembled: Vec<Value> = self
+                .output_items
+                .drain(..)
+                .map(|(_, obj)| Value::Object(obj))
+                .collect();
+            let target = self.latest_response.get_or_insert_with(Map::new);
+            let needs_overwrite = target
+                .get("output")
+                .map(|value| value.as_array().is_none_or(|arr| arr.is_empty()))
+                .unwrap_or(true);
+            if needs_overwrite {
+                target.insert("output".to_string(), Value::Array(assembled));
+            }
+        }
+
+        if !self.output_text_deltas.is_empty() {
+            let target = self.latest_response.get_or_insert_with(Map::new);
+            let needs_overwrite = target
+                .get("output")
+                .map(|value| value.as_array().is_none_or(|arr| arr.is_empty()))
+                .unwrap_or(true);
+            if needs_overwrite {
+                target.insert(
+                    "output".to_string(),
+                    json!([
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": self.output_text_deltas.join("")}
+                            ]
+                        }
+                    ]),
+                );
+            }
+        }
+
+        self.latest_response.map(Value::Object)
+    }
 }
 
 fn parse_streamed_response(raw: &str) -> Result<Value> {

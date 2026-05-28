@@ -5,6 +5,7 @@ use std::time::Duration as StdDuration;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::message::{Context, Message};
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 use super::*;
 
@@ -216,6 +217,26 @@ impl ActorRuntime {
                 principal_id: principal_id.to_string(),
                 limit,
             })
+            .await
+            .map_err(actor_runtime_error)
+    }
+
+    /// Install a live broadcaster on the event bus and return a fresh
+    /// subscriber. Subsequent calls swap the broadcaster, but historical
+    /// receivers keep working until they're dropped.
+    pub async fn install_event_broadcaster(
+        &self,
+        capacity: usize,
+    ) -> ActorResult<broadcast::Receiver<ActorEvent>> {
+        self.supervisor
+            .ask(InstallEventBroadcaster { capacity })
+            .await
+            .map_err(actor_runtime_error)
+    }
+
+    pub async fn list_actors(&self) -> ActorResult<Vec<ActorInfo>> {
+        self.supervisor
+            .ask(ListAllActors)
             .await
             .map_err(actor_runtime_error)
     }
@@ -868,4 +889,38 @@ impl Message<PrincipalTaskUpdateEvents> for ActorSupervisor {
 
 fn actor_runtime_error<M>(error: kameo::error::SendError<M, ActorError>) -> ActorError {
     ActorError::Runtime(format!("{error:?}"))
+}
+
+#[derive(Debug)]
+struct InstallEventBroadcaster {
+    capacity: usize,
+}
+
+impl Message<InstallEventBroadcaster> for ActorSupervisor {
+    type Reply = ActorResult<broadcast::Receiver<ActorEvent>>;
+
+    async fn handle(
+        &mut self,
+        message: InstallEventBroadcaster,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let (tx, rx) = broadcast::channel(message.capacity.max(16));
+        self.registry.events.set_broadcaster(tx);
+        Ok(rx)
+    }
+}
+
+#[derive(Debug)]
+struct ListAllActors;
+
+impl Message<ListAllActors> for ActorSupervisor {
+    type Reply = ActorResult<Vec<ActorInfo>>;
+
+    async fn handle(
+        &mut self,
+        _message: ListAllActors,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.registry.all_actors())
+    }
 }

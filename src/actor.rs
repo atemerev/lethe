@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 pub mod background;
 mod helpers;
@@ -225,6 +226,11 @@ impl ActorEvent {
 pub struct ActorEventBus {
     max_events: usize,
     events: VecDeque<ActorEvent>,
+    /// Optional fan-out for live subscribers (e.g. the HTTP API streaming
+    /// actor lifecycle to a TUI). Attached via `set_broadcaster` after the
+    /// agent runtime is wired up. Bus stays usable when no broadcaster is
+    /// installed, which is the case in CLI subcommands and tests.
+    broadcaster: Option<broadcast::Sender<ActorEvent>>,
 }
 
 impl ActorEventBus {
@@ -232,10 +238,18 @@ impl ActorEventBus {
         Self {
             max_events: max_events.max(1),
             events: VecDeque::new(),
+            broadcaster: None,
         }
     }
 
+    pub fn set_broadcaster(&mut self, sender: broadcast::Sender<ActorEvent>) {
+        self.broadcaster = Some(sender);
+    }
+
     pub fn emit(&mut self, event: ActorEvent) {
+        if let Some(sender) = &self.broadcaster {
+            let _ = sender.send(event.clone());
+        }
         self.events.push_back(event);
         while self.events.len() > self.max_events {
             self.events.pop_front();

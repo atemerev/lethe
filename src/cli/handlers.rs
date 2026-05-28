@@ -43,7 +43,78 @@ pub(crate) async fn api_command(port: Option<u16>) -> Result<()> {
         anyhow::bail!(message);
     }
     let port = port.unwrap_or(settings.api.port);
-    lethe::interfaces::api::serve(settings, port).await
+
+    // One Agent shared by the HTTP API and (optionally) the Telegram
+    // poller. Sharing keeps memory + actor registry singular so both
+    // transports operate on the same conversation state.
+    let agent = std::sync::Arc::new(Agent::from_settings(settings.clone())?);
+
+    // Brainstem is the single source of periodic beats and proactive
+    // emissions. Both transports subscribe via its handle — no
+    // double-firing, no divergent rate-limiter state, no transport-level
+    // brain logic. See scheduler/brainstem.rs.
+    let brainstem = lethe::scheduler::brainstem::BrainstemHandle::new();
+    let brainstem_task = tokio::spawn(lethe::scheduler::brainstem::run(
+        agent.clone(),
+        settings.clone(),
+        AgentOptions::default(),
+        brainstem.clone(),
+    ));
+
+    let telegram_enabled = !settings.telegram.bot_token.trim().is_empty();
+    let telegram_task = if telegram_enabled {
+        let agent = agent.clone();
+        let settings = settings.clone();
+        let brainstem = brainstem.clone();
+        Some(tokio::spawn(async move {
+            let options = AgentOptions::default();
+            crate::cli::telegram_loop::run_telegram_with_agent(
+                agent, settings, options, 30, &brainstem,
+            )
+            .await
+        }))
+    } else {
+        None
+    };
+
+    let api_result = lethe::interfaces::api::serve_with_agent(
+        settings,
+        port,
+        Some(agent),
+        brainstem,
+    )
+    .await;
+
+    if let Some(task) = telegram_task {
+        task.abort();
+        let _ = task.await;
+    }
+    brainstem_task.abort();
+    let _ = brainstem_task.await;
+    api_result
+}
+
+pub(crate) async fn tui_command(url: Option<String>, token: Option<String>) -> Result<()> {
+    let settings = Settings::from_env();
+    let base_url = url.unwrap_or_else(|| {
+        format!("http://{}:{}", settings.api.host, settings.api.port)
+    });
+    let token = token
+        .or_else(|| {
+            let configured = settings.api.token.trim().to_string();
+            (!configured.is_empty()).then_some(configured)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "LETHE_API_TOKEN is required. Set it in ~/.lethe/config/.env or pass --token."
+            )
+        })?;
+    lethe::tui::run(lethe::tui::app::TuiOptions {
+        base_url,
+        token,
+        workspace: settings.paths.workspace_dir.clone(),
+    })
+    .await
 }
 
 pub(crate) fn prompt_store(settings: &Settings) -> PromptStore {

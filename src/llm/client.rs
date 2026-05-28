@@ -7,6 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::{
@@ -22,6 +24,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
+
+/// Callback for streamed assistant text. Invoked once per chunk in the
+/// order the provider emits them; chunks may be a single token or
+/// several. Implementations must be cheap and non-blocking.
+pub type DeltaCallback<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
 use crate::config::Settings;
 
@@ -269,6 +276,54 @@ impl LlmRouter {
         Ok(response.into_first_text().unwrap_or_default())
     }
 
+    /// Streaming variant of `exec_chat_request`. Calls `on_delta` for each
+    /// assistant text chunk as it arrives, then returns the complete
+    /// `ChatResponse` (with any tool calls) once the stream finishes.
+    ///
+    /// Streams on Anthropic OAuth (`content_block_delta`/`text_delta`) and
+    /// OpenAI OAuth (`response.output_text.delta`). The genai-native path
+    /// falls back to non-streaming with a single replay delta, so clients
+    /// still receive the text via the same channel.
+    pub async fn exec_chat_request_stream(
+        &self,
+        request: ChatRequest,
+        use_aux: bool,
+        on_delta: DeltaCallback<'_>,
+    ) -> Result<ChatResponse> {
+        let model = self.config.model_for(use_aux).trim();
+        if model.is_empty() {
+            bail!("LLM_MODEL is not set.");
+        }
+        let options = self.config.chat_options();
+        if let Some(oauth) = &self.openai_oauth
+            && should_use_openai_oauth(model, &self.config)
+        {
+            return oauth
+                .exec_chat_request_stream(model, request, &options, on_delta)
+                .await
+                .with_context(|| {
+                    format!("LLM streaming chat request failed for model {model}")
+                });
+        }
+        if let Some(oauth) = &self.anthropic_oauth
+            && should_use_anthropic_oauth(model, &self.config)
+        {
+            return oauth
+                .exec_chat_request_stream(model, request, &options, on_delta)
+                .await
+                .with_context(|| {
+                    format!("LLM streaming chat request failed for model {model}")
+                });
+        }
+        // Non-streaming fallback (genai-native path). Emit one delta with
+        // the full text so streaming clients still see it via on_delta.
+        let response = self.exec_chat_request(request, use_aux).await?;
+        if let Some(text) = response.first_text() {
+            on_delta(text);
+        }
+        Ok(response)
+    }
+
     pub async fn exec_chat_request(
         &self,
         request: ChatRequest,
@@ -427,6 +482,36 @@ impl AnthropicOAuthClient {
             .unwrap_or_else(|| anyhow!("Anthropic OAuth call failed")))
     }
 
+    /// Streams the response. We don't retry the streaming call — partial
+    /// text may already be visible to the user, so re-running would
+    /// duplicate. On retryable errors before the first byte we fall back
+    /// to the non-streaming retry path.
+    async fn exec_chat_request_stream(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+        on_delta: DeltaCallback<'_>,
+    ) -> Result<ChatResponse> {
+        match self
+            .call_messages_stream(model, request.clone(), options, on_delta)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(AnthropicOAuthError::RateLimited { .. } | AnthropicOAuthError::Transient { .. }) => {
+                // Pre-stream failure (rate limit / network blip before we
+                // got bytes back) — let the non-streaming path retry and
+                // surface the full text in one delta.
+                let response = self.exec_chat_request(model, request, options).await?;
+                if let Some(text) = response.first_text() {
+                    on_delta(text);
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn call_messages_once(
         &self,
         model: &str,
@@ -555,6 +640,100 @@ impl AnthropicOAuthClient {
             )
         })?;
         anthropic_response_to_chat_response(data, model).map_err(Into::into)
+    }
+
+    /// Issue a streaming Anthropic Messages call and forward text deltas
+    /// to `on_delta`. Returns a fully-assembled `ChatResponse` matching
+    /// what the non-streaming path produces (text + tool_use blocks).
+    async fn call_messages_stream(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+        on_delta: DeltaCallback<'_>,
+    ) -> Result<ChatResponse, AnthropicOAuthError> {
+        self.ensure_access().await?;
+
+        let access_token = {
+            let tokens = self.tokens.lock().await;
+            tokens
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow!("Anthropic OAuth access token is missing"))?
+        };
+
+        // Same body as the non-streaming path, with stream:true. The API
+        // returns SSE frames; everything else (system prompt cache, tools,
+        // message merge) is unchanged.
+        let mut body = anthropic_request_body(model, request, options);
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("stream".to_string(), json!(true));
+        }
+        let mut headers = anthropic_oauth_headers(&access_token);
+        headers.insert("accept", "text/event-stream".parse().unwrap());
+
+        let _permit = self
+            .request_gate
+            .acquire()
+            .await
+            .map_err(|error| anyhow!("Anthropic OAuth request gate closed: {error}"))?;
+        self.wait_for_rate_limit().await;
+
+        let response = self
+            .http
+            .post(format!("{ANTHROPIC_MESSAGES_URL}?beta=true"))
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| AnthropicOAuthError::Transient {
+                message: format!("Anthropic OAuth stream request failed: {error}"),
+                retry_after: Duration::from_secs(5),
+            })?;
+
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = retry_after_from_headers(response.headers());
+            self.set_rate_limit(retry_after).await;
+            let text = response.text().await.unwrap_or_default();
+            return Err(AnthropicOAuthError::RateLimited {
+                message: format!(
+                    "Anthropic OAuth stream rate limited (429) - {}",
+                    truncate_error(&text)
+                ),
+                retry_after,
+            });
+        }
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Anthropic OAuth stream error: {} - {}",
+                status.as_u16(),
+                truncate_error(&text)
+            )
+            .into());
+        }
+
+        let mut state = AnthropicStreamState::new(model);
+        let mut events = response.bytes_stream().eventsource();
+        while let Some(event) = events.next().await {
+            let event = event.map_err(|error| AnthropicOAuthError::Transient {
+                message: format!("Anthropic OAuth stream decode failed: {error}"),
+                retry_after: Duration::from_secs(2),
+            })?;
+            if event.data.is_empty() {
+                continue;
+            }
+            let payload: Value = match serde_json::from_str(&event.data) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            state.apply(&payload, on_delta);
+            if state.done {
+                break;
+            }
+        }
+        Ok(state.into_response())
     }
 
     async fn ensure_access(&self) -> Result<(), AnthropicOAuthError> {
@@ -1407,6 +1586,233 @@ fn first_user_text(messages: &[Value]) -> String {
         }
     }
     String::new()
+}
+
+/// Accumulator for Anthropic SSE streams. Mirrors the content-block model
+/// Anthropic exposes: `content_block_start` opens a block at an index;
+/// `content_block_delta` carries either `text_delta` (for text blocks) or
+/// `input_json_delta` (for tool_use blocks, with `partial_json` to
+/// concatenate); `message_delta` carries final usage; `message_stop`
+/// closes the stream.
+struct AnthropicStreamState {
+    requested_model: String,
+    provider_model: Option<String>,
+    blocks: Vec<StreamBlock>,
+    usage: Usage,
+    done: bool,
+}
+
+enum StreamBlock {
+    Text(String),
+    Tool {
+        id: String,
+        name: String,
+        json: String,
+    },
+}
+
+impl AnthropicStreamState {
+    fn new(model: &str) -> Self {
+        Self {
+            requested_model: model.to_string(),
+            provider_model: None,
+            blocks: Vec::new(),
+            usage: Usage::default(),
+            done: false,
+        }
+    }
+
+    fn apply(&mut self, payload: &Value, on_delta: DeltaCallback<'_>) {
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match event_type {
+            "message_start" => {
+                if let Some(message) = payload.get("message") {
+                    self.provider_model = message
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Some(usage) = message.get("usage") {
+                        self.merge_usage(usage);
+                    }
+                }
+            }
+            "content_block_start" => {
+                let index = payload
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let block = payload.get("content_block").cloned().unwrap_or(Value::Null);
+                let kind = block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.ensure_block(index);
+                match kind {
+                    "text" => {
+                        let initial = block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        self.blocks[index] = StreamBlock::Text(initial.clone());
+                        if !initial.is_empty() {
+                            on_delta(&initial);
+                        }
+                    }
+                    "tool_use" => {
+                        self.blocks[index] = StreamBlock::Tool {
+                            id: block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .map(map_tool_name_from_claude)
+                                .unwrap_or_default(),
+                            json: String::new(),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_delta" => {
+                let index = payload
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let delta = payload.get("delta").cloned().unwrap_or(Value::Null);
+                let delta_type = delta
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.ensure_block(index);
+                match delta_type {
+                    "text_delta" => {
+                        let text = delta
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if text.is_empty() {
+                            return;
+                        }
+                        if let StreamBlock::Text(buffer) = &mut self.blocks[index] {
+                            buffer.push_str(text);
+                        } else {
+                            self.blocks[index] = StreamBlock::Text(text.to_string());
+                        }
+                        on_delta(text);
+                    }
+                    "input_json_delta" => {
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if let StreamBlock::Tool { json, .. } = &mut self.blocks[index] {
+                            json.push_str(partial);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                if let Some(usage) = payload.get("usage") {
+                    self.merge_usage(usage);
+                }
+            }
+            "message_stop" => self.done = true,
+            "error" => {
+                tracing::warn!(payload = %payload, "anthropic stream error frame");
+            }
+            _ => {}
+        }
+    }
+
+    fn ensure_block(&mut self, index: usize) {
+        while self.blocks.len() <= index {
+            self.blocks.push(StreamBlock::Text(String::new()));
+        }
+    }
+
+    fn merge_usage(&mut self, usage: &Value) {
+        let input = usage
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        let output = usage
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        if let Some(value) = input {
+            self.usage.prompt_tokens = Some(value);
+        }
+        if let Some(value) = output {
+            self.usage.completion_tokens = Some(value);
+        }
+        if let (Some(input), Some(output)) =
+            (self.usage.prompt_tokens, self.usage.completion_tokens)
+        {
+            self.usage.total_tokens = Some(input + output);
+        }
+        let cache_creation = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        let cache_read = usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        if cache_creation.is_some() || cache_read.is_some() {
+            self.usage.prompt_tokens_details = Some(PromptTokensDetails {
+                cache_creation_tokens: cache_creation,
+                cached_tokens: cache_read,
+                audio_tokens: None,
+            });
+        }
+        self.usage.compact_details();
+    }
+
+    fn into_response(self) -> ChatResponse {
+        let mut parts = Vec::new();
+        for block in self.blocks {
+            match block {
+                StreamBlock::Text(text) => {
+                    if !text.is_empty() {
+                        parts.push(ContentPart::Text(text));
+                    }
+                }
+                StreamBlock::Tool { id, name, json } => {
+                    let fn_arguments = if json.trim().is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(&json).unwrap_or(json!({}))
+                    };
+                    parts.push(ContentPart::ToolCall(ToolCall {
+                        call_id: id,
+                        fn_name: name,
+                        fn_arguments,
+                        thought_signatures: None,
+                    }));
+                }
+            }
+        }
+        let requested = normalize_anthropic_model(&self.requested_model);
+        let provider = self
+            .provider_model
+            .unwrap_or_else(|| requested.clone());
+        ChatResponse {
+            content: MessageContent::from_parts(parts),
+            reasoning_content: None,
+            model_iden: ModelIden::new(AdapterKind::Anthropic, requested),
+            provider_model_iden: ModelIden::new(AdapterKind::Anthropic, provider),
+            usage: self.usage,
+            captured_raw_body: None,
+        }
+    }
 }
 
 fn anthropic_response_to_chat_response(data: Value, requested_model: &str) -> Result<ChatResponse> {

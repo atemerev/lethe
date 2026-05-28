@@ -17,18 +17,17 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
+use crate::actor::ActorEvent;
 use crate::agent::{Agent, TurnRequest};
 use crate::config::Settings;
 use crate::conversation::{ConversationManager, ProcessCallback, ProcessContext};
 use crate::llm::models::{available_providers, provider_for_model};
-use crate::llm::prompts::PromptStore;
-use crate::memory::message_metadata::{
-    MessageKind, MessageVisibility, metadata_value as message_metadata_value,
+use crate::memory::StoredMessage;
+use crate::scheduler::brainstem::{BrainstemEmission, BrainstemHandle};
+use crate::todos::{TodoFilter, TodoPriority, TodoStatus};
+use crate::tools::registry::{
+    BoxToolFuture, ClientToolContext, SharedTurnObserver, ToolRuntime, TurnObserver,
 };
-use crate::scheduler::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig};
-use crate::scheduler::proactive::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
-use crate::todos::TodoFilter;
-use crate::tools::registry::{ClientToolContext, ToolRuntime};
 
 const SESSION_QUEUE_DEPTH: usize = 32;
 const PROACTIVE_QUEUE_DEPTH: usize = 64;
@@ -40,6 +39,10 @@ pub struct ApiState {
     conversations: ConversationManager,
     sessions: Arc<Mutex<ApiSessions>>,
     proactive_tx: broadcast::Sender<ApiEvent>,
+    /// Server-wide stream that fans out actor.* lifecycle events to any
+    /// /events subscriber (TUI clients). Populated when an actor runtime
+    /// is installed (see `install_actor_broadcaster`).
+    stream_tx: broadcast::Sender<ApiEvent>,
 }
 
 #[derive(Debug, Default)]
@@ -120,16 +123,53 @@ impl ApiEvent {
 
 impl ApiState {
     pub fn new(settings: Settings, agent: Agent) -> Self {
+        Self::with_shared_agent(settings, Arc::new(agent))
+    }
+
+    /// Construct around a pre-built `Arc<Agent>` so multiple transports
+    /// (HTTP API + Telegram poller) can share one agent, one memory
+    /// store, and one actor registry in the same process.
+    pub fn with_shared_agent(settings: Settings, agent: Arc<Agent>) -> Self {
         let (proactive_tx, _) = broadcast::channel(PROACTIVE_QUEUE_DEPTH);
+        let (stream_tx, _) = broadcast::channel(PROACTIVE_QUEUE_DEPTH);
         Self {
             conversations: ConversationManager::new(Duration::from_secs_f64(
                 settings.background.debounce_seconds,
             )),
             settings,
-            agent: Arc::new(agent),
+            agent,
             sessions: Arc::new(Mutex::new(ApiSessions::default())),
             proactive_tx,
+            stream_tx,
         }
+    }
+
+    /// Subscribe the API to the agent's actor event bus and translate each
+    /// internal `ActorEvent` into a public `actor.*` SSE event on the
+    /// stream broadcast. Called once at server start.
+    pub async fn install_actor_broadcaster(&self) -> Result<()> {
+        let Some(runtime) = self.agent.actor_registry() else {
+            return Ok(());
+        };
+        let mut rx = runtime
+            .install_event_broadcaster(256)
+            .await
+            .map_err(|error| anyhow::anyhow!("install actor broadcaster: {error}"))?;
+        let stream_tx = self.stream_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Some(api_event) = actor_event_to_api(&event) {
+                            let _ = stream_tx.send(api_event);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        Ok(())
     }
 
     pub fn from_settings(settings: Settings) -> Result<Self> {
@@ -251,6 +291,106 @@ async fn close_sender(sender: mpsc::Sender<ApiEvent>) {
     let _ = sender.send(ApiEvent::new("done", json!({}))).await;
 }
 
+/// Bridges the agent's tool-loop hooks into per-session SSE events. The
+/// session sender is the same `mpsc::Sender` used for `text`/`typing_*`,
+/// so tool cards appear inline with the assistant transcript on the TUI.
+struct ApiTurnObserver {
+    sender: mpsc::Sender<ApiEvent>,
+}
+
+impl ApiTurnObserver {
+    fn new(sender: mpsc::Sender<ApiEvent>) -> Self {
+        Self { sender }
+    }
+}
+
+impl TurnObserver for ApiTurnObserver {
+    fn wrap_tool_call<'a>(&'a self, _name: &'a str, inner: BoxToolFuture<'a>) -> BoxToolFuture<'a> {
+        inner
+    }
+
+    fn on_tool_start(&self, name: &str, call_id: &str, args_preview: &str) {
+        let _ = self.sender.try_send(ApiEvent::new(
+            "tool.start",
+            json!({
+                "name": name,
+                "call_id": call_id,
+                "args_preview": args_preview,
+            }),
+        ));
+    }
+
+    fn on_tool_end(
+        &self,
+        name: &str,
+        call_id: &str,
+        success: bool,
+        output_preview: &str,
+        duration_ms: u128,
+    ) {
+        let _ = self.sender.try_send(ApiEvent::new(
+            "tool.end",
+            json!({
+                "name": name,
+                "call_id": call_id,
+                "success": success,
+                "output_preview": output_preview,
+                "duration_ms": duration_ms as u64,
+            }),
+        ));
+    }
+
+    fn on_assistant_delta(&self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        let _ = self.sender.try_send(ApiEvent::new(
+            "assistant.delta",
+            json!({"content": content}),
+        ));
+    }
+}
+
+/// Translate an internal `ActorEvent` into the TUI-facing actor.* surface.
+/// Returns `None` for events that the TUI doesn't render so the SSE stream
+/// stays low-traffic.
+fn actor_event_to_api(event: &ActorEvent) -> Option<ApiEvent> {
+    let payload = serde_json::Value::Object(event.payload.clone());
+    match event.event_type.as_str() {
+        "actor_spawned" => Some(ApiEvent::new(
+            "actor.spawned",
+            json!({
+                "actor_id": event.actor_id,
+                "group": event.group,
+                "payload": payload,
+            }),
+        )),
+        "actor_terminated" | "actor_cycle_finished" => Some(ApiEvent::new(
+            "actor.state",
+            json!({
+                "actor_id": event.actor_id,
+                "kind": event.event_type,
+                "payload": payload,
+            }),
+        )),
+        "task_state_changed" => Some(ApiEvent::new(
+            "actor.task",
+            json!({
+                "actor_id": event.actor_id,
+                "payload": payload,
+            }),
+        )),
+        "actor_message" => Some(ApiEvent::new(
+            "actor.message",
+            json!({
+                "actor_id": event.actor_id,
+                "payload": payload,
+            }),
+        )),
+        _ => None,
+    }
+}
+
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -260,32 +400,68 @@ pub fn router(state: ApiState) -> Router {
         .route("/model", get(model_get).post(model_post))
         .route("/events", get(events))
         .route("/file", get(serve_file))
+        .route("/actors", get(list_actors))
+        .route("/todos", get(list_todos))
+        .route("/session/history", get(session_history))
         .with_state(state)
 }
 
 pub async fn serve(settings: Settings, port: u16) -> Result<()> {
+    // Standalone API mode: spin up our own Brainstem since there's no
+    // shared one. The combined api+telegram path in `cli::handlers`
+    // passes its own handle so both transports share one Brainstem.
+    let brainstem = BrainstemHandle::new();
+    serve_with_agent(settings, port, None, brainstem).await
+}
+
+/// Run the API server with optional shared agent + shared Brainstem.
+/// When `agent` is `None`, builds one from settings. The Brainstem's
+/// emissions are bridged into the existing `/events` broadcast so
+/// connected TUI clients see heartbeat-driven proactive messages with
+/// no special-case logic.
+pub async fn serve_with_agent(
+    settings: Settings,
+    port: u16,
+    agent: Option<Arc<Agent>>,
+    brainstem: BrainstemHandle,
+) -> Result<()> {
     if settings.api.token.trim().is_empty() {
         bail!("LETHE_API_TOKEN must be set in API mode");
     }
 
-    let state = ApiState::from_settings(settings.clone())?;
+    let state = match agent {
+        Some(agent) => ApiState::with_shared_agent(settings.clone(), agent),
+        None => ApiState::from_settings(settings.clone())?,
+    };
+    if let Err(error) = state.install_actor_broadcaster().await {
+        tracing::warn!(error = %error, "actor broadcaster not installed");
+    }
     let app = router(state.clone());
     let bind = format!("{}:{port}", settings.api.host);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("Lethe Rust API listening on http://{bind}");
 
-    let heartbeat_task = if settings.background.heartbeat_enabled {
-        Some(tokio::spawn(api_heartbeat_loop(state.clone())))
-    } else {
-        None
+    let brainstem_bridge = {
+        let state = state.clone();
+        let mut rx = brainstem.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(BrainstemEmission { message, .. }) => {
+                        state.send_proactive(&message).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
     };
 
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await;
-    if let Some(task) = heartbeat_task {
-        task.abort();
-    }
+    brainstem_bridge.abort();
+    let _ = brainstem_bridge.await;
     Ok(result?)
 }
 
@@ -382,6 +558,20 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
     let _ = state
         .send_to_session(&session_id, "typing_start", json!({}))
         .await;
+    let _ = state
+        .send_to_session(
+            &session_id,
+            "turn.start",
+            json!({"chat_id": context.chat_id}),
+        )
+        .await;
+    let observer: Option<SharedTurnObserver> = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .by_id
+            .get(&session_id)
+            .map(|session| Arc::new(ApiTurnObserver::new(session.sender.clone())) as SharedTurnObserver)
+    };
     let tool_runtime = ToolRuntime {
         client: state
             .client_tool_context(
@@ -390,6 +580,7 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
                 metadata_i64(&context.metadata, "message_id"),
             )
             .await,
+        observer,
         ..ToolRuntime::default()
     };
     let response = state
@@ -428,6 +619,15 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
         Err(_) => {}
     }
 
+    if let Some(tokens) = state.agent.last_prompt_tokens() {
+        let _ = state
+            .send_to_session(
+                &session_id,
+                "usage",
+                json!({"prompt_tokens": tokens}),
+            )
+            .await;
+    }
     let _ = state
         .send_to_session(&session_id, "typing_stop", json!({}))
         .await;
@@ -564,19 +764,110 @@ async fn events(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     if let Some(response) = require_auth(&state, &headers) {
         return response;
     }
-    let mut receiver = state.proactive_tx.subscribe();
+    let mut proactive_rx = state.proactive_tx.subscribe();
+    let mut stream_rx = state.stream_tx.subscribe();
     let event_stream = stream! {
         loop {
-            match receiver.recv().await {
-                Ok(event) => yield Ok::<Event, Infallible>(event.into_sse()),
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+            tokio::select! {
+                event = proactive_rx.recv() => match event {
+                    Ok(event) => yield Ok::<Event, Infallible>(event.into_sse()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                event = stream_rx.recv() => match event {
+                    Ok(event) => yield Ok::<Event, Infallible>(event.into_sse()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
             }
         }
     };
     Sse::new(event_stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+async fn list_actors(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    let Some(runtime) = state.agent.actor_registry() else {
+        return Json(json!({"actors": []})).into_response();
+    };
+    match runtime.list_actors().await {
+        Ok(actors) => Json(json!({"actors": actors})).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoListQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    include_completed: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn list_todos(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<TodoListQuery>,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    let filter = TodoFilter {
+        status: query.status.as_deref().and_then(TodoStatus::parse),
+        priority: query.priority.as_deref().and_then(TodoPriority::parse),
+        include_completed: query.include_completed,
+        limit: query.limit.unwrap_or(50),
+    };
+    match state.agent.memory().todos.list(filter) {
+        Ok(todos) => Json(json!({"todos": todos})).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn session_history(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<HistoryQuery>,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    let messages = match state.agent.memory().messages.get_recent(limit) {
+        Ok(messages) => messages,
+        Err(error) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+    };
+    let serialized = messages
+        .into_iter()
+        .map(serialize_message)
+        .collect::<Vec<_>>();
+    Json(json!({"messages": serialized})).into_response()
+}
+
+fn serialize_message(message: StoredMessage) -> Value {
+    json!({
+        "id": message.id,
+        "role": message.role.as_str(),
+        "content": message.content,
+        "created_at": message.created_at,
+        "metadata": message.metadata,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -677,71 +968,6 @@ fn resolve_workspace_path(workspace_root: &Path, raw_path: &str) -> Option<PathB
     };
     let resolved = candidate.canonicalize().ok()?;
     resolved.starts_with(&root).then_some(resolved)
-}
-
-async fn api_heartbeat_loop(state: ApiState) {
-    let mut heartbeat = Heartbeat::new(HeartbeatConfig::from_settings(&state.settings));
-    let mut limiter = ProactiveRateLimiter::from_settings(&state.settings);
-    let mut interval = tokio::time::interval(Duration::from_secs(
-        heartbeat.config().interval_seconds.max(1),
-    ));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        interval.tick().await;
-        if let Err(error) = process_api_heartbeat_once(&state, &mut heartbeat, &mut limiter).await {
-            tracing::warn!(error = %error, "api heartbeat failed");
-        }
-    }
-}
-
-async fn process_api_heartbeat_once(
-    state: &ApiState,
-    heartbeat: &mut Heartbeat,
-    limiter: &mut ProactiveRateLimiter,
-) -> Result<()> {
-    let prompts = PromptStore::new(&state.settings.paths.workspace_dir, &state.settings.paths.config_dir);
-    let reminders = active_reminders(&state.settings)?;
-    let prompt = heartbeat.trigger(&prompts, &reminders);
-    let response = state
-        .agent
-        .chat_once(TurnRequest::new(&prompt.message).with_metadata(message_metadata_value(
-            MessageVisibility::Internal,
-            MessageKind::Heartbeat,
-            "api_heartbeat",
-        )))
-        .await?;
-    let _background = state
-        .agent
-        .process_background_heartbeat_quiet(&prompt.message, &reminders)
-        .await?;
-    let outcome = heartbeat.finish_response(&response, None);
-
-    if outcome.action == HeartbeatAction::Send
-        && limiter.allowed()
-        && state.send_proactive(&outcome.message).await
-    {
-        limiter.record();
-    }
-    Ok(())
-}
-
-fn active_reminders(settings: &Settings) -> Result<String> {
-    let memory = crate::memory::MemoryStore::from_settings(settings)?;
-    let todos = memory.todos.list(TodoFilter {
-        include_completed: false,
-        limit: 20,
-        ..Default::default()
-    })?;
-    let reminders = todos
-        .into_iter()
-        .map(|todo| ActiveReminder {
-            title: todo.title,
-            priority: todo.priority.as_str().to_string(),
-            due: todo.due_date,
-        })
-        .collect::<Vec<_>>();
-    Ok(format_active_reminders(&reminders, 10))
 }
 
 #[cfg(test)]

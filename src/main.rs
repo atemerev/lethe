@@ -104,6 +104,16 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Launch the terminal UI. Defaults to the local `lethe api` instance
+    /// (port from settings) using `LETHE_API_TOKEN` for auth.
+    Tui {
+        /// Base URL of the lethe API. Defaults to `http://{api.host}:{api.port}`.
+        #[arg(long)]
+        url: Option<String>,
+        /// Bearer token. Falls back to settings (which loads `LETHE_API_TOKEN`).
+        #[arg(long, env = "LETHE_API_TOKEN")]
+        token: Option<String>,
+    },
     /// Send a single user message through the configured universal LLM router.
     Chat {
         #[arg(short, long)]
@@ -580,6 +590,7 @@ async fn main() -> Result<()> {
         Command::Heartbeat { command } => h::heartbeat_command(command).await,
         Command::Telegram { command } => cli::telegram_loop::telegram_command(command).await,
         Command::Api { port } => h::api_command(port).await,
+        Command::Tui { url, token } => h::tui_command(url, token).await,
         Command::Chat {
             message,
             system,
