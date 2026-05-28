@@ -329,6 +329,26 @@ impl AppState {
         }
     }
 
+    /// Take the JSON returned by `GET /session/history` (oldest →
+    /// newest) and push up to `limit` user-visible chat messages onto
+    /// the transcript. Skips internal heartbeat/background entries and
+    /// tool messages so the seeded view shows just the conversation,
+    /// not the agent's internal cogwheels.
+    pub fn seed_history_from_json(&mut self, messages: Vec<Value>, limit: usize) {
+        let mut chronological: Vec<TranscriptItem> = messages
+            .into_iter()
+            .filter_map(history_entry_to_item)
+            .collect();
+        if chronological.len() > limit {
+            let drop = chronological.len() - limit;
+            chronological.drain(..drop);
+        }
+        if chronological.is_empty() {
+            return;
+        }
+        self.transcript.extend(chronological);
+    }
+
     pub fn replace_actors(&mut self, actors: Vec<Value>) {
         self.actors = actors.into_iter().filter_map(actor_from_json).collect();
         self.actors.sort_by(|left, right| {
@@ -391,6 +411,54 @@ fn actor_from_json(value: Value) -> Option<ActorRow> {
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+/// Convert one `/session/history` row to a user-visible transcript
+/// item. Returns `None` for tool/system messages, for internal-only
+/// metadata (heartbeats, DMN reflections, actor updates), and for
+/// empty content.
+fn history_entry_to_item(value: Value) -> Option<TranscriptItem> {
+    let role = value.get("role").and_then(Value::as_str)?;
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if content.is_empty() {
+        return None;
+    }
+    let metadata = value.get("metadata");
+    let visibility = metadata
+        .and_then(|m| m.get("lethe_visibility"))
+        .and_then(Value::as_str)
+        .unwrap_or("user_visible");
+    if visibility == "internal" {
+        return None;
+    }
+    let kind = metadata
+        .and_then(|m| m.get("lethe_message_kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("chat");
+    if matches!(kind, "heartbeat" | "actor_update" | "background") {
+        return None;
+    }
+    let at = value
+        .get("created_at")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+    match role {
+        "user" => Some(TranscriptItem::User {
+            content: content.to_string(),
+            at,
+        }),
+        "assistant" => Some(TranscriptItem::Assistant {
+            content: content.to_string(),
+            at,
+        }),
+        _ => None,
+    }
 }
 
 fn todo_from_json(value: Value) -> Option<TodoRow> {

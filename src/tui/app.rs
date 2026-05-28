@@ -124,6 +124,15 @@ async fn drive(
         app.set_model(info.model, info.provider);
         app.status = crate::tui::state::Status::Idle;
     }
+
+    // Seed the transcript with the tail of the persisted conversation
+    // so a fresh `lethe tui` doesn't look like a blank slate. Errors
+    // are non-fatal — the UI still works without history.
+    match client.session_history(50).await {
+        Ok(history) => app.seed_history_from_json(history, 5),
+        Err(error) => tracing::warn!(error = %error, "session history load failed"),
+    }
+
     refresh_sidebar(&client, &cmd_tx).await;
 
     // Per-turn /chat handle, so cancel/quit can drop it.
