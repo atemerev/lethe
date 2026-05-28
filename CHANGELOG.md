@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.2 - Release packaging fix
+
+- **Fix `scripts/package-migrator`**: referenced `MIGRATION-SPEC.md`,
+  which was renamed to `MIGRATION.md` in commit `a4b3817`. The
+  release workflow's "Package lethe-migrate" step has been failing
+  on every platform since 0.20.6, producing no published binaries
+  for 0.21.0 / 0.21.1. Switched the copy to `MIGRATION.md`.
+
 ## 0.21.1 - TUI polish: scroll, history seed, preflight
 
 - **Transcript scrolling**: switched scroll math to ratatui's wrapped
