@@ -258,9 +258,26 @@ fn default_lethe_home() -> PathBuf {
 fn env_string(key: &str, default: &str) -> String {
     env::var(key)
         .ok()
-        .map(|value| value.trim().to_string())
+        .map(|value| strip_inline_comment(&value).trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+// `systemd`'s EnvironmentFile= parser does not strip inline `#` comments,
+// so `KEY=value # note` reaches the process as the literal `value # note`.
+// dotenvy strips them but only fills vars that aren't already set, so the
+// systemd value wins. Strip here so both sources behave the same. The rule
+// matches python-dotenv / node-dotenv: a `#` only starts a comment when it
+// follows whitespace (or is at the start), leaving `#` glued inside URL
+// fragments, passwords, etc. alone.
+fn strip_inline_comment(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+            return &value[..i];
+        }
+    }
+    value
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
@@ -395,5 +412,23 @@ mod tests {
         assert_eq!(settings.effective_aux_model(), "gpt-5");
         settings.llm.llm_model_aux = "gpt-5-mini".to_string();
         assert_eq!(settings.effective_aux_model(), "gpt-5-mini");
+    }
+
+    #[test]
+    fn strip_inline_comment_handles_systemd_passthrough() {
+        assert_eq!(strip_inline_comment("claude-opus-4-7"), "claude-opus-4-7");
+        assert_eq!(
+            strip_inline_comment("claude-opus-4-6   # reverted from 4-8"),
+            "claude-opus-4-6   "
+        );
+        assert_eq!(strip_inline_comment("value\t# tab-prefixed"), "value\t");
+        assert_eq!(strip_inline_comment("# whole-line"), "");
+        assert_eq!(strip_inline_comment(""), "");
+        // `#` glued to the value (URL fragments, passwords) is preserved.
+        assert_eq!(
+            strip_inline_comment("https://example.com/page#section"),
+            "https://example.com/page#section"
+        );
+        assert_eq!(strip_inline_comment("pa$$w0rd#1"), "pa$$w0rd#1");
     }
 }
