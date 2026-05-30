@@ -14,6 +14,7 @@ WORKDIR /opt/lethe
 COPY Cargo.toml Cargo.lock ./
 COPY config/ config/
 COPY src/ src/
+COPY vendor/ vendor/
 
 RUN cargo build --release
 
