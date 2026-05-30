@@ -1,4 +1,4 @@
-FROM rust:1.88-slim AS builder
+FROM rust:slim AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -20,7 +20,7 @@ COPY vendor/ vendor/
 
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Lean base: just what the binary needs to boot (TLS), fetch installers, and
 # the single most-common agent dependency (git). Everything heavier the agent
