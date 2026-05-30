@@ -406,11 +406,7 @@ impl OpenAiOAuthClient {
                 break;
             }
         }
-        let data = state
-            .finalize()
-            .ok_or_else(|| OpenAiOAuthError::Other(anyhow!(
-                "OpenAI OAuth stream ended before any response payload"
-            )))?;
+        let data = state.finalize().map_err(OpenAiOAuthError::Other)?;
         openai_response_to_chat_response(data, model).map_err(Into::into)
     }
 
@@ -555,6 +551,34 @@ fn build_user_agent() -> String {
 
 // --- Body shaping ------------------------------------------------------------
 
+const OPENAI_OAUTH_MAX_BODY_BYTES: usize = 500_000;
+
+fn openai_body_size_bytes(body: &Value) -> usize {
+    serde_json::to_vec(body).map(|bytes| bytes.len()).unwrap_or(usize::MAX)
+}
+
+fn trim_openai_input_items(body: &mut Value) {
+    loop {
+        let needs_leading_trim = body
+            .get("input")
+            .and_then(Value::as_array)
+            .and_then(|input| input.first())
+            .is_some_and(|item| item.get("role").is_none());
+        let too_large = openai_body_size_bytes(body) > OPENAI_OAUTH_MAX_BODY_BYTES;
+        if !needs_leading_trim && !too_large {
+            break;
+        }
+
+        let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if input.len() <= 1 {
+            break;
+        }
+        input.remove(0);
+    }
+}
+
 fn openai_responses_body(model: &str, request: ChatRequest, _options: &ChatOptions) -> Value {
     // System → instructions; everything else → typed input items.
     // max_tokens is intentionally not forwarded — the Codex endpoint
@@ -604,6 +628,7 @@ fn openai_responses_body(model: &str, request: ChatRequest, _options: &ChatOptio
         "store": false,
         "stream": true,
     });
+    trim_openai_input_items(&mut body);
     if let Some(tools) = request.tools
         && !tools.is_empty()
     {
@@ -769,6 +794,31 @@ fn iter_sse_events(raw: &str) -> Vec<(String, String)> {
     events
 }
 
+fn openai_stream_error_message(
+    event_name: &str,
+    payload_type: &str,
+    payload_obj: &Map<String, Value>,
+) -> Option<String> {
+    let error = if event_name == "error" || payload_type == "error" {
+        payload_obj.get("error")
+    } else if event_name == "response.failed" || payload_type == "response.failed" {
+        payload_obj
+            .get("response")
+            .and_then(Value::as_object)
+            .and_then(|response| response.get("error"))
+    } else {
+        None
+    }?;
+
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+        if let Some(code) = error.get("code").and_then(Value::as_str) {
+            return Some(format!("{code}: {message}"));
+        }
+        return Some(message.to_string());
+    }
+    error.as_str().map(str::to_string)
+}
+
 /// Streaming counterpart to `parse_streamed_response`. Holds the same
 /// aggregator state (latest_response/output_items/output_text_deltas) but
 /// is fed one SSE event at a time so text deltas can be forwarded to the
@@ -777,6 +827,7 @@ struct OpenAiStreamState {
     latest_response: Option<Map<String, Value>>,
     output_items: Vec<(String, Map<String, Value>)>,
     output_text_deltas: Vec<String>,
+    error: Option<String>,
     done: bool,
 }
 
@@ -786,6 +837,7 @@ impl OpenAiStreamState {
             latest_response: None,
             output_items: Vec::new(),
             output_text_deltas: Vec::new(),
+            error: None,
             done: false,
         }
     }
@@ -794,6 +846,12 @@ impl OpenAiStreamState {
         let Some(payload_obj) = payload.as_object() else {
             return;
         };
+        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        if let Some(message) = openai_stream_error_message(event_name, payload_type, payload_obj) {
+            self.error = Some(message);
+            self.done = true;
+            return;
+        }
 
         if let Some(response) = payload_obj.get("response").and_then(Value::as_object) {
             let target = self.latest_response.get_or_insert_with(Map::new);
@@ -862,7 +920,14 @@ impl OpenAiStreamState {
         }
     }
 
-    fn finalize(mut self) -> Option<Value> {
+    fn finalize(mut self) -> Result<Value> {
+        if let Some(error) = self.error {
+            return Err(anyhow!("OpenAI OAuth stream failed: {error}"));
+        }
+        if !self.done {
+            return Err(anyhow!("OpenAI OAuth stream ended before completion"));
+        }
+
         if !self.output_items.is_empty() {
             let assembled: Vec<Value> = self
                 .output_items
@@ -900,7 +965,9 @@ impl OpenAiStreamState {
             }
         }
 
-        self.latest_response.map(Value::Object)
+        self.latest_response
+            .map(Value::Object)
+            .ok_or_else(|| anyhow!("OpenAI OAuth stream ended without a response payload"))
     }
 }
 
@@ -911,6 +978,7 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
     // response, typically < 20) and avoids an indexmap dependency.
     let mut output_items: Vec<(String, Map<String, Value>)> = Vec::new();
     let mut output_text_deltas: Vec<String> = Vec::new();
+    let mut completed = false;
 
     let mut record_item = |item: &Value| {
         let Some(obj) = item.as_object() else {
@@ -949,6 +1017,10 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
         let Some(payload_obj) = payload.as_object() else {
             continue;
         };
+        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        if let Some(message) = openai_stream_error_message(&event_name, payload_type, payload_obj) {
+            return Err(anyhow!("OpenAI OAuth stream failed: {message}"));
+        }
 
         if let Some(response) = payload_obj.get("response").and_then(Value::as_object) {
             let target = latest_response.get_or_insert_with(Map::new);
@@ -972,7 +1044,6 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
             record_item(item);
         }
 
-        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
         if matches!(
             payload_type,
             "response.output_text.delta" | "response.refusal.delta"
@@ -983,6 +1054,7 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
         }
 
         if event_name == "response.completed" || payload_type == "response.completed" {
+            completed = true;
             break;
         }
     }
@@ -1021,6 +1093,10 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
                 ]),
             );
         }
+    }
+
+    if !completed {
+        return Err(anyhow!("OpenAI OAuth stream ended before completion"));
     }
 
     latest_response
@@ -1572,6 +1648,30 @@ mod tests {
     }
 
     #[test]
+    fn body_trims_oldest_input_items_when_too_large() {
+        let huge = "x".repeat(30_000);
+        let messages = (0..20)
+            .map(|idx| ChatMessage::user(format!("msg-{idx}:{huge}")))
+            .collect::<Vec<_>>();
+        let req = ChatRequest::new(messages);
+        let body = openai_responses_body("gpt-5.2", req, &ChatOptions::default());
+        let body_bytes = serde_json::to_vec(&body).unwrap().len();
+        let input = body["input"].as_array().unwrap();
+        assert!(body_bytes <= OPENAI_OAUTH_MAX_BODY_BYTES);
+        assert!(input.len() < 20);
+        assert!(input.first().and_then(|item| item.get("role")).is_some());
+        assert!(input
+            .last()
+            .and_then(|item| item.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|part| part.get("text"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("msg-19:"));
+    }
+
+    #[test]
     fn body_falls_back_to_default_instructions_when_no_system() {
         let req = ChatRequest::new(vec![ChatMessage::user("hi")]);
         let body = openai_responses_body("gpt-5.2", req, &ChatOptions::default());
@@ -1648,6 +1748,13 @@ mod tests {
         let output = payload["output"].as_array().unwrap();
         assert_eq!(output.len(), 1);
         assert_eq!(output[0]["content"][0]["text"], json!("hello"));
+    }
+
+    #[test]
+    fn parse_streamed_response_errors_on_failed_stream() {
+        let raw = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"context_length_exceeded\"}}\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"context_length_exceeded\"}}}\n\n";
+        let err = parse_streamed_response(raw).unwrap_err().to_string();
+        assert!(err.contains("context_length_exceeded"));
     }
 
     #[test]
