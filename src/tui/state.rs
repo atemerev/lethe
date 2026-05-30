@@ -92,6 +92,12 @@ pub struct AppState {
     /// Index of the assistant message currently receiving streamed
     /// deltas. Cleared when a tool call or a turn-end seals the bubble.
     pub streaming_index: Option<usize>,
+    /// Whether any assistant delta has streamed during the current turn.
+    /// When true, the turn-final `text` event is a pure echo of the
+    /// already-rendered bubbles and is dropped; only non-streaming turns
+    /// (providers that send no deltas) push the text. Reset at each turn
+    /// boundary.
+    pub streamed_this_turn: bool,
 }
 
 impl Default for AppState {
@@ -119,6 +125,7 @@ impl AppState {
             last_event_at: None,
             tick: 0,
             streaming_index: None,
+            streamed_this_turn: false,
         }
     }
 
@@ -137,16 +144,6 @@ impl AppState {
             content,
             at: Utc::now(),
         });
-    }
-
-    /// Returns the in-progress streamed message if there is one (i.e. the
-    /// last `tool.start`/`TurnDone` hasn't sealed the bubble yet).
-    fn streaming_text(&self) -> Option<&str> {
-        let index = self.streaming_index?;
-        match self.transcript.get(index) {
-            Some(TranscriptItem::Assistant { content, .. }) => Some(content.as_str()),
-            _ => None,
-        }
     }
 
     /// Closes the currently-streaming assistant bubble so the next
@@ -175,35 +172,30 @@ impl AppState {
                 self.status_message = Some(message);
             }
             UiEvent::AssistantText(content) => {
-                // The streamed path already emitted the segments via
-                // deltas. The final `text` event is the full body — if
-                // the streaming bubbles already cover it, drop the echo.
-                // Otherwise (non-streaming providers, or stream missed
-                // its last chunk) push any missing segments now.
-                let segments = split_into_segments(&content);
-                let streamed_tail = self
-                    .streaming_text()
-                    .map(|text| text.trim_end().to_string());
+                // If anything streamed this turn, the `---`-split bubbles
+                // already render this message verbatim, so the turn-final
+                // `text` event is a pure echo — seal and drop it. (Matching
+                // the streamed tail against re-split segments was fragile:
+                // a trailing `---` divider or provider-side normalization
+                // made it miss and re-render the whole reply twice.) Only a
+                // non-streaming turn — no deltas, e.g. a proactive message
+                // pushed straight to `/events` — actually pushes the text.
                 self.seal_streaming();
-                let mut start = 0usize;
-                if let Some(tail) = streamed_tail {
-                    if let Some(position) =
-                        segments.iter().position(|segment| segment == &tail)
-                    {
-                        start = position + 1;
+                if !self.streamed_this_turn {
+                    for segment in split_into_segments(&content) {
+                        self.push_assistant(segment);
                     }
-                }
-                for segment in segments.into_iter().skip(start) {
-                    self.push_assistant(segment);
                 }
             }
             UiEvent::AssistantDelta(delta) => self.extend_streaming(delta),
             UiEvent::TypingStart | UiEvent::TurnStart => {
                 self.status = Status::Thinking;
+                self.streamed_this_turn = false;
             }
             UiEvent::TypingStop | UiEvent::TurnDone => {
                 self.status = Status::Idle;
                 self.seal_streaming();
+                self.streamed_this_turn = false;
             }
             UiEvent::ToolStart {
                 call_id,
@@ -256,6 +248,7 @@ impl AppState {
         if delta.is_empty() {
             return;
         }
+        self.streamed_this_turn = true;
         // Append the new chunk to the in-flight bubble (or start one),
         // then split off any sub-messages that are now complete (any
         // `---` divider line whose newline has already arrived).
@@ -566,5 +559,70 @@ fn guess_context_window(model: &str) -> u64 {
         1_000_000
     } else {
         128_000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant_texts(state: &AppState) -> Vec<String> {
+        state
+            .transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Assistant { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn run(events: Vec<UiEvent>) -> AppState {
+        let mut state = AppState::new();
+        for event in events {
+            state.apply_event(event);
+        }
+        state
+    }
+
+    #[test]
+    fn streamed_reply_with_divider_is_not_duplicated_by_final_echo() {
+        // The `---`-split bubbles already rendered both parts; the
+        // turn-final `text` echo must be dropped, not re-rendered.
+        let body = "Part A\n\n---\n\nPart B";
+        let state = run(vec![
+            UiEvent::TurnStart,
+            UiEvent::AssistantDelta(body.to_string()),
+            UiEvent::AssistantText(body.to_string()),
+            UiEvent::TypingStop,
+        ]);
+        assert_eq!(assistant_texts(&state), vec!["Part A", "Part B"]);
+    }
+
+    #[test]
+    fn trailing_divider_does_not_re_render_whole_reply() {
+        // A trailing `---` seals the stream (streaming_index -> None),
+        // which used to defeat the tail match and re-push every segment,
+        // showing the whole reply twice.
+        let body = "Part A\n\n---\n\nPart B\n\n---";
+        let state = run(vec![
+            UiEvent::TurnStart,
+            UiEvent::AssistantDelta(body.to_string()),
+            UiEvent::AssistantText(body.to_string()),
+            UiEvent::TypingStop,
+        ]);
+        assert_eq!(assistant_texts(&state), vec!["Part A", "Part B"]);
+    }
+
+    #[test]
+    fn non_streaming_turn_pushes_the_text() {
+        // No deltas (a provider that doesn't stream, or a proactive
+        // message): the `text` event is the only source, so it renders.
+        let state = run(vec![
+            UiEvent::TurnStart,
+            UiEvent::AssistantText("Hello there".to_string()),
+            UiEvent::TypingStop,
+        ]);
+        assert_eq!(assistant_texts(&state), vec!["Hello there"]);
     }
 }
