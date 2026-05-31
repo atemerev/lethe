@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.22.2 - OpenAI OAuth reliability + context cap
+
+- **OpenAI OAuth stream reliability** (#22, thanks @voldmar): trim oversized
+  request bodies (cap 500 KB, drop a leading role-less input item) so the
+  Codex/Responses endpoint stops rejecting large turns, and surface real
+  stream errors (`error` / `response.failed`) and truncated streams instead
+  of collapsing them into a misleading empty-payload message.
+- **Context windows capped at 128k**: auto-compaction manages history, so the
+  per-model window is a deliberate working-set cap, not the model's maximum.
+  Every entry in `model_context_limits.json` is now 128k (was up to 400k/1M),
+  with an explicit `gpt-5.5` row; the TUI footer gauge tracks the same cap.
+
 ## 0.22.1 - Bug fixes
 
 - **TUI: no more duplicated replies**: a streamed assistant message was
