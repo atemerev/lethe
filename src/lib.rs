@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod interfaces;
 pub mod llm;
 pub mod memory;
+pub mod mini_app;
 pub mod scheduler;
 pub mod sqlite_ext;
 pub mod todos;

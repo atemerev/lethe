@@ -180,6 +180,10 @@ pub const EMBEDDED_PROMPTS: &[(&str, &str)] = &[
         "actor_max_turns_handoff",
         include_str!("../../config/prompts/actor_max_turns_handoff.md"),
     ),
+    (
+        "mini_app_artifact",
+        include_str!("../../config/prompts/mini_app_artifact.md"),
+    ),
 ];
 
 /// The overridable prompt templates as `(name, embedded_text)` pairs.
@@ -228,6 +232,27 @@ mod tests {
 
         assert!(prompt.text.contains("<communication_style>"));
         assert_eq!(prompt.source, PromptSource::Embedded);
+    }
+
+    #[test]
+    fn mini_app_artifact_prompt_is_embedded_with_contract() {
+        let tmp = tempdir().unwrap();
+        let store = PromptStore::new(tmp.path().join("workspace"), tmp.path().join("config"));
+        let prompt = store.load("mini_app_artifact", "");
+
+        assert_eq!(prompt.source, PromptSource::Embedded);
+        for key in ["title", "slug_hint", "summary", "html"] {
+            assert!(prompt.text.contains(key), "missing {key}");
+        }
+        assert!(prompt.text.contains("self-contained HTML"));
+        assert!(prompt.text.contains("fetch"));
+        assert!(prompt.text.contains("XMLHttpRequest"));
+        assert!(prompt.text.contains("navigator.sendBeacon"));
+        assert!(
+            prompt
+                .text
+                .contains("Must not depend on any generated-app backend API")
+        );
     }
 
     #[test]

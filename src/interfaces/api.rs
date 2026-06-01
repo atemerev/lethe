@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use async_stream::stream;
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -409,6 +409,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/configure", post(configure))
         .route("/model", get(model_get).post(model_post))
         .route("/events", get(events))
+        .route("/mini-apps/{slug}", get(mini_app_wrapper))
+        .route("/telegram/mini-app/validate", post(validate_mini_app))
         .route("/file", get(serve_file))
         .route("/actors", get(list_actors))
         .route("/todos", get(list_todos))
@@ -481,6 +483,145 @@ async fn shutdown_signal() {
 
 async fn health() -> Json<Value> {
     Json(json!({"status": "ready"}))
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniAppOpenQuery {
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniAppValidateRequest {
+    slug: String,
+    token: String,
+    #[serde(rename = "initData")]
+    init_data: String,
+}
+
+async fn mini_app_wrapper(
+    State(state): State<ApiState>,
+    AxumPath(slug): AxumPath<String>,
+    Query(query): Query<MiniAppOpenQuery>,
+) -> Response {
+    let Some(token) = query
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return json_error(StatusCode::UNAUTHORIZED, "mini app token is required");
+    };
+    let store = crate::mini_app::MiniAppStore::from_settings(&state.settings);
+    match store.verify_token(&slug, token) {
+        Ok(true) => html_response(mini_app_wrapper_html(&slug, token)),
+        Ok(false) => json_error(StatusCode::UNAUTHORIZED, "invalid mini app token"),
+        Err(error) => json_error(StatusCode::NOT_FOUND, &error.to_string()),
+    }
+}
+
+async fn validate_mini_app(
+    State(state): State<ApiState>,
+    Json(body): Json<MiniAppValidateRequest>,
+) -> Response {
+    let store = crate::mini_app::MiniAppStore::from_settings(&state.settings);
+    let metadata = match store.load_metadata(&body.slug) {
+        Ok(metadata) => metadata,
+        Err(error) => return json_error(StatusCode::NOT_FOUND, &error.to_string()),
+    };
+    match store.verify_token(&body.slug, &body.token) {
+        Ok(true) => {}
+        Ok(false) => return json_error(StatusCode::UNAUTHORIZED, "invalid mini app token"),
+        Err(error) => return json_error(StatusCode::NOT_FOUND, &error.to_string()),
+    }
+    if state.settings.telegram.bot_token.trim().is_empty() {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TELEGRAM_BOT_TOKEN is required for Mini App validation",
+        );
+    }
+    if let Err(error) = crate::mini_app::validate_telegram_init_data(
+        &body.init_data,
+        &state.settings.telegram.bot_token,
+        24 * 60 * 60,
+    ) {
+        return json_error(StatusCode::UNAUTHORIZED, &error.to_string());
+    }
+    if let Some(expected_user_id) = metadata.telegram_user_id
+        && let Some(actual_user_id) = crate::mini_app::telegram_init_data_user_id(&body.init_data)
+        && actual_user_id != expected_user_id
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Mini App user does not match artifact owner",
+        );
+    }
+    let html = match store.read_artifact_html(&body.slug) {
+        Ok(html) => html,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    Json(json!({"html": html, "title": metadata.title, "summary": metadata.summary}))
+        .into_response()
+}
+
+fn mini_app_wrapper_html(slug: &str, token: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lethe Mini App</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>body{{margin:0;font-family:system-ui,sans-serif;background:#111827;color:#f9fafb}}#status{{padding:1rem}}iframe{{border:0;width:100vw;height:100vh;background:white}}</style>
+</head>
+<body>
+<div id="status">Opening Mini App…</div>
+<script>
+const slug = {slug_json};
+const token = {token_json};
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) tg.ready();
+async function main() {{
+  const initData = tg ? tg.initData : "";
+  const response = await fetch('/telegram/mini-app/validate', {{
+    method: 'POST',
+    headers: {{'content-type': 'application/json'}},
+    body: JSON.stringify({{slug, token, initData}})
+  }});
+  if (!response.ok) throw new Error(await response.text());
+  const data = await response.json();
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-modals');
+  iframe.srcdoc = data.html;
+  document.body.replaceChildren(iframe);
+}}
+main().catch(error => {{
+  document.getElementById('status').textContent = 'Mini App validation failed: ' + error.message;
+}});
+</script>
+</body>
+</html>"#,
+        slug_json = serde_json::to_string(slug).unwrap(),
+        token_json = serde_json::to_string(token).unwrap()
+    )
+}
+
+fn html_response(html: String) -> Response {
+    let mut response = html.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 #[derive(Debug, Deserialize)]

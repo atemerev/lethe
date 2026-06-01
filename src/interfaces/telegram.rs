@@ -2589,6 +2589,27 @@ mod tests {
     }
 
     #[test]
+    fn inline_keyboard_web_app_button_has_exactly_one_action() {
+        let markup = parse_reply_markup_json(
+            r#"{"inline_keyboard":[[{"text":"Open Mini App","web_app":{"url":"https://mini.example.test/mini-apps/slug?token=tok"}}]]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let value = serde_json::to_value(&markup).unwrap();
+        assert_eq!(value["inline_keyboard"][0][0]["text"], "Open Mini App");
+        assert_eq!(
+            value["inline_keyboard"][0][0]["web_app"]["url"],
+            "https://mini.example.test/mini-apps/slug?token=tok"
+        );
+        assert!(
+            value["inline_keyboard"][0][0]
+                .get("callback_data")
+                .is_none()
+        );
+        assert!(value["inline_keyboard"][0][0].get("url").is_none());
+    }
+
+    #[test]
     fn inline_keyboard_validation_rejects_zero_or_multiple_actions() {
         let no_action =
             parse_reply_markup_json(r#"{"inline_keyboard":[[{"text":"Start"}]]}"#).unwrap_err();

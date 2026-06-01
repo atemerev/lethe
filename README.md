@@ -153,6 +153,17 @@ lethe transport telegram --enable          # configure + enable the Telegram bot
 
 Under the hood a single `lethe api` process hosts the HTTP/SSE transport **and** the Telegram poller (when `TELEGRAM_BOT_TOKEN` is set) in the same address space, sharing one Agent, one actor registry, and one Brainstem (the sole source of heartbeats / proactive emissions — transports just subscribe and forward). API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default) on `LETHE_API_PORT` (`1373`); use a reverse proxy for remote access.
 
+Telegram Mini Apps need the HTTP server to be reachable by Telegram over public HTTPS. A typical deployment sets:
+
+```bash
+LETHE_API_HOST=0.0.0.0
+LETHE_API_PORT=1373
+LETHE_PUBLIC_BASE_URL=https://your-domain-or-ngrok
+TELEGRAM_ENABLED=true
+```
+
+Put Caddy, nginx, ngrok, or Cloudflare Tunnel in front of `lethe api` and point `LETHE_PUBLIC_BASE_URL` at that HTTPS origin. A direct public IP is not enough unless it has a Telegram-reachable HTTPS reverse proxy/tunnel. Standalone `lethe telegram run` only polls Telegram; it does not host Mini App routes unless a reachable `lethe api` server is also running.
+
 **Configure on the fly**
 
 ```bash

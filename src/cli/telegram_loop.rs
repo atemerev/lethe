@@ -23,9 +23,10 @@ use lethe::conversation::transcription::{
 };
 use lethe::conversation::{ConversationManager, ProcessCallback, ProcessContext};
 use lethe::interfaces::telegram::{
-    FirstUserLockCallback, IncomingTelegramCallback, IncomingTelegramText, SharedTelegramTurnGuard,
-    TelegramClient, TelegramToolContext, TelegramTurnGuard, TelegramTypingObserver,
-    VisibleTelegramChannel, forget_pending_reply_keyboard_match, image_mime_type_from_path,
+    FirstUserLockCallback, IncomingTelegramCallback, IncomingTelegramText, InlineKeyboardButton,
+    InlineKeyboardMarkup, SharedTelegramTurnGuard, TelegramClient, TelegramReplyMarkup,
+    TelegramToolContext, TelegramTurnGuard, TelegramTypingObserver, VisibleTelegramChannel,
+    WebAppInfo, forget_pending_reply_keyboard_match, image_mime_type_from_path,
     is_emoji_only_reply, pending_reply_keyboard_matches, split_telegram_messages,
 };
 use lethe::memory::MessageRole;
@@ -41,6 +42,30 @@ const TELEGRAM_TYPING_REFRESH_SECONDS: u64 = 3;
 const TELEGRAM_ACTOR_UPDATE_POLL_SECONDS: u64 = 1;
 const TELEGRAM_ACTOR_UPDATE_QUERY_LIMIT: usize = 50;
 const CONSUMED_CALLBACK_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveMiniApp {
+    slug: String,
+    access_token: String,
+}
+
+fn active_mini_apps() -> &'static Mutex<HashMap<i64, ActiveMiniApp>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<i64, ActiveMiniApp>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_active_mini_app(chat_id: i64, slug: String, access_token: String) {
+    if let Ok(mut active) = active_mini_apps().lock() {
+        active.insert(chat_id, ActiveMiniApp { slug, access_token });
+    }
+}
+
+fn active_mini_app(chat_id: i64) -> Option<ActiveMiniApp> {
+    active_mini_apps()
+        .lock()
+        .ok()
+        .and_then(|active| active.get(&chat_id).cloned())
+}
 
 #[derive(Debug, Subcommand)]
 pub enum TelegramCommand {
@@ -478,6 +503,153 @@ fn metadata_i64(metadata: &serde_json::Map<String, serde_json::Value>, key: &str
     metadata.get(key).and_then(serde_json::Value::as_i64)
 }
 
+pub fn is_mini_app_creation_request(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let has_create = ["make", "create", "build", "generate"]
+        .iter()
+        .any(|term| lower.contains(term));
+    let has_interactive = [
+        "mini app",
+        "builder",
+        "calculator",
+        "playground",
+        "real-time",
+        "interactive",
+        "tool",
+    ]
+    .iter()
+    .any(|term| lower.contains(term));
+    let explanatory = ["explain", "what is", "how does", "why "]
+        .iter()
+        .any(|term| lower.contains(term));
+    has_create && has_interactive && !explanatory
+}
+
+pub fn is_mini_app_refinement_request(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "make it",
+        "add ",
+        "change ",
+        "darker",
+        "lighter",
+        "remove ",
+        "use ",
+        "increase ",
+        "decrease ",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
+}
+
+fn mini_app_reply_markup(url: &str) -> TelegramReplyMarkup {
+    TelegramReplyMarkup::InlineKeyboardMarkup(InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![InlineKeyboardButton {
+            text: "Open Mini App".to_string(),
+            url: None,
+            callback_data: None,
+            web_app: Some(WebAppInfo {
+                url: url.to_string(),
+            }),
+            login_url: None,
+            switch_inline_query: None,
+            switch_inline_query_current_chat: None,
+            switch_inline_query_chosen_chat: None,
+            copy_text: None,
+            callback_game: None,
+            pay: None,
+        }]],
+    })
+}
+
+async fn handle_mini_app_turn_if_needed(
+    client: &TelegramClient,
+    agent: &Agent,
+    settings: &Settings,
+    chat_id: i64,
+    user_id: i64,
+    content: &str,
+) -> Result<bool> {
+    let is_refinement =
+        is_mini_app_refinement_request(content) && active_mini_app(chat_id).is_some();
+    if !is_refinement && !is_mini_app_creation_request(content) {
+        if is_mini_app_refinement_request(content) && active_mini_app(chat_id).is_none() {
+            client
+                .send_message(chat_id, "What Mini App should I refine? Ask me to make one first, then send the change.")
+                .await?;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    if let Err(message) = settings.mini_app.require_public_https_base_url() {
+        client.send_message(chat_id, &message).await?;
+        return Ok(true);
+    }
+
+    let response = if is_refinement {
+        let active = active_mini_app(chat_id).expect("checked active artifact");
+        let store = lethe::mini_app::MiniAppStore::from_settings(settings);
+        let prior_html = store.read_artifact_html(&active.slug).unwrap_or_default();
+        let prior_metadata = store.load_metadata(&active.slug).ok();
+        let prior_artifact_context = Some(format!(
+            "slug: {}\ntitle: {}\nsummary: {}\nhtml:\n{}",
+            active.slug,
+            prior_metadata
+                .as_ref()
+                .map(|m| m.title.as_str())
+                .unwrap_or("unknown"),
+            prior_metadata
+                .as_ref()
+                .map(|m| m.summary.as_str())
+                .unwrap_or("unknown"),
+            prior_html
+        ));
+        agent
+            .refine_mini_app(
+                lethe::mini_app::MiniAppGenerationRequest {
+                    user_request: content.to_string(),
+                    telegram_chat_id: Some(chat_id),
+                    telegram_user_id: Some(user_id),
+                    prior_artifact_context,
+                },
+                &active.slug,
+                &active.access_token,
+            )
+            .await
+    } else {
+        agent
+            .generate_mini_app(lethe::mini_app::MiniAppGenerationRequest {
+                user_request: content.to_string(),
+                telegram_chat_id: Some(chat_id),
+                telegram_user_id: Some(user_id),
+                prior_artifact_context: None,
+            })
+            .await
+    };
+
+    match response {
+        Ok(app) => {
+            set_active_mini_app(chat_id, app.slug.clone(), app.access_token.clone());
+            let text = if is_refinement {
+                format!("Updated Mini App: {}\n{}", app.title, app.summary)
+            } else {
+                format!("Created Mini App: {}\n{}", app.title, app.summary)
+            };
+            let markup = mini_app_reply_markup(&app.url);
+            client
+                .send_message_with_reply_markup(chat_id, &text, Some(&markup))
+                .await?;
+        }
+        Err(error) => {
+            client
+                .send_message(chat_id, &format!("Mini App generation failed: {error}"))
+                .await?;
+        }
+    }
+    Ok(true)
+}
+
 fn metadata_value_from_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<serde_json::Value> {
@@ -540,6 +712,19 @@ fn telegram_process_callback(
                     "source": "telegram",
                 }),
             );
+
+            if handle_mini_app_turn_if_needed(
+                &client,
+                &agent,
+                &settings,
+                context.chat_id,
+                context.user_id,
+                &context.message,
+            )
+            .await?
+            {
+                return Ok(());
+            }
 
             let guard = Arc::new(Mutex::new(TelegramTurnGuard::new()));
             let runtime = ToolRuntime {
@@ -709,6 +894,19 @@ async fn handle_telegram_turn(
         message_chars = turn.content.chars().count(),
         "telegram turn started"
     );
+    if handle_mini_app_turn_if_needed(
+        client,
+        agent,
+        settings,
+        turn.chat_id,
+        turn.user_id,
+        &turn.content,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
     if let (Some(manager), Some(callback)) = (conversation_manager, process_callback) {
         manager
             .add_message_with_attachments(
@@ -1520,6 +1718,21 @@ mod tests {
     }
 
     #[test]
+    fn mini_app_intent_detector_routes_interactive_creation_only() {
+        assert!(is_mini_app_creation_request(
+            "make me real-time CSS gradient builder"
+        ));
+        assert!(is_mini_app_creation_request("build a calculator"));
+        assert!(!is_mini_app_creation_request("explain CSS gradients"));
+    }
+
+    #[test]
+    fn mini_app_refinement_detector_identifies_followups() {
+        assert!(is_mini_app_refinement_request("add angle control"));
+        assert!(is_mini_app_refinement_request("make it darker"));
+        assert!(!is_mini_app_refinement_request("build a calculator"));
+    }
+
     fn telegram_text_metadata_preserves_transport_ids() {
         let incoming = IncomingTelegramText {
             update_id: 10,

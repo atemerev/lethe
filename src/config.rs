@@ -146,6 +146,32 @@ pub struct ApiServerConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MiniAppConfig {
+    pub public_base_url: String,
+}
+
+impl MiniAppConfig {
+    pub fn public_base_url_trimmed(&self) -> &str {
+        self.public_base_url.trim().trim_end_matches('/')
+    }
+
+    pub fn require_public_https_base_url(&self) -> Result<&str, String> {
+        let url = self.public_base_url_trimmed();
+        if url.is_empty() {
+            return Err(mini_app_public_url_error());
+        }
+        if !url.starts_with("https://") {
+            return Err(mini_app_public_url_error());
+        }
+        Ok(url)
+    }
+}
+
+pub fn mini_app_public_url_error() -> String {
+    "Telegram Mini Apps require LETHE_PUBLIC_BASE_URL to be a public https:// URL. Run `lethe api` behind a public HTTPS reverse proxy or ngrok tunnel, then set LETHE_PUBLIC_BASE_URL=https://your-domain-or-ngrok.".to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
     pub provider: String,
     pub model: String,
@@ -173,6 +199,7 @@ pub struct Settings {
     pub llm: LlmConfig,
     pub telegram: TelegramConfig,
     pub api: ApiServerConfig,
+    pub mini_app: MiniAppConfig,
     pub transcription: TranscriptionConfig,
     pub background: BackgroundConfig,
 }
@@ -227,6 +254,9 @@ impl Settings {
                 token: env_string("LETHE_API_TOKEN", ""),
                 host: env_string("LETHE_API_HOST", "127.0.0.1"),
                 port: env_u16("LETHE_API_PORT", 1373),
+            },
+            mini_app: MiniAppConfig {
+                public_base_url: env_string("LETHE_PUBLIC_BASE_URL", ""),
             },
             llm: LlmConfig {
                 openrouter_api_key: env_string("OPENROUTER_API_KEY", ""),
@@ -380,6 +410,9 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
             host: "127.0.0.1".to_string(),
             port: 1373,
         },
+        mini_app: MiniAppConfig {
+            public_base_url: "https://example.test".to_string(),
+        },
         transcription: TranscriptionConfig {
             provider: String::new(),
             model: String::new(),
@@ -426,5 +459,44 @@ mod tests {
         assert_eq!(settings.effective_tool_model(), "");
         settings.llm.llm_model_tool = "  deepseek/deepseek-v4-pro  ".to_string();
         assert_eq!(settings.effective_tool_model(), "deepseek/deepseek-v4-pro");
+    }
+
+    #[test]
+    fn mini_app_public_base_url_loads_from_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_file = tmp.path().join(".env");
+        std::fs::write(
+            &config_file,
+            "LETHE_PUBLIC_BASE_URL=https://mini.example.test/\n",
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("LETHE_CONFIG_FILE", &config_file);
+            std::env::remove_var("LETHE_PUBLIC_BASE_URL");
+        }
+        let settings = Settings::from_env();
+        unsafe {
+            std::env::remove_var("LETHE_CONFIG_FILE");
+        }
+
+        assert_eq!(
+            settings.mini_app.public_base_url,
+            "https://mini.example.test/"
+        );
+        assert_eq!(
+            settings.mini_app.require_public_https_base_url().unwrap(),
+            "https://mini.example.test"
+        );
+    }
+
+    #[test]
+    fn mini_app_public_base_url_requires_https() {
+        let config = MiniAppConfig {
+            public_base_url: "http://localhost:1373".to_string(),
+        };
+        let error = config.require_public_https_base_url().unwrap_err();
+        assert!(error.contains("LETHE_PUBLIC_BASE_URL"));
+        assert!(error.contains("public HTTPS reverse proxy or ngrok"));
     }
 }

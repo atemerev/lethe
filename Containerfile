@@ -41,6 +41,7 @@ RUN apt-get update \
 COPY --from=builder /opt/lethe/target/release/lethe /usr/local/bin/lethe
 
 ENV HOME=/root LETHE_HOME=/root/.lethe
+EXPOSE 1373
 WORKDIR /root
 
 ENTRYPOINT ["lethe"]

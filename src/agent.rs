@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -271,6 +271,86 @@ impl Agent {
             event: event.into(),
             data,
         });
+    }
+
+    pub async fn generate_mini_app(
+        &self,
+        request: crate::mini_app::MiniAppGenerationRequest,
+    ) -> AgentResult<crate::mini_app::MiniAppGenerationResponse> {
+        let generated = self.generate_mini_app_artifact(&request).await?;
+        let base_url = self
+            .settings
+            .mini_app
+            .require_public_https_base_url()
+            .map_err(|error| AgentError::Llm(anyhow!(error)))?
+            .to_string();
+        let store = crate::mini_app::MiniAppStore::from_settings(&self.settings);
+        let artifact = store
+            .create_artifact(crate::mini_app::MiniAppCreateRequest {
+                title: generated.title,
+                slug_hint: generated.slug_hint,
+                summary: generated.summary,
+                html: generated.html,
+                telegram_chat_id: request.telegram_chat_id,
+                telegram_user_id: request.telegram_user_id,
+            })
+            .map_err(|error| AgentError::Llm(anyhow!(error)))?;
+        Ok(mini_app_response_from_metadata(
+            &base_url,
+            artifact.metadata,
+            artifact.access_token,
+        ))
+    }
+
+    pub async fn refine_mini_app(
+        &self,
+        request: crate::mini_app::MiniAppGenerationRequest,
+        slug: &str,
+        access_token: &str,
+    ) -> AgentResult<crate::mini_app::MiniAppGenerationResponse> {
+        let generated = self.generate_mini_app_artifact(&request).await?;
+        let base_url = self
+            .settings
+            .mini_app
+            .require_public_https_base_url()
+            .map_err(|error| AgentError::Llm(anyhow!(error)))?
+            .to_string();
+        let store = crate::mini_app::MiniAppStore::from_settings(&self.settings);
+        let metadata = store
+            .overwrite_artifact_html(slug, &generated.html)
+            .map_err(|error| AgentError::Llm(anyhow!(error)))?;
+        Ok(mini_app_response_from_metadata(
+            &base_url,
+            metadata,
+            access_token.to_string(),
+        ))
+    }
+
+    async fn generate_mini_app_artifact(
+        &self,
+        request: &crate::mini_app::MiniAppGenerationRequest,
+    ) -> AgentResult<crate::mini_app::MiniAppLlmArtifact> {
+        let mut variables = HashMap::new();
+        variables.insert("user_request".to_string(), request.user_request.clone());
+        variables.insert(
+            "prior_artifact_context".to_string(),
+            request
+                .prior_artifact_context
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        let prompt = self.prompts.render("mini_app_artifact", &variables, "");
+        let router = self
+            .router
+            .read()
+            .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
+            .clone();
+        let raw = router
+            .complete(vec![LlmMessage::user(prompt.text)], false)
+            .await
+            .map_err(AgentError::Llm)?;
+        crate::mini_app::parse_llm_artifact_json(&raw)
+            .map_err(|error| AgentError::Llm(anyhow!(error)))
     }
 
     /// Most recent prompt-token count seen by the tool loop. Drives the
@@ -698,6 +778,22 @@ impl Agent {
             tracing::warn!(reason = %reason, "turn cut short — reply is a resumable checkpoint");
         }
         Ok(output.text)
+    }
+}
+
+fn mini_app_response_from_metadata(
+    base_url: &str,
+    metadata: crate::mini_app::MiniAppMetadata,
+    access_token: String,
+) -> crate::mini_app::MiniAppGenerationResponse {
+    let url = crate::mini_app::artifact_url(base_url, &metadata.slug, &access_token);
+    crate::mini_app::MiniAppGenerationResponse {
+        title: metadata.title.clone(),
+        summary: metadata.summary.clone(),
+        slug: metadata.slug.clone(),
+        access_token,
+        url,
+        metadata,
     }
 }
 
@@ -1395,6 +1491,7 @@ fn archive_old_tool_results(messages: &mut [LlmMessage], inline_cap: usize) {
     }
 }
 
+<<<<<<< HEAD
 /// Hard ceiling on the fully-assembled prompt, applied AFTER `compact_history`.
 ///
 /// The soft compaction budget estimates the non-history overhead (system, tools,
@@ -1430,6 +1527,13 @@ fn clamp_messages_to_budget(messages: &mut Vec<LlmMessage>, max_total_chars: usi
     }
 }
 
+||||||| parent of ab5328c (feat(telegram): add mini app MVP)
+fn drop_oldest_to_target(
+    messages: &mut Vec<LlmMessage>,
+    target_chars: usize,
+) -> Vec<LlmMessage> {
+=======
+>>>>>>> ab5328c (feat(telegram): add mini app MVP)
 fn drop_oldest_to_target(messages: &mut Vec<LlmMessage>, target_chars: usize) -> Vec<LlmMessage> {
     // Always keep at least the last two messages so the LLM has SOME
     // immediate context to react to.
