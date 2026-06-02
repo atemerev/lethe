@@ -164,6 +164,28 @@ TELEGRAM_ENABLED=true
 
 Put Caddy, nginx, ngrok, or Cloudflare Tunnel in front of `lethe api` and point `LETHE_PUBLIC_BASE_URL` at that HTTPS origin. A direct public IP is not enough unless it has a Telegram-reachable HTTPS reverse proxy/tunnel. Standalone `lethe telegram run` only polls Telegram; it does not host Mini App routes unless a reachable `lethe api` server is also running.
 
+### Telegram Mini Apps
+
+Mini Apps are created from a Telegram chat with Lethe. To enable them:
+
+1. Run the API transport and expose it on public HTTPS.
+2. Set `TELEGRAM_BOT_TOKEN` and `LETHE_PUBLIC_BASE_URL=https://...`.
+3. Make sure Telegram can reach the same public origin that serves `lethe api`.
+
+A typical setup looks like this:
+
+```bash
+LETHE_API_HOST=0.0.0.0
+LETHE_API_PORT=1373
+LETHE_PUBLIC_BASE_URL=https://your-domain-or-ngrok
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=...
+```
+
+Then start Lethe and ask for a Mini App in Telegram, for example: “build a calculator” or “make it darker”. Lethe will generate a self-contained HTML artifact, store it under `~/.lethe/data/mini-apps/`, and reply with an **Open Mini App** button.
+
+Mini App HTML is intentionally sandboxed: no external assets, no network calls, and no nested iframes. Telegram validates the signed `initData` on open, and Lethe checks the mini app access token before serving the artifact.
+
 **Configure on the fly**
 
 ```bash
