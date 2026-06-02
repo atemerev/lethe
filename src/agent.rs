@@ -287,14 +287,21 @@ impl Agent {
         let store = crate::mini_app::MiniAppStore::from_settings(&self.settings);
         let artifact = store
             .create_artifact(crate::mini_app::MiniAppCreateRequest {
-                title: generated.title,
-                slug_hint: generated.slug_hint,
-                summary: generated.summary,
-                html: generated.html,
+                title: generated.title.clone(),
+                slug_hint: generated.slug_hint.clone(),
+                summary: generated.summary.clone(),
+                html: generated.html.clone(),
                 telegram_chat_id: request.telegram_chat_id,
                 telegram_user_id: request.telegram_user_id,
             })
             .map_err(|error| AgentError::Llm(anyhow!(error)))?;
+        // Also write to the static path so the /mini/{slug} route can serve it.
+        let _ = crate::mini_app::publish_static_mini_app(
+            &self.settings.paths.workspace_dir,
+            &base_url,
+            &generated.slug_hint,
+            &generated.html,
+        );
         Ok(mini_app_response_from_metadata(
             &base_url,
             artifact.metadata,
@@ -319,6 +326,13 @@ impl Agent {
         let metadata = store
             .overwrite_artifact_html(slug, &generated.html)
             .map_err(|error| AgentError::Llm(anyhow!(error)))?;
+        // Also overwrite the static path so the /mini/{slug} route stays current.
+        let _ = crate::mini_app::publish_static_mini_app(
+            &self.settings.paths.workspace_dir,
+            &base_url,
+            slug,
+            &generated.html,
+        );
         Ok(mini_app_response_from_metadata(
             &base_url,
             metadata,
@@ -786,7 +800,7 @@ fn mini_app_response_from_metadata(
     metadata: crate::mini_app::MiniAppMetadata,
     access_token: String,
 ) -> crate::mini_app::MiniAppGenerationResponse {
-    let url = crate::mini_app::artifact_url(base_url, &metadata.slug, &access_token);
+    let url = crate::mini_app::static_mini_app_public_url(base_url, &metadata.slug);
     crate::mini_app::MiniAppGenerationResponse {
         title: metadata.title.clone(),
         summary: metadata.summary.clone(),
