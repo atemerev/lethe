@@ -1034,6 +1034,11 @@ fn compact_history(messages: &mut Vec<LlmMessage>, budget: CompactionBudget) -> 
 fn message_chars(message: &LlmMessage) -> usize {
     message.content.chars().count()
         + message
+            .attachments
+            .iter()
+            .map(|att| att.base64_content.chars().count())
+            .sum::<usize>()
+        + message
             .tool_responses
             .iter()
             .map(|response| response.content.chars().count())
