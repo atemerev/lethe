@@ -375,7 +375,7 @@ impl LlmRouter {
                     request_log,
                     json!({
                         "ok": false,
-                        "error": error.to_string(),
+                        "error": format!("{error:#}"),
                     }),
                 );
                 Err(error)
