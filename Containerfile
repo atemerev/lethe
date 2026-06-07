@@ -32,7 +32,8 @@ RUN apt-get update \
     && if [ "$WITH_TOOLS" = "1" ]; then \
          apt-get install -y --no-install-recommends \
            ffmpeg python3 python3-venv python3-pip build-essential \
-           ripgrep jq unzip xz-utils file diffutils procps less which; \
+           ripgrep fd-find jq unzip xz-utils file diffutils procps less which; \
+           curl -LsSf https://astral.sh/uv/install.sh | sh; \
        fi \
     && rm -rf /var/lib/apt/lists/*
 
