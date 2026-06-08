@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22.13 - Keep the fast tool handoff + web_search guard
+
+- **Reverts 0.22.12's discard-on-handoff.** When `LLM_MODEL_TOOL` is set, the
+  base model again executes its own first tool call and the tool model takes
+  over from the next iteration (the 0.22.11 behavior) — fewer round-trips. The
+  malformed/runaway tool-call batches that motivated 0.22.12 were traced to a
+  single OpenRouter provider (Parasail) being incompatible with the `genai`
+  client, not to the base model; that's handled by provider routing instead.
+- Keeps the `web_search` empty-query guard from 0.22.12.
+
 ## 0.22.12 - Tool-model handoff hardening
 
 - **The base model's tool call is now a routing signal, not an action**: when
