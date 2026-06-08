@@ -61,23 +61,15 @@ pub(crate) async fn api_command(port: Option<u16>) -> Result<()> {
         brainstem.clone(),
     ));
 
-    // Start only the enabled transports (see `lethe transport`).
-    let telegram_enabled =
-        settings.telegram.enabled && !settings.telegram.bot_token.trim().is_empty();
-    let telegram_task = if telegram_enabled {
-        let agent = agent.clone();
-        let settings = settings.clone();
-        let brainstem = brainstem.clone();
-        Some(tokio::spawn(async move {
-            let options = AgentOptions::default();
-            crate::cli::telegram_loop::run_telegram_with_agent(
-                agent, settings, options, 30, &brainstem,
-            )
-            .await
-        }))
-    } else {
-        None
-    };
+    // Transport supervisor: starts/stops chat transports (currently Telegram) to
+    // match config — including config written at runtime by a control plane (see
+    // transport_supervisor) — so a bot can be connected without restarting. Falls
+    // back to the static `TELEGRAM_*` settings when no runtime config is present.
+    let transport_task = tokio::spawn(crate::cli::transport_supervisor::run(
+        agent.clone(),
+        settings.clone(),
+        brainstem.clone(),
+    ));
 
     let api_result = if settings.api.enabled {
         lethe::interfaces::api::serve_with_agent(settings, port, Some(agent), brainstem).await
@@ -89,10 +81,8 @@ pub(crate) async fn api_command(port: Option<u16>) -> Result<()> {
         Ok(())
     };
 
-    if let Some(task) = telegram_task {
-        task.abort();
-        let _ = task.await;
-    }
+    transport_task.abort();
+    let _ = transport_task.await;
     brainstem_task.abort();
     let _ = brainstem_task.await;
     api_result

@@ -13,5 +13,6 @@ pub mod prompts;
 pub mod service;
 pub mod telegram_loop;
 pub mod transport;
+pub mod transport_supervisor;
 pub mod uninstall;
 pub mod util;

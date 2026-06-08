@@ -23,9 +23,9 @@ use lethe::conversation::transcription::{
 };
 use lethe::conversation::{ConversationManager, ProcessCallback, ProcessContext};
 use lethe::interfaces::telegram::{
-    IncomingTelegramCallback, IncomingTelegramText, SharedTelegramTurnGuard, TelegramClient,
-    TelegramToolContext, TelegramTurnGuard, TelegramTypingObserver, VisibleTelegramChannel,
-    image_mime_type_from_path, is_emoji_only_reply, split_telegram_messages,
+    FirstUserLockCallback, IncomingTelegramCallback, IncomingTelegramText, SharedTelegramTurnGuard,
+    TelegramClient, TelegramToolContext, TelegramTurnGuard, TelegramTypingObserver,
+    VisibleTelegramChannel, image_mime_type_from_path, is_emoji_only_reply, split_telegram_messages,
     forget_pending_reply_keyboard_match, pending_reply_keyboard_matches,
 };
 use lethe::memory::MessageRole;
@@ -160,7 +160,7 @@ pub async fn telegram_command(command: TelegramCommand) -> Result<()> {
                 brainstem.clone(),
             ));
             let result =
-                run_telegram_with_agent(agent, settings, options, timeout, &brainstem).await;
+                run_telegram_with_agent(agent, settings, options, timeout, &brainstem, None).await;
             brainstem_task.abort();
             let _ = brainstem_task.await;
             result
@@ -180,11 +180,15 @@ pub async fn run_telegram_with_agent(
     options: AgentOptions,
     timeout: u64,
     brainstem: &BrainstemHandle,
+    lock_on_first: Option<FirstUserLockCallback>,
 ) -> Result<()> {
-    let client = TelegramClient::new(
+    let mut client = TelegramClient::new(
         settings.telegram.bot_token.clone(),
         settings.telegram.allowed_user_ids.clone(),
     )?;
+    if let Some(on_lock) = lock_on_first {
+        client = client.with_first_user_lock(on_lock);
+    }
     let conversation_manager = ConversationManager::new(std::time::Duration::from_secs_f64(
         settings.background.debounce_seconds.max(0.0),
     ));

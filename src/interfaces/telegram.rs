@@ -85,10 +85,19 @@ impl SentMessageLog {
 
 pub type SharedSentMessageLog = Arc<Mutex<SentMessageLog>>;
 
+/// Callback invoked once, with the locked-in user id, the first time the bot
+/// accepts a user while in "lock to first user" mode. Used to persist the
+/// binding so a restart keeps the same owner.
+pub type FirstUserLockCallback = Arc<dyn Fn(i64) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct TelegramClient {
     token: String,
-    allowed_user_ids: Vec<i64>,
+    // Interior-mutable so the allowlist can be set at runtime — specifically the
+    // "lock to the first user who messages" flow used by the hosted runtime.
+    allowed_user_ids: Arc<Mutex<Vec<i64>>>,
+    lock_on_first: bool,
+    on_lock: Option<FirstUserLockCallback>,
     http: reqwest::Client,
     sent_messages: SharedSentMessageLog,
 }
@@ -104,14 +113,41 @@ impl TelegramClient {
         }
         Ok(Self {
             token,
-            allowed_user_ids,
+            allowed_user_ids: Arc::new(Mutex::new(allowed_user_ids)),
+            lock_on_first: false,
+            on_lock: None,
             http: reqwest::Client::new(),
             sent_messages: Arc::new(Mutex::new(SentMessageLog::default())),
         })
     }
 
+    /// Enable "lock to the first user who messages" mode: when no allowlist is
+    /// configured, the first user to reach the bot is bound in as the sole
+    /// allowed user and `on_lock` is called once to persist them. Without this,
+    /// an empty allowlist means *anyone* who finds the bot can talk to it.
+    pub fn with_first_user_lock(mut self, on_lock: FirstUserLockCallback) -> Self {
+        self.lock_on_first = true;
+        self.on_lock = Some(on_lock);
+        self
+    }
+
     pub fn user_allowed(&self, user_id: i64) -> bool {
-        self.allowed_user_ids.is_empty() || self.allowed_user_ids.contains(&user_id)
+        let mut allowed = match self.allowed_user_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if allowed.is_empty() {
+            if self.lock_on_first {
+                allowed.push(user_id);
+                drop(allowed);
+                if let Some(cb) = &self.on_lock {
+                    cb(user_id);
+                }
+                return true;
+            }
+            return true;
+        }
+        allowed.contains(&user_id)
     }
 
     /// A shared handle to this client's outgoing-message log, so other send
@@ -2123,6 +2159,29 @@ mod tests {
         let client = TelegramClient::new("token", vec![7]).unwrap();
         assert!(client.user_allowed(7));
         assert!(!client.user_allowed(8));
+    }
+
+    #[test]
+    fn empty_allowlist_without_lock_allows_anyone() {
+        let client = TelegramClient::new("token", Vec::new()).unwrap();
+        assert!(client.user_allowed(1));
+        assert!(client.user_allowed(2));
+    }
+
+    #[test]
+    fn first_user_lock_binds_first_user_then_rejects_others() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let captured = Arc::new(AtomicI64::new(0));
+        let sink = captured.clone();
+        let client = TelegramClient::new("token", Vec::new())
+            .unwrap()
+            .with_first_user_lock(Arc::new(move |uid| sink.store(uid, Ordering::SeqCst)));
+        // First user to message locks in (and is persisted via the callback).
+        assert!(client.user_allowed(111));
+        assert_eq!(captured.load(Ordering::SeqCst), 111);
+        // The bound owner stays allowed; everyone else is rejected.
+        assert!(client.user_allowed(111));
+        assert!(!client.user_allowed(222));
     }
 
     #[test]
