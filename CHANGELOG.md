@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.22.15 - Leaner initial tool set (better prefill)
+
+- **The top-level agent now loads ~12 tools up front instead of ~30.** Two
+  changes: (1) actor-orchestration tools are loaded initially only for actual
+  subagents — the top-level agent discovers them via `request_tool` (they were
+  already visible, just not lazy); (2) lower-frequency cortex tools
+  (`note_create`, `conversation_search`, `note_search`, `memory_complete`,
+  `todo_create`, `todo_list`) moved from initial to requestable. The core file/
+  shell/web/memory tools stay initial. With a Telegram bot connected the initial
+  set stays ≤ 15. Smaller prompts = faster prefill/TTFT, especially for smaller
+  models; everything remains reachable through tool discovery.
+
 ## 0.22.14 - Retry transient errors on the OpenRouter path
 
 - **The genai / OpenAI-compatible path now retries transient failures.** HTTP 429
