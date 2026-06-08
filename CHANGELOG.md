@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.22.8 - Runtime Telegram transport control
+
+- **Connect/disconnect Telegram at runtime, no restart**: a new transport
+  supervisor (in `api` mode) reconciles the running Telegram poller to a
+  desired-config file (`config/transports.json`). A control plane can write that
+  file to connect or disconnect a bot and the change is picked up live. When no
+  file is present it falls back to the static `TELEGRAM_*` settings, so desktop
+  behaviour is unchanged.
+- **Lock to the first user who messages**: `TelegramClient` gains an opt-in mode
+  where, with no allowlist configured, the first user to message the bot is
+  bound in as the sole allowed user (persisted to `config/transports-state.json`)
+  and everyone else is rejected — closing the "anyone who finds the bot can talk
+  to it" hole for unattended/hosted bots. The token and binding live in the
+  config dir, never the workspace, so they stay out of `lethe backup` archives.
+
 ## 0.22.7 - Streaming on OpenAI-compatible providers
 
 - **Stream assistant text on the generic (genai) provider path**: streaming
