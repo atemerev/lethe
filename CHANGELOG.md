@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.10 - Live web sync of Telegram turns
+
+- **Telegram conversations now show up live in an open web client**: an
+  Agent-level conversation-event broadcast carries each Telegram turn (the
+  incoming user message and the assistant reply) onto the HTTP `/events` SSE
+  stream, so a web tab can append them to its transcript without a reload. Web
+  `/chat` turns stream over a private per-request channel (not `/events`), so
+  there's no double-render.
+
 ## 0.22.9 - Telegram out-of-credits reply
 
 - **Telegram no longer fails silently when out of credits**: a turn rejected for
