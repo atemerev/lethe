@@ -497,6 +497,16 @@ fn metadata_map_from_value(
     }
 }
 
+const OUT_OF_CREDITS_MESSAGE: &str = "You're out of credits. Top up to keep chatting with Lethe.";
+
+/// True when an LLM turn failed because the user is out of credits — the hosted
+/// metering proxy rejects the call with HTTP 402 and this message. Lets the
+/// Telegram path surface a clear note instead of failing silently.
+fn error_is_out_of_credits(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("Out of credits") || text.contains("402 Payment Required")
+}
+
 fn telegram_process_callback(
     client: TelegramClient,
     agent: Arc<Agent>,
@@ -544,8 +554,27 @@ fn telegram_process_callback(
             if let Some(metadata) = metadata_value_from_map(&context.metadata) {
                 req = req.with_metadata(metadata);
             }
-            let response =
-                with_telegram_typing(&client, context.chat_id, agent.chat_once(req)).await?;
+            let response = match with_telegram_typing(
+                &client,
+                context.chat_id,
+                agent.chat_once(req),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = anyhow::Error::new(error);
+                    // Don't fail silently when the user is out of credits — the
+                    // hosted metering proxy rejects the LLM call with 402; reply.
+                    if error_is_out_of_credits(&error) {
+                        let _ = client
+                            .send_message(context.chat_id, OUT_OF_CREDITS_MESSAGE)
+                            .await;
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+            };
             if !context.interrupt.is_interrupted() {
                 tracing::info!(
                     chat_id = context.chat_id,
@@ -1388,6 +1417,14 @@ fn telegram_inter_message_delay(chunk: &str) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_out_of_credits_errors() {
+        let err = anyhow::anyhow!("LLM streaming chat request failed")
+            .context("Status: 402 Payment Required Body: {\"message\":\"Out of credits\"}");
+        assert!(error_is_out_of_credits(&err));
+        assert!(!error_is_out_of_credits(&anyhow::anyhow!("connection reset by peer")));
+    }
 
     fn test_settings(root: &std::path::Path) -> Settings {
         let mut settings = lethe::config::test_settings(root);
