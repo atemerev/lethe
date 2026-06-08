@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.22.9 - Telegram out-of-credits reply
+
+- **Telegram no longer fails silently when out of credits**: a turn rejected for
+  lack of credits (the hosted metering proxy returns HTTP 402) bubbled the error
+  and sent nothing back, so the user saw silence. The Telegram path now detects
+  that case and replies with a clear out-of-credits message.
+
 ## 0.22.8 - Runtime Telegram transport control
 
 - **Connect/disconnect Telegram at runtime, no restart**: a new transport
