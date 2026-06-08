@@ -484,35 +484,103 @@ impl LlmRouter {
         }
 
         let request_log = llm_debug_request_payload("genai", model, use_aux, &request, &options);
-        match self.client.exec_chat(model, request, Some(&options)).await {
-            Ok(response) => {
-                log_llm_interaction(
-                    "chat",
-                    model,
-                    request_log,
-                    json!({
-                        "ok": true,
-                        "response": &response,
-                    }),
-                );
-                Ok(response)
-            }
-            Err(error) => {
-                let error = anyhow::Error::new(error)
-                    .context(format!("LLM chat request failed for model {model}"));
-                log_llm_interaction(
-                    "chat_error",
-                    model,
-                    request_log,
-                    json!({
-                        "ok": false,
-                        "error": format!("{error:#}"),
-                    }),
-                );
-                Err(error)
+        // Retry transient upstream failures (HTTP 429 rate limits, 5xx, network
+        // blips). OpenRouter rate-limits popular shared-pool models, so a brief
+        // spike should self-heal rather than surface as a hard error. Permanent
+        // errors (400/401/403/404, malformed request) are returned immediately.
+        let mut last_error: Option<anyhow::Error> = None;
+        for attempt in 0..GENAI_MAX_ATTEMPTS {
+            match self
+                .client
+                .exec_chat(model, request.clone(), Some(&options))
+                .await
+            {
+                Ok(response) => {
+                    log_llm_interaction(
+                        "chat",
+                        model,
+                        request_log.clone(),
+                        json!({ "ok": true, "response": &response }),
+                    );
+                    return Ok(response);
+                }
+                Err(error) => {
+                    let retryable = genai_error_is_retryable(&error);
+                    let error = anyhow::Error::new(error)
+                        .context(format!("LLM chat request failed for model {model}"));
+                    if retryable && attempt + 1 < GENAI_MAX_ATTEMPTS {
+                        let wait = genai_retry_backoff(attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            wait_ms = wait.as_millis() as u64,
+                            error = %format!("{error:#}"),
+                            "retryable LLM error — backing off and retrying"
+                        );
+                        last_error = Some(error);
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    log_llm_interaction(
+                        "chat_error",
+                        model,
+                        request_log.clone(),
+                        json!({ "ok": false, "error": format!("{error:#}") }),
+                    );
+                    return Err(error);
+                }
             }
         }
+        Err(last_error.unwrap_or_else(|| anyhow!("LLM chat request failed for model {model}")))
     }
+}
+
+/// How many times to attempt a genai (OpenAI-compatible / OpenRouter) chat
+/// request before giving up. Mirrors the Anthropic OAuth path's retry budget.
+const GENAI_MAX_ATTEMPTS: u32 = 3;
+
+/// Whether an HTTP status is worth retrying: rate limits (429) and transient
+/// upstream failures (5xx). Permanent client errors (4xx other than 429) are not.
+fn is_retryable_status(code: u16) -> bool {
+    code == 429 || (500..=504).contains(&code)
+}
+
+/// Whether a genai error is transient and worth retrying. Matches the
+/// structured `HttpError` status where available, and otherwise falls back to
+/// the rendered message (covers `WebModelCall`/webc `ResponseFailedStatus` and
+/// reqwest timeout/connection errors, plus OpenRouter's "rate-limited upstream").
+fn genai_error_is_retryable(error: &genai::Error) -> bool {
+    if let genai::Error::HttpError { status, .. } = error {
+        return is_retryable_status(status.as_u16());
+    }
+    let s = format!("{error}").to_ascii_lowercase();
+    if s.contains("429")
+        || s.contains("too many requests")
+        || s.contains("rate-limited")
+        || s.contains("rate limit")
+        || s.contains("rate_limit")
+    {
+        return true;
+    }
+    if ["'500'", "'502'", "'503'", "'504'", "internal server error", "bad gateway",
+        "service unavailable", "gateway timeout", "overloaded"]
+        .iter()
+        .any(|m| s.contains(m))
+    {
+        return true;
+    }
+    s.contains("timed out")
+        || s.contains("timeout")
+        || s.contains("connection reset")
+        || s.contains("connection closed")
+        || s.contains("connection refused")
+        || s.contains("error sending request")
+        || s.contains("dns error")
+}
+
+/// Capped exponential backoff between genai retry attempts: ~1s, then ~2s.
+fn genai_retry_backoff(attempt: u32) -> Duration {
+    let secs = 1u64 << attempt.min(2); // 1, 2, 4
+    Duration::from_millis((secs * 1000).min(4000))
 }
 
 #[derive(Clone)]
@@ -2348,6 +2416,36 @@ mod tests {
         config.tool_model = "deepseek".to_string();
         assert!(config.has_tool_model());
         assert_eq!(config.tool_model(), "deepseek");
+    }
+
+    #[test]
+    fn retryable_status_codes() {
+        for code in [429u16, 500, 502, 503, 504] {
+            assert!(is_retryable_status(code), "{code} should be retryable");
+        }
+        for code in [400u16, 401, 403, 404, 422, 200] {
+            assert!(!is_retryable_status(code), "{code} should not be retryable");
+        }
+    }
+
+    #[test]
+    fn genai_http_error_retry_classification() {
+        let mk = |code: u16| genai::Error::HttpError {
+            status: reqwest::StatusCode::from_u16(code).unwrap(),
+            canonical_reason: String::new(),
+            body: String::new(),
+        };
+        assert!(genai_error_is_retryable(&mk(429)));
+        assert!(genai_error_is_retryable(&mk(503)));
+        assert!(!genai_error_is_retryable(&mk(400)));
+        assert!(!genai_error_is_retryable(&mk(404)));
+    }
+
+    #[test]
+    fn genai_backoff_is_bounded_and_increasing() {
+        assert_eq!(genai_retry_backoff(0), Duration::from_secs(1));
+        assert_eq!(genai_retry_backoff(1), Duration::from_secs(2));
+        assert!(genai_retry_backoff(10) <= Duration::from_secs(4));
     }
 
     #[test]
