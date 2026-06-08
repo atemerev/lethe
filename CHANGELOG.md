@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.22.11 - Dynamic tool-model routing
+
+- **A turn can now switch models mid-flight for tool chains**: set the new
+  optional `LLM_MODEL_TOOL` and a turn starts on `LLM_MODEL`, then transparently
+  switches to the tool model the moment the assistant calls a tool — staying on
+  it for the rest of the chain and the post-chain reply — and the next turn
+  starts on `LLM_MODEL` again. This lets a cheap model drive normal conversation
+  while a stronger reasoner runs tool chains. Leave `LLM_MODEL_TOOL` empty (the
+  default) for the previous single-model behavior. The switch also applies to
+  background actors/DMN turns that call tools.
+
 ## 0.22.10 - Live web sync of Telegram turns
 
 - **Telegram conversations now show up live in an open web client**: an
