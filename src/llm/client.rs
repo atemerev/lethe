@@ -13,7 +13,8 @@ use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::{
     BinarySource, CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatRole,
-    ContentPart, MessageContent, PromptTokensDetails, ToolCall, ToolResponse, Usage,
+    ChatStreamEvent, ContentPart, MessageContent, PromptTokensDetails, ToolCall, ToolResponse,
+    Usage,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{ModelIden, ServiceTarget};
@@ -311,12 +312,100 @@ impl LlmRouter {
                 .await
                 .with_context(|| format!("LLM streaming chat request failed for model {model}"));
         }
-        // Non-streaming fallback (genai-native path). Emit one delta with
-        // the full text so streaming clients still see it via on_delta.
-        let response = self.exec_chat_request(request, use_aux).await?;
-        if let Some(text) = response.first_text() {
-            on_delta(text);
+        // genai-native path (OpenAI-compatible providers, incl. OpenRouter): stream
+        // through the genai client so assistant text reaches `on_delta` token-by-token.
+        // We turn on the StreamEnd captures so that, once the stream finishes, we can
+        // rebuild the same ChatResponse (text + tool calls + usage) the non-streaming
+        // path would have returned — the rest of the agent loop is unchanged.
+        let options = options
+            .with_capture_content(true)
+            .with_capture_tool_calls(true)
+            .with_capture_usage(true)
+            .with_capture_reasoning_content(true);
+        let request_log = llm_debug_request_payload("genai-stream", model, use_aux, &request, &options);
+        let stream_response = match self
+            .client
+            .exec_chat_stream(model, request.clone(), Some(&options))
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // Pre-stream failure (network / rate-limit blip before any bytes
+                // arrived): fall back to the non-streaming path so the user still
+                // gets the reply, surfaced via a single delta.
+                let error = anyhow::Error::new(error)
+                    .context(format!("LLM streaming chat request failed for model {model}"));
+                log_llm_interaction(
+                    "chat_stream_error",
+                    model,
+                    request_log,
+                    json!({ "ok": false, "error": format!("{error:#}") }),
+                );
+                let response = self.exec_chat_request(request, use_aux).await?;
+                if let Some(text) = response.first_text() {
+                    on_delta(text);
+                }
+                return Ok(response);
+            }
+        };
+
+        let model_iden = stream_response.model_iden.clone();
+        let mut stream = stream_response.stream;
+        let mut captured_content: Option<MessageContent> = None;
+        let mut captured_usage: Option<Usage> = None;
+        let mut reasoning_content: Option<String> = None;
+        let mut stream_error: Option<anyhow::Error> = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(ChatStreamEvent::Chunk(chunk)) => {
+                    if !chunk.content.is_empty() {
+                        on_delta(&chunk.content);
+                    }
+                }
+                Ok(ChatStreamEvent::End(end)) => {
+                    captured_content = end.captured_content;
+                    captured_usage = end.captured_usage;
+                    reasoning_content = end.captured_reasoning_content;
+                }
+                // Start / ReasoningChunk / ThoughtSignatureChunk / ToolCallChunk:
+                // tool calls are recovered from the captured content at End.
+                Ok(_) => {}
+                Err(error) => {
+                    // Mid-stream failure: some deltas may already be on screen, so
+                    // we don't retry (that would duplicate text) — surface the error.
+                    stream_error = Some(
+                        anyhow::Error::new(error)
+                            .context(format!("LLM streaming chat request failed for model {model}")),
+                    );
+                    break;
+                }
+            }
         }
+
+        if let Some(error) = stream_error {
+            log_llm_interaction(
+                "chat_stream_error",
+                model,
+                request_log,
+                json!({ "ok": false, "error": format!("{error:#}") }),
+            );
+            return Err(error);
+        }
+
+        let response = ChatResponse {
+            content: captured_content.unwrap_or_else(|| MessageContent::from_text(String::new())),
+            reasoning_content,
+            model_iden: model_iden.clone(),
+            provider_model_iden: model_iden,
+            usage: captured_usage.unwrap_or_default(),
+            captured_raw_body: None,
+        };
+        log_llm_interaction(
+            "chat",
+            model,
+            request_log,
+            json!({ "ok": true, "response": &response }),
+        );
         Ok(response)
     }
 
