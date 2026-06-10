@@ -149,6 +149,43 @@ fn subagent_sees_its_previous_turn_in_next_prompt() {
 }
 
 #[test]
+fn actor_prompt_fragments_are_template_overridable() {
+    // The actor-protocol prompt fragments (previous-turn checkpoint header,
+    // restart notice, max-turns handoff) come from PromptStore templates with
+    // embedded defaults — a workspace prompts/ file must override them.
+    let tmp = tempfile::tempdir().unwrap();
+    let prompts_dir = tmp.path().join("workspace").join("prompts");
+    std::fs::create_dir_all(&prompts_dir).unwrap();
+    std::fs::write(
+        prompts_dir.join("actor_previous_turn.md"),
+        "CUSTOM CHECKPOINT HEADER:\n{checkpoint}",
+    )
+    .unwrap();
+
+    let (mut registry, _principal, worker) = registry_with_principal_and_worker();
+    registry.set_prompts(crate::llm::prompts::PromptStore::new(
+        tmp.path().join("workspace"),
+        tmp.path().join("config"),
+    ));
+    registry
+        .record_actor_turn_response(&worker, "NEXT: benchmark serde_v2.")
+        .unwrap();
+
+    let prompt = registry.build_system_prompt(&worker).unwrap();
+    assert!(prompt.contains("CUSTOM CHECKPOINT HEADER:"));
+    assert!(prompt.contains("benchmark serde_v2"));
+    assert!(!prompt.contains("do not redo finished work"));
+
+    // Without an override, the embedded default text is used.
+    let (mut vanilla, _p, vanilla_worker) = registry_with_principal_and_worker();
+    vanilla
+        .record_actor_turn_response(&vanilla_worker, "NEXT: benchmark serde_v2.")
+        .unwrap();
+    let prompt = vanilla.build_system_prompt(&vanilla_worker).unwrap();
+    assert!(prompt.contains("do not redo finished work"));
+}
+
+#[test]
 fn max_turns_termination_hands_checkpoint_to_parent() {
     let (mut registry, principal, worker) = registry_with_principal_and_worker();
 

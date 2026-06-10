@@ -130,7 +130,10 @@ impl Heartbeat {
         let mut variables = HashMap::new();
         variables.insert("timestamp".to_string(), timestamp.to_string());
         variables.insert("reminders".to_string(), format_reminder_block(reminders));
-        variables.insert("open_work".to_string(), format_open_work_block(open_work));
+        variables.insert(
+            "open_work".to_string(),
+            format_open_work_block(prompts, open_work),
+        );
 
         let (name, fallback) = if use_full_context {
             (
@@ -375,17 +378,18 @@ fn format_reminder_block(reminders: &str) -> String {
     }
 }
 
-fn format_open_work_block(open_work: &str) -> String {
+// Wrapper text lives in the overridable `heartbeat_open_work` template.
+fn format_open_work_block(prompts: &PromptStore, open_work: &str) -> String {
     let open_work = open_work.trim();
     if open_work.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Open work — unfinished subagents and in-progress/overdue todos. \
-             Anything BLOCKED or stalled here needs a decision from you \
-             (unblock it, message the subagent, escalate, or close it out):\n{open_work}\n\n"
-        )
+        return String::new();
     }
+    let mut variables = HashMap::new();
+    variables.insert("open_work".to_string(), open_work.to_string());
+    let body = prompts
+        .render("heartbeat_open_work", &variables, "Open work:\n{open_work}")
+        .text;
+    format!("{body}\n\n")
 }
 
 #[cfg(test)]

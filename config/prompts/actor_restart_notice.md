@@ -1,0 +1,1 @@
+[System] The host process restarted while you were working. Your goals, task state, and last checkpoint were restored; the rest of your in-memory context was lost. Review them, then continue the task or terminate with a result.

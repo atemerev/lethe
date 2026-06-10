@@ -176,18 +176,34 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-/// Recover Gemma/llama.cpp text-embedded tool calls of the form
-/// `<tool_call:func_name{key:"value", ...}>`. Returns native [`ToolCall`]s
-/// when at least one is matched. Matches Python's `_extract_text_tool_calls`.
+fn gemma_tool_call_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"))
+}
+
+fn bracket_tool_call_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?s)\[tool_call:\s*(\w+)\s*\((.*?)\)\s*\]").expect("valid regex")
+    })
+}
+
+/// Recover text-embedded tool calls that models emit instead of using the
+/// native protocol field. Two shapes are recognized:
+/// - Gemma/llama.cpp: `<tool_call:func_name{key:"value", ...}>` (matches
+///   Python's `_extract_text_tool_calls`)
+/// - `[tool_call: func_name(key="value", ...)]` — small models mimic this
+///   notation when instruction examples describe tool calls in prose
+/// Returns native [`ToolCall`]s when at least one is matched.
 fn recover_text_tool_calls(content: &str) -> Vec<ToolCall> {
-    static OUTER: OnceLock<Regex> = OnceLock::new();
     static QUOTED: OnceLock<Regex> = OnceLock::new();
-    let outer =
-        OUTER.get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"));
+    static EQUALS_QUOTED: OnceLock<Regex> = OnceLock::new();
     let quoted = QUOTED.get_or_init(|| Regex::new(r#"(\w+):"([^"]*)""#).expect("valid regex"));
+    let equals_quoted = EQUALS_QUOTED
+        .get_or_init(|| Regex::new(r#"(\w+)\s*=\s*"((?:\\.|[^"\\])*)""#).expect("valid regex"));
 
     let mut calls = Vec::new();
-    for caps in outer.captures_iter(content) {
+    for caps in gemma_tool_call_regex().captures_iter(content) {
         let fn_name = caps.get(1).map_or("", |m| m.as_str()).trim().to_string();
         let raw_args = caps.get(2).map_or("", |m| m.as_str());
         let clean = raw_args.replace("<|\"|>", "\"");
@@ -220,7 +236,62 @@ fn recover_text_tool_calls(content: &str) -> Vec<ToolCall> {
             thought_signatures: None,
         });
     }
+    for caps in bracket_tool_call_regex().captures_iter(content) {
+        let fn_name = caps.get(1).map_or("", |m| m.as_str()).trim().to_string();
+        let raw_args = caps.get(2).map_or("", |m| m.as_str());
+        let mut args = Map::new();
+        let mut pairs = equals_quoted.captures_iter(raw_args).peekable();
+        if pairs.peek().is_some() {
+            for pair in pairs {
+                args.insert(
+                    pair[1].trim().to_string(),
+                    Value::String(pair[2].replace("\\\"", "\"").replace("\\\\", "\\")),
+                );
+            }
+        } else {
+            for piece in raw_args.split(',') {
+                if let Some((key, value)) = piece.split_once('=') {
+                    let key = key.trim();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    args.insert(
+                        key.to_string(),
+                        Value::String(value.trim().trim_matches('"').to_string()),
+                    );
+                }
+            }
+        }
+        // Non-empty parens that parsed to no arguments is a placeholder quote
+        // (e.g. `edit_file(...)` in prose), not an executable call — skip it.
+        if !raw_args.trim().is_empty() && args.is_empty() {
+            continue;
+        }
+        calls.push(ToolCall {
+            call_id: format!("call-{}", Uuid::new_v4().simple()),
+            fn_name,
+            fn_arguments: Value::Object(args),
+            thought_signatures: None,
+        });
+    }
     calls
+}
+
+/// Remove recovered textual tool-call markers from assistant text so the fake
+/// syntax neither reaches the user nor persists in history, where the model
+/// would re-learn it as the way to invoke tools.
+fn strip_text_tool_call_markers(content: &str) -> String {
+    let stripped = gemma_tool_call_regex().replace_all(content, "");
+    let stripped = bracket_tool_call_regex().replace_all(&stripped, "");
+    // Tidy bubble separators orphaned by the removal.
+    let mut text = stripped.trim().to_string();
+    while let Some(rest) = text.strip_suffix("---") {
+        text = rest.trim_end().to_string();
+    }
+    while let Some(rest) = text.strip_prefix("---") {
+        text = rest.trim_start().to_string();
+    }
+    text
 }
 
 /// Result of one full tool-loop turn. `stop_reason` is set when the loop was
@@ -401,7 +472,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 .last_prompt_tokens
                 .store(prompt_tokens as u64, Ordering::Relaxed);
         }
-        let text = response.first_text().unwrap_or_default().to_string();
+        let mut text = response.first_text().unwrap_or_default().to_string();
         let mut tool_calls = response
             .tool_calls()
             .into_iter()
@@ -418,6 +489,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                     "recovered text-embedded tool calls"
                 );
                 tool_calls = recovered;
+                text = strip_text_tool_call_markers(&text);
             }
         }
         tracing::info!(
@@ -653,7 +725,11 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     let stop_reason = circuit_breaker_reason
         .clone()
         .unwrap_or_else(|| format!("tool_iteration_cap ({MAX_TOOL_ITERATIONS} iterations)"));
-    let nudge = wrap_up_nudge(total_tool_calls, &stop_reason);
+    let prompts = crate::llm::prompts::PromptStore::new(
+        &context.settings.paths.workspace_dir,
+        &context.settings.paths.config_dir,
+    );
+    let nudge = wrap_up_nudge(&prompts, total_tool_calls, &stop_reason);
     request.messages.push(ChatMessage::user(nudge));
     request.tools = None;
     let router = context
@@ -719,17 +795,24 @@ pub(super) async fn complete_turn_with_tools_config_shared(
 /// checkpoint. The reply is persisted (conversation history for the cortex,
 /// the actor's own message log for subagents), so a structured GOAL / DONE /
 /// REMAINING / NEXT block is what lets the next turn — or a successor agent —
-/// pick the work up instead of re-deriving it.
-fn wrap_up_nudge(total_tool_calls: usize, stop_reason: &str) -> String {
-    format!(
-        "[WRAP UP — turn budget exhausted ({stop_reason}) after {total_tool_calls} tool calls. \
-         No more tool calls. Respond NOW with a resumable checkpoint: \
-         1) GOAL — what you are trying to accomplish; \
-         2) DONE — what is finished so far, with concrete artifacts (files, ids, results); \
-         3) REMAINING — what is left; \
-         4) NEXT — the exact next step to take when work resumes. \
-         This reply is saved; you or a successor will resume from it.]"
-    )
+/// pick the work up instead of re-deriving it. Text lives in the overridable
+/// `tool_loop_wrap_up` template.
+fn wrap_up_nudge(
+    prompts: &crate::llm::prompts::PromptStore,
+    total_tool_calls: usize,
+    stop_reason: &str,
+) -> String {
+    let mut variables = std::collections::HashMap::new();
+    variables.insert("tool_calls".to_string(), total_tool_calls.to_string());
+    variables.insert("stop_reason".to_string(), stop_reason.to_string());
+    prompts
+        .render(
+            "tool_loop_wrap_up",
+            &variables,
+            "[WRAP UP ({stop_reason}) after {tool_calls} tool calls. No more tool calls. \
+             Respond NOW with a resumable checkpoint: GOAL, DONE, REMAINING, NEXT.]",
+        )
+        .text
 }
 
 /// The genai layer doesn't surface `finish_reason`, so detect output-limit
@@ -943,6 +1026,55 @@ mod tests {
     }
 
     #[test]
+    fn recover_text_tool_calls_parses_bracket_prompt_style() {
+        // Verbatim failure observed in prod 2026-06-10: gemma imitated the
+        // bracket notation formerly used in agent_instructions.md examples.
+        let content = "hey! ❤️\n\n---\n\nlet me check my current state...\n\n---\n\n[tool_call: bash(command=\"lethe --version\")]";
+        let calls = recover_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fn_name, "bash");
+        assert_eq!(
+            calls[0].fn_arguments.get("command").and_then(Value::as_str),
+            Some("lethe --version")
+        );
+    }
+
+    #[test]
+    fn recover_text_tool_calls_bracket_handles_multiple_and_escaped_args() {
+        let content = r#"[tool_call: edit_file(path="run.ts", new_string="const x = \"y\";")]"#;
+        let calls = recover_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fn_name, "edit_file");
+        assert_eq!(
+            calls[0].fn_arguments.get("path").and_then(Value::as_str),
+            Some("run.ts")
+        );
+        assert_eq!(
+            calls[0]
+                .fn_arguments
+                .get("new_string")
+                .and_then(Value::as_str),
+            Some(r#"const x = "y";"#)
+        );
+    }
+
+    #[test]
+    fn recover_text_tool_calls_skips_bracket_placeholder_quotes() {
+        // Prose mentioning the notation with elided args must not execute.
+        let calls = recover_text_tool_calls("never write [tool_call: edit_file(...)] as text");
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn strip_text_tool_call_markers_removes_call_and_orphaned_separators() {
+        let content = "let me check my current state...\n\n---\n\n[tool_call: bash(command=\"lethe --version\")]";
+        assert_eq!(
+            strip_text_tool_call_markers(content),
+            "let me check my current state..."
+        );
+    }
+
+    #[test]
     fn free_tool_carve_out_recognizes_memory_and_telegram() {
         assert!(is_free_tool("archival_search"));
         assert!(is_free_tool("note_search"));
@@ -1024,15 +1156,21 @@ mod tests {
 
     #[test]
     fn wrap_up_nudge_demands_resumable_checkpoint() {
-        let nudge = wrap_up_nudge(50, "tool_iteration_cap (50 iterations)");
+        // Empty paths → the embedded tool_loop_wrap_up template is used.
+        let prompts = crate::llm::prompts::PromptStore::new("", "");
+        let nudge = wrap_up_nudge(&prompts, 50, "tool_iteration_cap (50 iterations)");
         assert!(nudge.contains("GOAL"));
         assert!(nudge.contains("DONE"));
         assert!(nudge.contains("REMAINING"));
         assert!(nudge.contains("NEXT"));
         assert!(nudge.contains("tool_iteration_cap"));
+        assert!(nudge.contains("50 tool calls"));
         assert!(nudge.contains("No more tool calls"));
+        // All variables substituted — no leftover placeholders.
+        assert!(!nudge.contains('{'));
 
         let breaker_nudge = wrap_up_nudge(
+            &prompts,
             12,
             "tool_error_cap hit (6 errors, weighted pressure 12 >= 16)",
         );

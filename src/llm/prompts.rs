@@ -156,6 +156,30 @@ pub const EMBEDDED_PROMPTS: &[(&str, &str)] = &[
         "notes_extract",
         include_str!("../../config/prompts/notes_extract.md"),
     ),
+    (
+        "tool_loop_wrap_up",
+        include_str!("../../config/prompts/tool_loop_wrap_up.md"),
+    ),
+    (
+        "active_tasks",
+        include_str!("../../config/prompts/active_tasks.md"),
+    ),
+    (
+        "heartbeat_open_work",
+        include_str!("../../config/prompts/heartbeat_open_work.md"),
+    ),
+    (
+        "actor_previous_turn",
+        include_str!("../../config/prompts/actor_previous_turn.md"),
+    ),
+    (
+        "actor_restart_notice",
+        include_str!("../../config/prompts/actor_restart_notice.md"),
+    ),
+    (
+        "actor_max_turns_handoff",
+        include_str!("../../config/prompts/actor_max_turns_handoff.md"),
+    ),
 ];
 
 /// The overridable prompt templates as `(name, embedded_text)` pairs.

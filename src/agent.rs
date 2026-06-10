@@ -208,6 +208,7 @@ impl Agent {
         let last_prompt_tokens = Arc::new(AtomicU64::new(0));
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
+            registry.set_prompts(prompts.clone());
             // Durable actor state: snapshots every mutation into the unified
             // memory DB and rehydrates unfinished subagents after a restart —
             // a deploy or self-restart interrupts work instead of erasing it.
@@ -821,17 +822,16 @@ fn build_system_prompt(
     }
     // Standing work commitments — in-progress and overdue todos — are injected
     // every turn so unfinished work survives context compaction and session
-    // restarts without the model having to remember to call todo_list.
+    // restarts without the model having to remember to call todo_list. Text
+    // comes from the overridable `active_tasks` template.
     match memory.todos.open_work_digest(ACTIVE_TASKS_PROMPT_LIMIT) {
         Ok(digest) if !digest.trim().is_empty() => {
-            volatile_builder.block(
-                "active_tasks",
-                format!(
-                    "Your open work (in-progress and overdue todos). Keep statuses honest: \
-                     mark items in_progress when you start, completed when done \
-                     (todo_update / todo_complete).\n{digest}"
-                ),
-            );
+            let mut variables = std::collections::HashMap::new();
+            variables.insert("digest".to_string(), digest);
+            let body = prompts
+                .render("active_tasks", &variables, "Your open work:\n{digest}")
+                .text;
+            volatile_builder.block("active_tasks", body);
         }
         Ok(_) => {}
         Err(error) => tracing::warn!(error = %error, "active-tasks digest failed"),

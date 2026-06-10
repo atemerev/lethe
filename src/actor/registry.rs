@@ -24,6 +24,10 @@ pub struct ActorRegistry {
     /// Optional SQLite write-through. When set, every actor mutation is
     /// snapshotted so unfinished work survives a process restart.
     store: Option<crate::actor::persistence::ActorStore>,
+    /// Template source for the actor-protocol prompt fragments (previous-turn
+    /// checkpoint, restart notice, max-turns handoff). Defaults to embedded
+    /// templates; `set_prompts` wires the workspace-overridable store.
+    prompts: crate::llm::prompts::PromptStore,
 }
 
 impl ActorRegistry {
@@ -35,11 +39,16 @@ impl ActorRegistry {
             principal_id: None,
             events: ActorEventBus::new(1000),
             store: None,
+            prompts: crate::llm::prompts::PromptStore::new("", ""),
         }
     }
 
     pub fn set_store(&mut self, store: crate::actor::persistence::ActorStore) {
         self.store = Some(store);
+    }
+
+    pub fn set_prompts(&mut self, prompts: crate::llm::prompts::PromptStore) {
+        self.prompts = prompts;
     }
 
     /// Best-effort write-through after a mutation. Persistence failures are
@@ -133,9 +142,12 @@ impl ActorRegistry {
             let notice = ActorMessage::new(
                 fallback_parent,
                 actor.id.clone(),
-                "[System] The host process restarted while you were working. Your goals, \
-                 task state, and last checkpoint were restored; the rest of your in-memory \
-                 context was lost. Review them, then continue the task or terminate with a result.",
+                self.prompts
+                    .load(
+                        "actor_restart_notice",
+                        "[System] The host process restarted while you were working; your state was restored. Continue the task or terminate with a result.",
+                    )
+                    .text,
                 MessageIntent::Message,
             );
             actor.messages.push(notice.clone());
@@ -569,7 +581,7 @@ impl ActorRegistry {
             // state and the actor's final checkpoint to the parent, so a
             // successor can be spawned to continue instead of restarting from
             // zero.
-            let handoff = max_turns_handoff(&actor);
+            let handoff = max_turns_handoff(&self.prompts, &actor);
             self.terminate(actor_id, Outcome::MaxTurns, handoff)?;
             return Ok(None);
         }
@@ -728,17 +740,25 @@ impl ActorRegistry {
         // Subagent turns are otherwise memoryless — each turn rebuilds the
         // prompt from goals + inbox, so without this block an actor couldn't
         // see its own prior conclusions (or the checkpoint a cut-short turn
-        // wrote). Surface the last self-recorded response.
+        // wrote). Surface the last self-recorded response; wording comes from
+        // the overridable `actor_previous_turn` template.
         if !actor.is_principal
             && let Some(last_own) = last_self_response(actor)
         {
-            builder.block(
-                "your_previous_turn",
-                format!(
-                    "You wrote this at the end of your previous turn. Continue from it; do not redo finished work:\n{}",
-                    truncate_chars(&last_own.content, 1000)
-                ),
+            let mut variables = std::collections::HashMap::new();
+            variables.insert(
+                "checkpoint".to_string(),
+                truncate_chars(&last_own.content, 1000),
             );
+            let body = self
+                .prompts
+                .render(
+                    "actor_previous_turn",
+                    &variables,
+                    "Your previous turn ended with:\n{checkpoint}",
+                )
+                .text;
+            builder.block("your_previous_turn", body);
         }
 
         let mut visible = self.discover_active(&actor.config.group);
@@ -1210,28 +1230,40 @@ fn last_self_response(actor: &Actor) -> Option<&ActorMessage> {
 
 /// Termination result for an actor that ran out of turns: last task state +
 /// final checkpoint, so the parent's notification is a handoff rather than a
-/// bare failure notice.
-fn max_turns_handoff(actor: &Actor) -> String {
-    let mut parts = vec![format!(
-        "Max turns reached ({}) before completing task.",
-        actor.config.max_turns.max(1)
-    )];
+/// bare failure notice. Wording comes from the overridable
+/// `actor_max_turns_handoff` template; the state/checkpoint lines are
+/// structural and pre-composed into `{details}`.
+fn max_turns_handoff(prompts: &crate::llm::prompts::PromptStore, actor: &Actor) -> String {
+    let mut details = Vec::new();
     if !actor.task_state_note.is_empty() {
-        parts.push(format!(
+        details.push(format!(
             "Last task state: {} — {}",
             state_name(actor.task_state),
             actor.task_state_note
         ));
     }
     if let Some(last_own) = last_self_response(actor) {
-        parts.push(format!(
+        details.push(format!(
             "Last checkpoint:\n{}",
             truncate_chars(&last_own.content, 1200)
         ));
     }
-    parts.push(
-        "To continue this work, spawn a successor with the same goals and the checkpoint above as context."
-            .to_string(),
+    let details = if details.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", details.join("\n"))
+    };
+    let mut variables = std::collections::HashMap::new();
+    variables.insert(
+        "max_turns".to_string(),
+        actor.config.max_turns.max(1).to_string(),
     );
-    parts.join("\n")
+    variables.insert("details".to_string(), details);
+    prompts
+        .render(
+            "actor_max_turns_handoff",
+            &variables,
+            "Max turns reached ({max_turns}) before completing task.\n{details}Spawn a successor to continue.",
+        )
+        .text
 }
