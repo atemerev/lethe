@@ -24,6 +24,11 @@ pub struct WebStream {
 	partial_message: Option<String>,
 	// If a poll retrieved multiple messages, we keep them to be sent in the next poll
 	remaining_messages: Option<VecDeque<String>>,
+	// If a chunk ended mid-UTF-8-character, we keep the incomplete trailing bytes
+	// here and prepend them to the next chunk before decoding. Without this, a
+	// multi-byte character (Cyrillic, emoji, …) split across two network chunks
+	// makes `from_utf8` fail and aborts the entire stream.
+	partial_bytes: Vec<u8>,
 }
 
 pub enum StreamMode {
@@ -42,6 +47,7 @@ impl WebStream {
 			bytes_stream: None,
 			partial_message: None,
 			remaining_messages: None,
+			partial_bytes: Vec::new(),
 		}
 	}
 
@@ -53,6 +59,7 @@ impl WebStream {
 			bytes_stream: None,
 			partial_message: None,
 			remaining_messages: None,
+			partial_bytes: Vec::new(),
 		}
 	}
 }
@@ -110,8 +117,26 @@ impl Stream for WebStream {
 			if let Some(ref mut stream) = this.bytes_stream {
 				match stream.as_mut().poll_next(cx) {
 					Poll::Ready(Some(Ok(bytes))) => {
-						let buff_string = match String::from_utf8(bytes.to_vec()) {
-							Ok(s) => s,
+						// Prepend any bytes left over from a previous chunk that ended
+						// mid-UTF-8-character, then decode only the valid prefix and carry
+						// any incomplete trailing sequence into the next poll. Without this,
+						// a multi-byte char (Cyrillic, emoji, …) split across two network
+						// chunks made `from_utf8` fail and aborted the whole stream.
+						let mut buf = std::mem::take(&mut this.partial_bytes);
+						buf.extend_from_slice(&bytes);
+						let buff_string = match std::str::from_utf8(&buf) {
+							Ok(s) => s.to_string(),
+							// Incomplete trailing sequence (`error_len() == None`): decode the
+							// validated prefix and stash the remaining bytes for the next chunk.
+							Err(e) if e.error_len().is_none() => {
+								let valid = e.valid_up_to();
+								this.partial_bytes = buf[valid..].to_vec();
+								// `valid` is `from_utf8`'s validated-prefix length, so `buf[..valid]`
+								// is well-formed UTF-8 and `from_utf8_lossy` re-decodes it exactly
+								// (no replacement chars) without needing an `unsafe` block.
+								String::from_utf8_lossy(&buf[..valid]).into_owned()
+							}
+							// Genuinely invalid bytes: preserve the original error behavior.
 							Err(e) => return Poll::Ready(Some(Err(Box::new(e) as BoxError))),
 						};
 
