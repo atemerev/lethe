@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.88+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 ![Swiss Made Software](https://img.shields.io/badge/swiss%20made-software-red?style=flat-square&labelColor=FF0000&logoColor=white)
 
-Lethe is a long-running personal AI assistant with a brain-inspired cognitive architecture: cortex, hippocampus, brainstem, and a default-mode network running as cooperating actors. She has continuous memory across sessions, notices things on her own, delegates to focused subagents, and can read her own source — propose changes to it, restart herself with new logic. Lives on your machine as an isolated, rootless container (or, with `--yolo`, natively as a systemd/launchd service). Persists across reboots, models, hardware upgrades.
+Lethe is a long-running personal AI assistant with a brain-inspired cognitive architecture: cortex, hippocampus, brainstem, and a default-mode network running as cooperating actors. She has continuous memory across sessions, notices things on her own, delegates to focused subagents, and can read her own source - propose changes to it, restart herself with new logic. Lives on your machine as an isolated, rootless container (or, with `--yolo`, natively as a systemd/launchd service). Persists across reboots, models, hardware upgrades.
 
 Written in Rust as a single ~50 MB static binary. Routes LLM traffic through `genai`. Intentionally has no web console.
 
@@ -16,7 +16,7 @@ Written in Rust as a single ~50 MB static binary. Routes LLM traffic through `ge
 curl -fsSL https://lethe.gg/install | bash
 ```
 
-The installer drops a prebuilt binary at `~/.lethe/bin/lethe` and hands off to `lethe init`, which walks you through provider, model, API key, and identity — then deploys Lethe as an **isolated, rootless container** (the default: Podman on Linux, Apple Container on macOS, installed for you if missing). Pass `--yolo` to skip the container and run natively on the host instead.
+The installer drops a prebuilt binary at `~/.lethe/bin/lethe` and hands off to `lethe init`, which walks you through provider, model, API key, and identity - then deploys Lethe as an **isolated, rootless container** (the default: Podman on Linux, Apple Container on macOS, installed for you if missing). Pass `--yolo` to skip the container and run natively on the host instead.
 
 Prefer to build from source?
 
@@ -49,9 +49,9 @@ lethe login openrouter   # API key only
 lethe login opencode-go  # API key only
 ```
 
-Each command writes credentials to `~/.lethe/credentials/` (subscription) or sets the API key in `~/.lethe/config/.env`, flips `LLM_PROVIDER`, and prompts for `LLM_MODEL` / `LLM_MODEL_AUX` (defaults from the curated catalog — accept with Enter, or type any other model id).
+Each command writes credentials to `~/.lethe/credentials/` (subscription) or sets the API key in `~/.lethe/config/.env`, flips `LLM_PROVIDER`, and prompts for `LLM_MODEL` / `LLM_MODEL_AUX` (defaults from the curated catalog - accept with Enter, or type any other model id).
 
-Sanity-check an existing setup any time with `lethe check` — it pings the model and exercises the embedding pipeline rather than just printing config.
+Sanity-check an existing setup any time with `lethe check` - it pings the model and exercises the embedding pipeline rather than just printing config.
 
 ## Architecture
 
@@ -124,7 +124,7 @@ Browser automation uses the external `agent-browser` CLI when browser tools are 
 
 ## Running
 
-Lethe's default home is an isolated, rootless container managed as a background service — `lethe init` sets that up for you. The CLI drives and inspects the whole deployment.
+Lethe's default home is an isolated, rootless container managed as a background service - `lethe init` sets that up for you. The CLI drives and inspects the whole deployment.
 
 **Deploy & manage**
 
@@ -151,19 +151,54 @@ lethe transport api --port 1373 --token    # configure the local HTTP API (power
 lethe transport telegram --enable          # configure + enable the Telegram bot
 ```
 
-Under the hood a single `lethe api` process hosts the HTTP/SSE transport **and** the Telegram poller (when `TELEGRAM_BOT_TOKEN` is set) in the same address space, sharing one Agent, one actor registry, and one Brainstem (the sole source of heartbeats / proactive emissions — transports just subscribe and forward). API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default) on `LETHE_API_PORT` (`1373`); use a reverse proxy for remote access.
+Under the hood a single `lethe api` process hosts the HTTP/SSE transport **and** the Telegram poller (when `TELEGRAM_BOT_TOKEN` is set) in the same address space, sharing one Agent, one actor registry, and one Brainstem (the sole source of heartbeats / proactive emissions - transports just subscribe and forward). API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default) on `LETHE_API_PORT` (`1373`); use a reverse proxy for remote access.
+
+Telegram Mini Apps need the HTTP server to be reachable by Telegram over public HTTPS. A typical deployment sets:
+
+```bash
+LETHE_API_HOST=0.0.0.0
+LETHE_API_PORT=1373
+LETHE_PUBLIC_BASE_URL=https://your-domain-or-ngrok
+TELEGRAM_ENABLED=true
+```
+
+Put Caddy, nginx, ngrok, or Cloudflare Tunnel in front of `lethe api` and point `LETHE_PUBLIC_BASE_URL` at that HTTPS origin. A direct public IP is not enough unless it has a Telegram-reachable HTTPS reverse proxy/tunnel. Standalone `lethe telegram run` only polls Telegram; it does not host Mini App routes unless a reachable `lethe api` server is also running.
+
+### Telegram Mini Apps
+
+Mini Apps are created from a Telegram chat with Lethe. To enable them:
+
+1. Run the API transport and expose it on public HTTPS.
+2. Set `TELEGRAM_BOT_TOKEN` and `LETHE_PUBLIC_BASE_URL=https://...`.
+3. Make sure Telegram can reach the same public origin that serves `lethe api`.
+
+A typical setup looks like this:
+
+```bash
+LETHE_API_HOST=0.0.0.0
+LETHE_API_PORT=1373
+LETHE_PUBLIC_BASE_URL=https://your-domain-or-ngrok
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=...
+```
+
+Then start Lethe and ask for a Mini App in Telegram, for example: "build a calculator" or "make it darker". Lethe will generate a self-contained HTML artifact, store it at `workspace/mini_apps/<name>/index.html`, and reply with an **Open Mini App** button.
+
+The artifact is served by the generic `/mini/<name>` route (no per-app route or token needed). If she needs the public URL for an existing artifact, she can call the `mini_app_public_url` tool.
+
+Mini App HTML is intentionally sandboxed: no external assets, no network calls, and no nested iframes. If the app needs to send data back to Lethe, it can call `Telegram.WebApp.sendData(JSON.stringify(payload))` from a button or action — the payload arrives in Lethe's context as parsed JSON with source button text, chat_id, message_id, and update metadata.
 
 **Configure on the fly**
 
 ```bash
 lethe status                   # version + current config, secrets censored (this is also the bare `lethe`)
-lethe identity set --name "…"  # change who she is (name + persona); `lethe identity edit` opens $EDITOR
+lethe identity set --name "..."  # change who she is (name + persona); `lethe identity edit` opens $EDITOR
 lethe model                    # show current model + catalog; `lethe model <id>` or `--pick` to change
 lethe login anthropic          # (re-)auth a single provider
 lethe completions fish         # print a shell completion script
 ```
 
-Add `--config <PATH>` to any command to point at a different `.env`. Low-level/debug subcommands (`memory`, `fs`, `sh`, `todo`, `agent`, …) are hidden but still work — `lethe help <command>`.
+Add `--config <PATH>` to any command to point at a different `.env`. Low-level/debug subcommands (`memory`, `fs`, `sh`, `todo`, `agent`, ...) are hidden but still work - `lethe help <command>`.
 
 ### Terminal UI
 
@@ -199,7 +234,7 @@ Lethe routes chat through `genai`. The runtime supports both API-key and subscri
 
 ### Subscription OAuth
 
-`lethe login openai` runs a device-code flow against `auth.openai.com`; tokens land in `~/.lethe/credentials/openai_oauth_tokens.json`. Calls then go to the Codex Responses API at `chatgpt.com/backend-api/codex/responses` using your ChatGPT Plus/Pro session — no `OPENAI_API_KEY` needed. Override the token file with `LETHE_OPENAI_OAUTH_TOKENS` or supply a raw token via `OPENAI_AUTH_TOKEN`.
+`lethe login openai` runs a device-code flow against `auth.openai.com`; tokens land in `~/.lethe/credentials/openai_oauth_tokens.json`. Calls then go to the Codex Responses API at `chatgpt.com/backend-api/codex/responses` using your ChatGPT Plus/Pro session - no `OPENAI_API_KEY` needed. Override the token file with `LETHE_OPENAI_OAUTH_TOKENS` or supply a raw token via `OPENAI_AUTH_TOKEN`.
 
 `lethe login anthropic` runs a PKCE browser flow against `claude.ai/oauth/authorize`; tokens land in `~/.lethe/credentials/anthropic_oauth_tokens.json`. Override with `LETHE_ANTHROPIC_OAUTH_TOKENS` or `ANTHROPIC_AUTH_TOKEN`.
 
@@ -207,10 +242,10 @@ Lethe routes chat through `genai`. The runtime supports both API-key and subscri
 
 Lethe stamps cache breakpoints on the system prompt (1h-TTL persistent prefix + 5min-TTL ephemeral tail) and forwards them through to:
 
-- **Anthropic direct** and **Anthropic OAuth** — cache_control is emitted on system blocks.
-- **OpenRouter** — cache_control is emitted on system content parts, which OpenRouter forwards to upstream providers that support explicit caching (Anthropic, Qwen, Gemini explicit). Providers with automatic prefix caching (OpenAI, Grok, Moonshot/Kimi, Groq, DeepSeek, Gemini implicit) ignore the field but benefit from the stable structured shape.
+- **Anthropic direct** and **Anthropic OAuth** - cache_control is emitted on system blocks.
+- **OpenRouter** - cache_control is emitted on system content parts, which OpenRouter forwards to upstream providers that support explicit caching (Anthropic, Qwen, Gemini explicit). Providers with automatic prefix caching (OpenAI, Grok, Moonshot/Kimi, Groq, DeepSeek, Gemini implicit) ignore the field but benefit from the stable structured shape.
 
-Both `genai`'s native OpenAI adapter and our vendored fork now carry the patch — see [`vendor/genai/LETHE_FORK.md`](vendor/genai/LETHE_FORK.md) for the patch surface.
+Both `genai`'s native OpenAI adapter and our vendored fork now carry the patch - see [`vendor/genai/LETHE_FORK.md`](vendor/genai/LETHE_FORK.md) for the patch surface.
 
 ## Configuration
 
@@ -292,7 +327,7 @@ lethe backup                              # ./lethe-backup-YYYYMMDD-HHMMSS.tar.g
 lethe backup --output ~/backups/lethe.tgz
 ```
 
-The archive is written with `0600` permissions because it contains the `.env` secrets — keep it private.
+The archive is written with `0600` permissions because it contains the `.env` secrets - keep it private.
 
 Restore an archive into the current `$LETHE_HOME`:
 
@@ -301,7 +336,7 @@ lethe restore lethe-backup-20260525-160522.tar.gz
 lethe restore archive.tgz --yes          # skip prompts (for scripts / non-TTY)
 ```
 
-Restore prompts before overwriting an existing **workspace** and again before overwriting an existing **`.env`** — declining either keeps the local copy intact. Memory and history are restored unconditionally (that is the point of restoring).
+Restore prompts before overwriting an existing **workspace** and again before overwriting an existing **`.env`** - declining either keeps the local copy intact. Memory and history are restored unconditionally (that is the point of restoring).
 
 ## Logging
 
@@ -392,7 +427,7 @@ scripts/package-release
 ls dist/
 ```
 
-Tagged pushes (`v*`) build GitHub release assets on a four-runner matrix — `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64` — each producing one `lethe-<target>.tar.gz` plus a sibling `lethe-migrate-<target>.tar.gz` (`install.sh` and `update.sh` consume the `lethe-*` assets from the latest release). Linux gnu binaries are built on `ubuntu-22.04(-arm)` for a glibc 2.35 floor; macOS binaries link only against system frameworks.
+Tagged pushes (`v*`) build GitHub release assets on a four-runner matrix - `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64` - each producing one `lethe-<target>.tar.gz` plus a sibling `lethe-migrate-<target>.tar.gz` (`install.sh` and `update.sh` consume the `lethe-*` assets from the latest release). Linux gnu binaries are built on `ubuntu-22.04(-arm)` for a glibc 2.35 floor; macOS binaries link only against system frameworks.
 
 Useful smoke checks:
 

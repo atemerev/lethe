@@ -29,6 +29,7 @@ futures-util = "0.3"
 genai = "0.5.3"
 glob = "0.3"
 hf-hub = "0.5"
+hmac = "0.12"
 kameo = "0.20"
 portable-pty = "0.8"
 pulldown-cmark = { version = "0.12", default-features = false }

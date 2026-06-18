@@ -515,6 +515,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                     empty_count,
                     "model stuck on empty responses, forcing wrap-up"
                 );
+<<<<<<< HEAD
                 circuit_breaker_reason = Some(format!(
                     "empty_response_stall ({empty_count} empty responses)"
                 ));
